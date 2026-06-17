@@ -93,5 +93,8 @@ per-session with `/lens-widget-toggle`.
 
 Inspired by these pi/dotfiles setups:
 
-- [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main)
-- [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles)
+- [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main) — vendored at [`.repos/dmmulroy-dotfiles`](.repos/dmmulroy-dotfiles)
+- [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles) — vendored at [`.repos/edusantosbrito-pi-dotfiles`](.repos/edusantosbrito-pi-dotfiles)
+
+Both are tracked as git submodules under `.repos/` for reference. Run
+`git submodule update --init` after cloning to populate them.
