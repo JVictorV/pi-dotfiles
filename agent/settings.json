@@ -4,6 +4,7 @@
   "defaultProvider": "anthropic",
   "defaultModel": "claude-opus-4-8",
   "defaultThinkingLevel": "high",
+  "httpIdleTimeoutMs": 60000,
   "enabledModels": [
     "openai-codex/gpt-5.5",
     "anthropic/claude-opus-4-8"
@@ -13,5 +14,6 @@
   ],
   "packages": [
     "npm:pi-lens"
-  ]
+  ],
+  "hideThinkingBlock": false
 }
