@@ -1,0 +1,17 @@
+# Dependencies (restored via `npm install`)
+node_modules/
+
+# Secrets — NEVER commit (API keys / credentials)
+agent/auth.json
+
+# Local conversation history
+agent/sessions/
+
+# Vendored tool binaries (large, platform-specific; pi fetches these)
+agent/bin/
+
+# pi-managed package installs (restored from settings.json "packages")
+agent/npm/
+
+# OS noise
+.DS_Store
