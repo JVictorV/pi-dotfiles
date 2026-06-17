@@ -6,7 +6,7 @@
  * session_start places this on top of pi-lens, which inserts its bar later).
  *
  * Single-line layout:
- *   model · thinking │ ~/dir (branch) +ins/-del • session      45%  90k/200k
+ *   model · thinking │ ~/dir (branch) ⇡#PR +ins/-del • session   45%  90k/200k
  *
  * Pi data sources (vs ccstatusline widgets):
  *   - model           -> ctx.model.id
@@ -15,6 +15,11 @@
  *   - session name    -> ctx.sessionManager.getSessionName()
  *   - git-branch      -> git rev-parse (cached; widgets get no footerData)
  *   - git-changes     -> git diff --numstat (cached)
+ *   - pr-link         -> gh pr view <branch> (cached; OSC 8 clickable link)
+ *
+ * The data layer (git + gh subprocesses, JSON decoding, state refresh) runs as
+ * Effect programs on detached fibers (`Effect.runFork`) so it never blocks the
+ * render path; failures are caught and reset state for the next tick.
  *   - context readout -> ctx.getContextUsage() (accurate tokens/window/percent)
  *
  * (voice-status from ccstatusline is omitted — it has no pi equivalent.)
@@ -28,7 +33,8 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Effect, Schema } from "effect";
 
 const THINKING_COLOR = {
 	minimal: "thinkingMinimal",
@@ -39,6 +45,50 @@ const THINKING_COLOR = {
 } as const;
 
 type GitState = { branch: string; added: number; removed: number };
+type PrState = { number: number; url: string } | null;
+
+/** Shape of `gh pr view --json number,url` output. */
+const PrInfo = Schema.Struct({ number: Schema.Number, url: Schema.String });
+
+/** Typed failure for any subprocess / decoding step in the data layer. */
+class StatusLineError extends Schema.TaggedErrorClass<StatusLineError>()("StatusLineError", {
+	reason: Schema.String,
+}) {}
+
+const statusLineError = (reason: string): StatusLineError => StatusLineError.make({ reason });
+
+/** Wrap `pi.exec` as an Effect, surfacing spawn rejections as StatusLineError. */
+const runExec = (pi: ExtensionAPI, cmd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
+	Effect.tryPromise({
+		try: () => pi.exec(cmd, [...args], { timeout: timeoutMs }),
+		catch: (cause) => statusLineError(`${cmd} exec failed: ${String(cause)}`),
+	});
+
+/** Branch + staged/unstaged line changes from git (non-zero exit → empty state). */
+const fetchGit = Effect.fn("fetchGit")(function* (pi: ExtensionAPI) {
+	const [branchRes, diffRes] = yield* Effect.all(
+		[
+			runExec(pi, "git", ["rev-parse", "--abbrev-ref", "HEAD"], 3000),
+			runExec(pi, "git", ["diff", "HEAD", "--numstat"], 3000),
+		],
+		{ concurrency: "unbounded" },
+	);
+	const branch = branchRes.code === 0 ? branchRes.stdout.trim().replace(/^HEAD$/, "") : "";
+	const changes = diffRes.code === 0 ? parseNumstat(diffRes.stdout) : { added: 0, removed: 0 };
+	return { branch, ...changes } satisfies GitState;
+});
+
+/** The open PR for `branch` via `gh`, or null when there is none / gh is absent. */
+const fetchPr = Effect.fn("fetchPr")(function* (pi: ExtensionAPI, branch: string) {
+	if (!branch) return null;
+	const res = yield* runExec(pi, "gh", ["pr", "view", branch, "--json", "number,url"], 5000);
+	if (res.code !== 0) return null;
+	const json = yield* Effect.try({
+		try: () => JSON.parse(res.stdout) as unknown,
+		catch: (cause) => statusLineError(`gh json parse failed: ${String(cause)}`),
+	});
+	return yield* Schema.decodeUnknownEffect(PrInfo)(json);
+});
 
 /** Sum staged + unstaged line changes from `git diff --numstat` output. */
 function parseNumstat(stdout: string): { added: number; removed: number } {
@@ -105,6 +155,7 @@ type LeftParts = {
 	dir: string;
 	session: string | undefined;
 	git: GitState;
+	pr: PrState;
 };
 
 /** Build the left side: model · thinking │ ~/dir (branch) +ins -del • session. */
@@ -118,6 +169,10 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 	segs.push(theme.fg("dim", shortenHome(p.dir)));
 	if (p.git.branch) {
 		segs.push(theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")"));
+	}
+	if (p.pr) {
+		const label = theme.fg("mdLink", `⇡#${p.pr.number}`);
+		segs.push(getCapabilities().hyperlinks ? hyperlink(label, p.pr.url) : label);
 	}
 	if (p.git.added || p.git.removed) {
 		const parts: string[] = [];
@@ -160,6 +215,7 @@ function renderLine(
 	ctx: ExtensionContext,
 	theme: Theme,
 	git: GitState,
+	pr: PrState,
 	width: number,
 ): string[] {
 	const usage = ctx.getContextUsage();
@@ -170,6 +226,7 @@ function renderLine(
 		dir: ctx.sessionManager.getCwd(),
 		session: ctx.sessionManager.getSessionName(),
 		git,
+		pr,
 	});
 	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
 	return [layout(theme, left, right, width)];
@@ -178,34 +235,47 @@ function renderLine(
 export default function (pi: ExtensionAPI) {
 	// Cached git state, refreshed off the render path.
 	let gitState: GitState = { branch: "", added: 0, removed: 0 };
+	let prState: PrState = null;
+	// Branch the cached PR was looked up for — avoids showing a stale PR after a switch.
+	let prBranch = "";
 	let requestRender: (() => void) | undefined;
 
-	async function refreshGit() {
-		try {
-			const [branchRes, diffRes] = await Promise.all([
-				pi.exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-					timeout: 3000,
-				}),
-				pi.exec("git", ["diff", "HEAD", "--numstat"], { timeout: 3000 }),
-			]);
-			const branch = branchRes.code === 0 ? branchRes.stdout.trim().replace(/^HEAD$/, "") : "";
-			const changes = diffRes.code === 0 ? parseNumstat(diffRes.stdout) : { added: 0, removed: 0 };
-			gitState = { branch, ...changes };
-		} catch {
-			gitState = { branch: "", added: 0, removed: 0 };
+	// Refresh git state, then — only when the branch changed (gh is comparatively
+	// slow) — the PR. A PR lookup failure degrades to "no PR" without discarding
+	// git state; a git failure resets everything. requestRender always fires.
+	const refresh = Effect.gen(function* () {
+		const git = yield* fetchGit(pi);
+		gitState = git;
+		if (git.branch !== prBranch) {
+			prState = yield* fetchPr(pi, git.branch).pipe(
+				Effect.catch(() => Effect.succeed<PrState>(null)),
+			);
+			prBranch = git.branch;
 		}
-		requestRender?.();
-	}
+	}).pipe(
+		Effect.catchCause(() =>
+			Effect.sync(() => {
+				gitState = { branch: "", added: 0, removed: 0 };
+				prState = null;
+				prBranch = "";
+			}),
+		),
+		Effect.ensuring(Effect.sync(() => requestRender?.())),
+	);
+
+	const runRefresh = (): void => {
+		Effect.runFork(refresh);
+	};
 
 	pi.on("session_start", (_event, ctx) => {
-		void refreshGit();
+		runRefresh();
 
 		// belowEditor widget → renders directly above the pi-lens diagnostics bar.
 		ctx.ui.setWidget(
 			"statusline",
 			(tui, theme) => {
 				requestRender = () => tui.requestRender();
-				const timer = setInterval(() => void refreshGit(), 5000);
+				const timer = setInterval(runRefresh, 5000);
 				return {
 					dispose() {
 						clearInterval(timer);
@@ -213,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 					},
 					invalidate() {},
 					render(width: number): string[] {
-						return renderLine(pi, ctx, theme, gitState, width);
+						return renderLine(pi, ctx, theme, gitState, prState, width);
 					},
 				};
 			},
@@ -230,5 +300,5 @@ export default function (pi: ExtensionAPI) {
 		}));
 	});
 
-	pi.on("turn_end", () => void refreshGit());
+	pi.on("turn_end", runRefresh);
 }
