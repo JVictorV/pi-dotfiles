@@ -10,14 +10,17 @@
  * - Skips if a name is already set (respects manual `/name`, `--name`, and
  *   resumed/named sessions).
  * - Skips in non-interactive one-shot modes (print/json) where naming is moot.
- * - Fire-and-forget: the model call never blocks the agent turn. On failure it
- *   leaves the session unnamed and allows a retry on the next prompt.
+ * - Fire-and-forget: the title program runs on a detached Effect fiber
+ *   (`Effect.runFork`) so the model call never blocks the agent turn. Any
+ *   failure or defect is caught (`Effect.catchCause`), leaving the session
+ *   unnamed and allowing a retry on the next prompt.
  * - Prefers a cheap, fast model (haiku) for this trivial labeling task and
  *   falls back to the currently active model when none is available/authed.
  */
 
 import { type Api, complete, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Effect, Schema } from "effect";
 
 const MAX_TITLE_LENGTH = 60;
 const MAX_PROMPT_CHARS = 2000;
@@ -37,11 +40,18 @@ type ResolvedModel = {
 	headers: Record<string, string> | undefined;
 };
 
+/** Typed failure for any step of title generation (resolution or completion). */
+class TitleError extends Schema.TaggedErrorClass<TitleError>()("TitleError", {
+	reason: Schema.String,
+}) {}
+
+const titleError = (reason: string): TitleError => TitleError.make({ reason });
+
 /**
  * Pick the first preferred cheap model that exists and is authed, falling back
- * to the active model. Returns the model plus its resolved credentials.
+ * to the active model. Fails with TitleError when none are authenticated.
  */
-const resolveTitleModel = async (ctx: ExtensionContext): Promise<ResolvedModel | undefined> => {
+const resolveTitleModel = Effect.fn("resolveTitleModel")(function* (ctx: ExtensionContext) {
 	const candidates: Array<Model<Api> | undefined> = [
 		...PREFERRED_TITLE_MODELS.map((m) => ctx.modelRegistry.find(m.provider, m.id)),
 		ctx.model,
@@ -49,13 +59,47 @@ const resolveTitleModel = async (ctx: ExtensionContext): Promise<ResolvedModel |
 
 	for (const model of candidates) {
 		if (!model) continue;
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		const auth = yield* Effect.tryPromise({
+			try: () => ctx.modelRegistry.getApiKeyAndHeaders(model),
+			catch: (cause) => titleError(`auth lookup failed: ${String(cause)}`),
+		});
 		if (auth?.ok && auth.apiKey) {
-			return { model, apiKey: auth.apiKey, headers: auth.headers };
+			return { model, apiKey: auth.apiKey, headers: auth.headers } satisfies ResolvedModel;
 		}
 	}
-	return undefined;
-};
+
+	return yield* Effect.fail(titleError("no authenticated title model available"));
+});
+
+/** Resolve a model, call it, and normalize the response into a clean title. */
+const generateTitle = Effect.fn("generateTitle")(function* (ctx: ExtensionContext, prompt: string) {
+	const resolved = yield* resolveTitleModel(ctx);
+
+	const response = yield* Effect.tryPromise({
+		try: () =>
+			complete(
+				resolved.model,
+				{
+					messages: [
+						{
+							role: "user" as const,
+							content: [{ type: "text" as const, text: buildPrompt(prompt) }],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{ apiKey: resolved.apiKey, headers: resolved.headers, reasoningEffort: "low" },
+			),
+		catch: (cause) => titleError(`completion failed: ${String(cause)}`),
+	});
+
+	const text = response.content
+		.filter((part): part is { type: "text"; text: string } => part.type === "text")
+		.map((part) => part.text)
+		.join(" ");
+
+	return cleanTitle(text);
+});
 
 /** Normalize the model's raw output into a clean one-line title. */
 const cleanTitle = (raw: string): string => {
@@ -105,43 +149,25 @@ export default function (pi: ExtensionAPI) {
 		// Mark before the async work so concurrent prompts don't double-fire.
 		attempted = true;
 
-		// Fire-and-forget: never block the agent turn on title generation.
-		void (async () => {
-			try {
-				const resolved = await resolveTitleModel(ctx);
-				if (!resolved) {
+		// Fire-and-forget: run the title program on a detached fiber so it never
+		// blocks the agent turn. On success set the name (re-checking that the
+		// user hasn't named it manually while we waited); on any failure or defect
+		// leave it unnamed and allow a retry on the next prompt.
+		const program = generateTitle(ctx, prompt).pipe(
+			Effect.tap((title) =>
+				Effect.sync(() => {
+					if (title && !pi.getSessionName()) {
+						pi.setSessionName(title);
+					}
+				}),
+			),
+			Effect.catchCause(() =>
+				Effect.sync(() => {
 					attempted = false;
-					return;
-				}
+				}),
+			),
+		);
 
-				const response = await complete(
-					resolved.model,
-					{
-						messages: [
-							{
-								role: "user" as const,
-								content: [{ type: "text" as const, text: buildPrompt(prompt) }],
-								timestamp: Date.now(),
-							},
-						],
-					},
-					{ apiKey: resolved.apiKey, headers: resolved.headers, reasoningEffort: "low" },
-				);
-
-				const text = response.content
-					.filter((part): part is { type: "text"; text: string } => part.type === "text")
-					.map((part) => part.text)
-					.join(" ");
-
-				const title = cleanTitle(text);
-				// Re-check: the user may have set a name manually while we waited.
-				if (title && !pi.getSessionName()) {
-					pi.setSessionName(title);
-				}
-			} catch {
-				// Best effort — leave unnamed and allow a retry next prompt.
-				attempted = false;
-			}
-		})();
+		Effect.runFork(program);
 	});
 }
