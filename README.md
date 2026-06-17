@@ -32,6 +32,43 @@ This hides the pi-lens diagnostics widget (the status line shows the same
 info). Diagnostics, formatting, and LSP keep running; toggle the widget
 per-session with `/lens-widget-toggle`.
 
+### Desktop notifications & sound (macOS)
+
+When the agent finishes a turn, `notify.ts` shows a desktop banner and
+`sound.ts` plays `agent/sounds/idle.ogg`. The banner uses
+[growlrrr](https://github.com/moltenbits/growlrrr) — a modern
+`UserNotifications`-based notifier. (`terminal-notifier`/`alerter` rely on the
+`NSUserNotification` API that Apple **removed** in macOS 26 Tahoe, so they
+silently no-op there.) Both extensions degrade gracefully without setup:
+`sound.ts` only needs `afplay` (built in), and `notify.ts` falls back to a
+silent `osascript` notification (shown under the "Script Editor" label) when
+`grrr` is missing.
+
+For the full experience (pi.dev-logo banner that reactivates the originating
+Ghostty tab on click), install and configure growlrrr:
+
+```bash
+# Build + install from source (avoids trusting the third-party brew tap)
+git clone https://github.com/moltenbits/growlrrr.git /tmp/growlrrr
+cd /tmp/growlrrr && make install   # installs growlrrr.app + the `grrr` CLI symlink
+hash -r
+
+# Authorize notifications, then create the custom "pi" app with the pi.dev icon
+grrr authorize
+grrr apps add --appId pi --appIcon ~/.pi/agent/assets/pi-icon.png
+```
+
+Then, in **System Settings → Notifications**, enable **Allow Notifications**
+and set the alert style to **Banners** (or Alerts) for the **pi** entry — it is
+a separate bundle from growlrrr, so it needs its own toggle. The first time a
+notification is clicked, macOS prompts once for Automation permission to
+control Ghostty (needed for `--reactivate` to focus the exact window/tab).
+
+> `notify.ts` calls `grrr` with a plain non-blocking `spawn` (no
+> `detached`/`unref`). growlrrr's delivery is async — detaching it into a new
+> session reaps the process before delivery completes and the banner never
+> appears.
+
 ## Layout
 
 ```
@@ -53,13 +90,14 @@ per-session with `/lens-widget-toggle`.
 
 `agent/extensions/*.ts` — auto-discovered and loaded on start (or `/reload`).
 
-| Extension            | Purpose                                                                                                                                                                                                           |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                            |
-| `whimsical.ts`       | Shows a random casino-themed "working" message each turn.                                                                                                                                                         |
-| `notify.ts`          | Fires an OSC 777 desktop notification when the agent finishes a turn.                                                                                                                                             |
-| `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed. |
-| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                          |
+| Extension            | Purpose                                                                                                                                                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                                                                               |
+| `whimsical.ts`       | Shows a random casino-themed "working" message each turn.                                                                                                                                                                                                            |
+| `notify.ts`          | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
+| `sound.ts`           | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
+| `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed.                                                    |
+| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                                             |
 
 ## Skills
 
