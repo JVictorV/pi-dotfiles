@@ -16,7 +16,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 │   ├── auth.json     # API keys — GITIGNORED, never commit
 │   ├── bin/ npm/ sessions/  # all gitignored, pi-restored
 ├── pi-lens/          # pi-lens config; symlinked to ~/.pi-lens/config.json
-├── .repos/           # reference submodules (effect) — NOT project code
+├── .repos/           # reference submodules (effect, dotfiles) — NOT project code
 └── package.json      # shared deps for extensions (effect)
 ```
 
@@ -56,4 +56,7 @@ ln -sf ~/.pi/pi-lens/config.json ~/.pi-lens/config.json   # link pi-lens config 
 
 - `settings.json` `"skills": ["!**/.agents/skills/**"]` disables `~/.agents/skills/` so copies here take precedence (avoids duplicates).
 - `git-interceptor` extension injects `GIT_EDITOR=true` etc. into every bash `git` command and blocks `--no-verify` — git will never open an editor in agent sessions.
-- The `.repos/effect` submodule tracks `Effect-TS/effect-smol` (folder renamed to `effect`); it's reference material, exclude from project-wide scans.
+- `.repos/` holds reference-only submodules; exclude all of them from project-wide scans:
+  - `.repos/effect` tracks `Effect-TS/effect-smol` (folder renamed to `effect`).
+  - `.repos/dmmulroy-dotfiles` tracks `dmmulroy/.dotfiles` (credited inspiration).
+  - `.repos/edusantosbrito-pi-dotfiles` tracks `EduSantosBrito/pi-dotfiles` (credited inspiration).
