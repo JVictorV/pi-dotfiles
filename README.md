@@ -20,12 +20,25 @@ pi   # follow the login prompt, or set provider API keys
 pi restores the rest automatically: packages listed in `settings.json`
 (`pi-lens`) are reinstalled, and tool binaries (`fd`, `rg`) are fetched on demand.
 
+Finally, link the pi-lens config (it lives in this repo but pi-lens reads it
+from `~/.pi-lens/`, which is outside the repo):
+
+```bash
+mkdir -p ~/.pi-lens
+ln -sf ~/.pi/pi-lens/config.json ~/.pi-lens/config.json
+```
+
+This hides the pi-lens diagnostics widget (the status line shows the same
+info). Diagnostics, formatting, and LSP keep running; toggle the widget
+per-session with `/lens-widget-toggle`.
+
 ## Layout
 
 ```
 ~/.pi/
 ├── package.json            # shared deps for extensions (effect)
 ├── tsconfig.json           # type resolution for extension editing
+├── pi-lens/                # pi-lens config (symlinked to ~/.pi-lens/)
 ├── agent/
 │   ├── settings.json       # models, theme, skill/package config
 │   ├── auth.json           # API keys (gitignored)
