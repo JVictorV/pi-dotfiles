@@ -2,7 +2,7 @@
 
 ## Root AGENTS.md (Full Treatment)
 
-```markdown
+````markdown
 # PROJECT NAME
 
 **Generated:** {YYYY-MM-DDTHH:MM:SSZ}
@@ -14,14 +14,14 @@
 
 \```
 {root}/
-├── {dir}/    # {non-obvious purpose only}
+├── {dir}/ # {non-obvious purpose only}
 └── {entry}
 \```
 
 ## WHERE TO LOOK
 
 | Task | Location |
-|------|----------|
+| ---- | -------- |
 
 ## CONVENTIONS
 
@@ -40,7 +40,7 @@
 ## KEY CONFIGS
 
 | Tool | Entry | Notes |
-|------|-------|-------|
+| ---- | ----- | ----- |
 
 ## UNIQUE STYLES
 
@@ -49,7 +49,7 @@
 ## NOTES
 
 {Gotchas, traps, things that burned someone}
-```
+````
 
 ### Quality Gates (Root)
 
@@ -75,7 +75,7 @@
 ## WHERE TO LOOK
 
 | Task | Location |
-|------|----------|
+| ---- | -------- |
 
 ## CONVENTIONS
 
@@ -96,28 +96,34 @@
 ## Section Guidelines
 
 ### STRUCTURE
+
 - Only show directories that aren't self-explanatory
 - Annotate with non-obvious purpose
 - Use `(AGENTS.md)` suffix to indicate child has its own file
 
 ### WHERE TO LOOK
+
 - Task-oriented: "I want to do X" → "look here"
 - Most valuable section — spend effort here
 - Include non-obvious locations (e.g., "Git hooks are in jj config, not .git/hooks")
 
 ### CONVENTIONS
+
 - Only deviations from language/framework defaults
 - "1 plugin per file" is worth noting; "use semicolons" is not (that's what the linter says)
 
 ### ANTI-PATTERNS
+
 - Things someone WILL try that WILL break
 - Each should have a brief reason or the correct alternative
 
 ### COMMANDS
+
 - Only non-obvious commands
 - Skip `npm install`, `cargo build` — include `dot stow`, `dot doctor`
 
 ### NOTES
+
 - Gotchas that burned someone
 - Order dependencies ("X must load before Y")
 - Environment quirks

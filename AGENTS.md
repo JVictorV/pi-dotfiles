@@ -22,14 +22,14 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 
 ## WHERE TO LOOK
 
-| Task | Location |
-|------|----------|
-| Add/edit an extension | `agent/extensions/*.ts` (auto-discovered on start / `/reload`) |
-| Change model/theme/thinking | `agent/settings.json` |
-| Add a skill | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
-| Sync Pocock skills from upstream | invoke `sync-pocock-skills` skill ("sync skills") |
-| Extension type defs | `tsconfig.json` resolves `@earendil-works/pi-*` |
-| pi-lens diagnostics config | `pi-lens/config.json` (read from `~/.pi-lens/`, not here) |
+| Task                             | Location                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| Add/edit an extension            | `agent/extensions/*.ts` (auto-discovered on start / `/reload`)            |
+| Change model/theme/thinking      | `agent/settings.json`                                                     |
+| Add a skill                      | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
+| Sync Pocock skills from upstream | invoke `sync-pocock-skills` skill ("sync skills")                         |
+| Extension type defs              | `tsconfig.json` resolves `@earendil-works/pi-*`                           |
+| pi-lens diagnostics config       | `pi-lens/config.json` (read from `~/.pi-lens/`, not here)                 |
 
 ## CONVENTIONS
 
@@ -50,6 +50,8 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 npm install   # restore extension deps (effect) after clone
 # settings packages (pi-lens) + bin tools (fd, rg) are pi-restored, not via npm
 ln -sf ~/.pi/pi-lens/config.json ~/.pi-lens/config.json   # link pi-lens config post-clone
+npm run lint          # oxlint over agent/extensions (our only authored TS)
+npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; format:check to verify
 ```
 
 ## NOTES

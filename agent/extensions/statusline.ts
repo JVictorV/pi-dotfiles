@@ -117,17 +117,12 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 	segs.push(theme.fg("dim", "│"));
 	segs.push(theme.fg("dim", shortenHome(p.dir)));
 	if (p.git.branch) {
-		segs.push(
-			theme.fg("dim", "(") +
-				theme.fg("mdLink", p.git.branch) +
-				theme.fg("dim", ")"),
-		);
+		segs.push(theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")"));
 	}
 	if (p.git.added || p.git.removed) {
 		const parts: string[] = [];
 		if (p.git.added) parts.push(theme.fg("toolDiffAdded", `+${p.git.added}`));
-		if (p.git.removed)
-			parts.push(theme.fg("toolDiffRemoved", `-${p.git.removed}`));
+		if (p.git.removed) parts.push(theme.fg("toolDiffRemoved", `-${p.git.removed}`));
 		segs.push(parts.join(" "));
 	}
 	if (p.session) {
@@ -143,31 +138,20 @@ function buildRight(
 	limit: number,
 	percent: number | null,
 ): string {
-	const raw =
-		percent ?? (tokens !== null && limit > 0 ? (tokens * 100) / limit : 0);
+	const raw = percent ?? (tokens !== null && limit > 0 ? (tokens * 100) / limit : 0);
 	const pct = Math.min(100, raw);
 	// Truncate (not round) to two decimals: xx.xx%.
 	const pctStr = (Math.trunc(pct * 100) / 100).toFixed(2);
 	const usedStr = tokens === null ? "?" : formatTokens(tokens);
 	return (
-		theme.fg(usageColor(pct), `${pctStr}%`) +
-		theme.fg("dim", ` ${usedStr}/${formatTokens(limit)}`)
+		theme.fg(usageColor(pct), `${pctStr}%`) + theme.fg("dim", ` ${usedStr}/${formatTokens(limit)}`)
 	);
 }
 
 /** Join left/right into a single padded line clamped to width with ellipsis. */
-function layout(
-	theme: Theme,
-	left: string,
-	right: string,
-	width: number,
-): string {
+function layout(theme: Theme, left: string, right: string, width: number): string {
 	const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-	return truncateToWidth(
-		left + " ".repeat(gap) + right,
-		width,
-		theme.fg("dim", "…"),
-	);
+	return truncateToWidth(left + " ".repeat(gap) + right, width, theme.fg("dim", "…"));
 }
 
 /** Assemble the full status line for the given render width. */
@@ -187,12 +171,7 @@ function renderLine(
 		session: ctx.sessionManager.getSessionName(),
 		git,
 	});
-	const right = buildRight(
-		theme,
-		usage?.tokens ?? null,
-		limit,
-		usage?.percent ?? null,
-	);
+	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
 	return [layout(theme, left, right, width)];
 }
 
@@ -209,14 +188,8 @@ export default function (pi: ExtensionAPI) {
 				}),
 				pi.exec("git", ["diff", "HEAD", "--numstat"], { timeout: 3000 }),
 			]);
-			const branch =
-				branchRes.code === 0
-					? branchRes.stdout.trim().replace(/^HEAD$/, "")
-					: "";
-			const changes =
-				diffRes.code === 0
-					? parseNumstat(diffRes.stdout)
-					: { added: 0, removed: 0 };
+			const branch = branchRes.code === 0 ? branchRes.stdout.trim().replace(/^HEAD$/, "") : "";
+			const changes = diffRes.code === 0 ? parseNumstat(diffRes.stdout) : { added: 0, removed: 0 };
 			gitState = { branch, ...changes };
 		} catch {
 			gitState = { branch: "", added: 0, removed: 0 };

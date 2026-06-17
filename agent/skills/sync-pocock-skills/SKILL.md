@@ -109,6 +109,7 @@ After applying changes:
 3. Include the skill diffs in the final response. For short diffs, paste the full fenced `diff`. For very long diffs, include `git diff --stat`, the important hunks, and say that the full diff is available.
 
 Report to the user:
+
 - Skills added / excluded
 - Skills updated (with/without patch re-application)
 - New patches created
@@ -130,12 +131,12 @@ disable-model-invocation: true
 
 When replacing Claude Code-specific patterns, use these pi equivalents:
 
-| Claude Code pattern | Pi replacement |
-|---|---|
-| `Agent tool with subagent_type=Explore` | `walk the codebase using your tools (read, grep, find, bash)` |
-| `Spawn N sub-agents in parallel` | `Produce N radically different [X] sequentially, working from the original brief independently` |
-| `sub-agent` / `subagent` (generic) | Remove or replace with direct agent instructions |
-| `CLAUDE.md` checked first | `AGENTS.md` checked first, `CLAUDE.md` as fallback |
+| Claude Code pattern                     | Pi replacement                                                                                  |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `Agent tool with subagent_type=Explore` | `walk the codebase using your tools (read, grep, find, bash)`                                   |
+| `Spawn N sub-agents in parallel`        | `Produce N radically different [X] sequentially, working from the original brief independently` |
+| `sub-agent` / `subagent` (generic)      | Remove or replace with direct agent instructions                                                |
+| `CLAUDE.md` checked first               | `AGENTS.md` checked first, `CLAUDE.md` as fallback                                              |
 
 ## File layout
 

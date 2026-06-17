@@ -53,13 +53,13 @@ per-session with `/lens-widget-toggle`.
 
 `agent/extensions/*.ts` — auto-discovered and loaded on start (or `/reload`).
 
-| Extension | Purpose |
-|-----------|---------|
-| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing. |
-| `whimsical.ts` | Shows a random casino-themed "working" message each turn. |
-| `notify.ts` | Fires an OSC 777 desktop notification when the agent finishes a turn. |
-| `stack.ts` | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed. |
-| `statusline.ts` | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer. |
+| Extension            | Purpose                                                                                                                                                                                                           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                            |
+| `whimsical.ts`       | Shows a random casino-themed "working" message each turn.                                                                                                                                                         |
+| `notify.ts`          | Fires an OSC 777 desktop notification when the agent finishes a turn.                                                                                                                                             |
+| `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed. |
+| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                          |
 
 ## Skills
 

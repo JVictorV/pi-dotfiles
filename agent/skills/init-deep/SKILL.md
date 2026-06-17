@@ -82,12 +82,12 @@ See [SCORING.md](SCORING.md) for the full matrix and decision rules.
 
 Quick version:
 
-| Score | Action |
-|-------|--------|
-| Root (.) | ALWAYS create |
-| >15 | Create AGENTS.md |
-| 8–15 | Create if distinct domain |
-| <8 | Skip (parent covers) |
+| Score    | Action                    |
+| -------- | ------------------------- |
+| Root (.) | ALWAYS create             |
+| >15      | Create AGENTS.md          |
+| 8–15     | Create if distinct domain |
+| <8       | Skip (parent covers)      |
 
 **Present the scored list to the user via `interview`** — let them confirm/override locations before generating.
 
@@ -100,6 +100,7 @@ Quick version:
 See [TEMPLATES.md](TEMPLATES.md) for the root and subdirectory templates.
 
 Key rules:
+
 - **If AGENTS.md exists** → use `edit` tool
 - **If it does NOT exist** → use `write` tool
 - Root: 50–150 lines, full treatment
@@ -113,6 +114,7 @@ Key rules:
 **Mark "review" in_progress.**
 
 For each generated file:
+
 - Remove generic advice (applies to ALL projects)
 - Remove parent duplicates (child never repeats parent)
 - Trim to size limits

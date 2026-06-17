@@ -1,13 +1,21 @@
 {
-  "name": "pi-config",
-  "private": true,
-  "description": "Shared dependencies for ~/.pi extensions",
-  "dependencies": {
-    "effect": "^4.0.0-beta.84"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-ai": "^0.79.6",
-    "@earendil-works/pi-coding-agent": "^0.79.6",
-    "@earendil-works/pi-tui": "^0.79.6"
-  }
+	"name": "pi-config",
+	"private": true,
+	"description": "Shared dependencies for ~/.pi extensions",
+	"scripts": {
+		"lint": "oxlint agent/extensions",
+		"lint:fix": "oxlint --fix agent/extensions",
+		"format": "oxfmt . '!.repos/**'",
+		"format:check": "oxfmt --check . '!.repos/**'"
+	},
+	"dependencies": {
+		"effect": "^4.0.0-beta.84"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "^0.79.6",
+		"@earendil-works/pi-coding-agent": "^0.79.6",
+		"@earendil-works/pi-tui": "^0.79.6",
+		"oxfmt": "^0.55.0",
+		"oxlint": "^1.70.0"
+	}
 }
