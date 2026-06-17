@@ -3,6 +3,7 @@
 	"private": true,
 	"description": "Shared dependencies for ~/.pi extensions",
 	"scripts": {
+		"typecheck": "tsc --noEmit -p tsconfig.json",
 		"lint": "oxlint agent/extensions",
 		"lint:fix": "oxlint --fix agent/extensions",
 		"format": "oxfmt . '!.repos/**'",
@@ -16,6 +17,7 @@
 		"@earendil-works/pi-coding-agent": "^0.79.6",
 		"@earendil-works/pi-tui": "^0.79.6",
 		"oxfmt": "^0.55.0",
-		"oxlint": "^1.70.0"
+		"oxlint": "^1.70.0",
+		"typescript": "^6.0.3"
 	}
 }
