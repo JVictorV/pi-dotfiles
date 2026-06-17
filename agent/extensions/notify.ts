@@ -6,10 +6,20 @@
  *
  * Prefers `growlrrr` (the `grrr` CLI), a modern UserNotifications-based helper
  * that actually works on macOS 26+ (terminal-notifier relies on the removed
- * NSUserNotification API and silently no-ops on Tahoe). `--reactivate` makes a
- * click jump back to the originating Ghostty window/tab. Falls back to
+ * NSUserNotification API and silently no-ops on Tahoe). Falls back to
  * `osascript display notification` (shows under the "Script Editor" label)
  * when grrr is not installed.
+ *
+ * Click target: grrr's `--reactivate` only raises the Ghostty *app*, landing on
+ * whatever tab was last active — not necessarily the one running pi. When the
+ * terminal is Ghostty AND the session has a name, we instead use `--execute`
+ * to run an AppleScript that activates Ghostty and clicks the "Window" menu
+ * item whose title contains the session name. Ghostty lists every tab/surface
+ * as a separate Window-menu entry (titled `π - <session> - <dir>` via shell
+ * integration), so clicking that entry focuses the exact originating tab, even
+ * across windows and spaces. If the title can't be matched the AppleScript has
+ * already activated Ghostty, so it degrades to the old reactivate behavior.
+ * Unnamed sessions / non-Ghostty terminals fall back to `--reactivate`.
  *
  * The notification is always shown SILENTLY (`--sound none`); the custom audio
  * (idle.ogg) is played separately by sound.ts via afplay.
@@ -36,6 +46,25 @@ const grrrPath = ["/usr/local/bin/grrr", "/opt/homebrew/bin/grrr"].find((candida
 const escapeAppleScript = (text: string): string =>
 	text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
+/** Wrap a string as a POSIX-sh single-quoted literal (for `sh -c`, which grrr uses). */
+const shSingleQuote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`;
+
+/** True when running inside Ghostty (Window-menu tab focusing only applies there). */
+const isGhostty = process.env.TERM_PROGRAM === "ghostty";
+
+/**
+ * Build a `sh -c` command that activates Ghostty and clicks the Window-menu
+ * entry whose title contains `sessionName`, focusing that exact tab/surface.
+ * Requires Accessibility permission for the terminal (System Events scripting).
+ */
+const buildTabFocusCommand = (sessionName: string): string => {
+	const focus =
+		'tell application "System Events" to tell process "Ghostty" to tell menu 1 of ' +
+		'menu bar item "Window" of menu bar 1 to click (first menu item whose name ' +
+		`contains "${escapeAppleScript(sessionName)}")`;
+	return `osascript -e ${shSingleQuote('tell application "Ghostty" to activate')} -e ${shSingleQuote(focus)}`;
+};
+
 /** Non-blocking spawn that never blocks pi or throws. Errors ignored. */
 const spawnQuiet = (command: string, args: string[]): void => {
 	try {
@@ -51,21 +80,21 @@ const spawnQuiet = (command: string, args: string[]): void => {
  * reactivate the originating terminal) when available, otherwise falls back to
  * a silent osascript notification.
  */
-const notify = (title: string, body: string): void => {
+const notify = (title: string, body: string, focusName: string | null): void => {
 	if (grrrPath) {
 		// --appId pi: custom growlrrr app bundle (~/.growlrrr/apps/pi.app) so the
 		// notification shows the pi.dev logo. Create/update via:
 		//   grrr apps add --appId pi --appIcon ~/.pi/agent/assets/pi-icon.png
-		spawnQuiet(grrrPath, [
-			"--appId",
-			"pi",
-			"--title",
-			title,
-			"--sound",
-			"none",
-			"--reactivate",
-			body || title,
-		]);
+		const args = ["--appId", "pi", "--title", title, "--sound", "none"];
+		// Focus the exact originating tab when we can (Ghostty + named session);
+		// otherwise just raise the app.
+		if (isGhostty && focusName) {
+			args.push("--execute", buildTabFocusCommand(focusName));
+		} else {
+			args.push("--reactivate");
+		}
+		args.push(body || title);
+		spawnQuiet(grrrPath, args);
 		return;
 	}
 	const script = `display notification "${escapeAppleScript(body)}" with title "${escapeAppleScript(title)}"`;
@@ -149,7 +178,8 @@ const formatNotification = (
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (event) => {
 		const lastText = extractLastAssistantText(event.messages ?? []);
-		const { title, body } = formatNotification(lastText, pi.getSessionName());
-		notify(title, body);
+		const sessionName = pi.getSessionName()?.trim() || null;
+		const { title, body } = formatNotification(lastText, sessionName ?? undefined);
+		notify(title, body, sessionName);
 	});
 }
