@@ -22,6 +22,18 @@ Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`.
 - Hook into events via `pi.on("tool_call" | "session_start" | ...)`; return `{ block: true, reason }` to reject a tool call, or mutate `event.input` to rewrite it.
 - Use `isToolCallEventType("bash", event)` to narrow before touching `event.input.command`.
 - `stack.ts` needs `effect` (`Effect`, `Schema`) — the only extension with a real runtime dep; it lives in root `package.json`.
+- Use `effect@beta` for new non-trivial extension logic. Keep any added `@effect/*` packages version-aligned.
+
+## EFFECT
+
+Use Effect for async workflows, typed errors, dependency injection, resource management, retries, testing, and observability.
+
+Preferred patterns:
+
+- Prefer `Effect.fn` for reusable business logic that returns `Effect`.
+- Use typed errors with `Effect.fail`, `Effect.catchTag`, and schema-defined errors where useful.
+- Use services and layers when dependencies grow beyond a small local helper.
+- Consult the Effect skill references and `.repos/effect` before implementing complex Effect patterns.
 
 ## ANTI-PATTERNS
 
@@ -29,3 +41,4 @@ Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`.
 - **Allowing `--no-verify`** — `git-interceptor` blocks it deliberately; never add an escape hatch.
 - **Widget registration order matters** — `statusline` registers at `session_start` so it sits above the pi-lens bar (later registrant renders lower). Don't move its registration.
 - **OSC notifications** — `notify.ts` uses OSC 777; unsupported on Kitty/Terminal.app/Alacritty. Don't assume delivery.
+- **`any`, unsafe `as` casts, or thrown exceptions in new Effect code** — use typed errors and `Effect.fail`; model failures in the error channel instead.
