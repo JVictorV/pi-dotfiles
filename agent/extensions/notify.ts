@@ -128,22 +128,28 @@ const simpleMarkdown = (text: string, width = 80): string => {
 	return markdown.render(width).join("\n");
 };
 
-const formatNotification = (text: string | null): { title: string; body: string } => {
+const formatNotification = (
+	text: string | null,
+	sessionTitle: string | undefined,
+): { title: string; body: string } => {
+	// Prefer the session's generated title (see session-title.ts); fall back to
+	// the pi symbol when the session is still unnamed.
+	const title = sessionTitle?.trim() || "π";
 	const simplified = text ? simpleMarkdown(text) : "";
 	const normalized = simplified.replace(/\s+/g, " ").trim();
 	if (!normalized) {
-		return { title: "Ready for input", body: "" };
+		return { title, body: "" };
 	}
 
 	const maxBody = 200;
 	const body = normalized.length > maxBody ? `${normalized.slice(0, maxBody - 1)}…` : normalized;
-	return { title: "π", body };
+	return { title, body };
 };
 
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (event) => {
 		const lastText = extractLastAssistantText(event.messages ?? []);
-		const { title, body } = formatNotification(lastText);
+		const { title, body } = formatNotification(lastText, pi.getSessionName());
 		notify(title, body);
 	});
 }
