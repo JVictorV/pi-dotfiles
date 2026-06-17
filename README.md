@@ -70,3 +70,10 @@ pi restores the rest automatically: packages listed in `settings.json`
   up from `agent/extensions/*.ts` to `~/.pi/node_modules`.
 - pi skips `node_modules/` during extension/skill discovery, so the root
   `node_modules` is safe alongside the config.
+
+## Credits
+
+Inspired by these pi/dotfiles setups:
+
+- [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main)
+- [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles)
