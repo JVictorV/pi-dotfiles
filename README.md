@@ -25,6 +25,7 @@ pi restores the rest automatically: packages listed in `settings.json`
 ```
 ~/.pi/
 ├── package.json            # shared deps for extensions (effect)
+├── tsconfig.json           # type resolution for extension editing
 ├── agent/
 │   ├── settings.json       # models, theme, skill/package config
 │   ├── auth.json           # API keys (gitignored)
@@ -45,6 +46,7 @@ pi restores the rest automatically: packages listed in `settings.json`
 | `whimsical.ts` | Shows a random casino-themed "working" message each turn. |
 | `notify.ts` | Fires an OSC 777 desktop notification when the agent finishes a turn. |
 | `stack.ts` | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed. |
+| `statusline.ts` | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer. |
 
 ## Skills
 
@@ -68,6 +70,9 @@ pi restores the rest automatically: packages listed in `settings.json`
 - **Never commit `agent/auth.json`** — it contains provider API keys.
 - Extension deps live in the root `package.json`; node resolves them by walking
   up from `agent/extensions/*.ts` to `~/.pi/node_modules`.
+- The `@earendil-works/pi-*` packages are `devDependencies` (types only; pi
+  supplies them at runtime). `tsconfig.json` enables type-checking extensions
+  while editing.
 - pi skips `node_modules/` during extension/skill discovery, so the root
   `node_modules` is safe alongside the config.
 
