@@ -9,12 +9,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import lspExtension from "../agent/extensions/lsp";
+import { LspPermissionStore } from "../agent/extensions/lsp/permissions";
 import { LspRuntime } from "../agent/extensions/lsp/runtime";
 import { registerLspTool } from "../agent/extensions/lsp/tool";
 import type { LspConfig } from "../agent/extensions/lsp/types";
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const fakeServerPath = join(fixtureDir, "fixtures", "fake-lsp-server.mjs");
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface TestProject {
 	cwd: string;
@@ -141,6 +143,34 @@ describe("LSP Extension", () => {
 		expect(project.runtime.status()).toMatchObject([{ serverId: "fake", status: "connected" }]);
 	});
 
+	test("concurrent LSP requests share one spawn permission decision", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const [first, second] = await Promise.all([
+			tool.execute(
+				"tool-call-concurrent-1",
+				{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				project.ctx,
+			),
+			tool.execute(
+				"tool-call-concurrent-2",
+				{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				project.ctx,
+			),
+		]);
+
+		expect(first.content[0]?.text).toContain("hover for file://");
+		expect(second.content[0]?.text).toContain("hover for file://");
+		expect(project.confirm).toHaveBeenCalledOnce();
+		expect(project.runtime.status()).toHaveLength(1);
+	});
+
 	test("lsp tool converts language server locations into editor-friendly one-based positions", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);
@@ -178,6 +208,23 @@ describe("LSP Extension", () => {
 
 		expect(result.content[0]?.text).toContain("Diagnostics:");
 		expect(result.content[0]?.text).toContain("main.fake:1:1 [error] fake diagnostic");
+	});
+
+	test("diagnostics operation supports document pull diagnostics", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_PULL_DIAGNOSTICS_ONLY: "1" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-pull-diagnostics",
+			{ operation: "diagnostics", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("Diagnostics:");
+		expect(result.content[0]?.text).toContain("main.fake:1:1 [error] fake pull diagnostic");
 	});
 
 	test("remaining navigation operations return formatted results and honor limits", async () => {
@@ -285,6 +332,29 @@ describe("LSP Extension", () => {
 		await listeners.get("session_shutdown")?.({}, ctx);
 	});
 
+	test("runtime notifies when LSP client status changes", async () => {
+		const project = await createProject();
+		const onStatusChange = vi.fn();
+		const runtime = new LspRuntime({
+			cwd: project.cwd,
+			config: createConfig(),
+			onStatusChange,
+		});
+		runtimes.push(runtime);
+		const tool = registerTool(runtime);
+
+		await tool.execute(
+			"tool-call-status-change",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(onStatusChange).toHaveBeenCalled();
+		expect(runtime.status()).toMatchObject([{ serverId: "fake", status: "connected" }]);
+	});
+
 	test("touchRunningFile syncs changed file contents into an existing LSP client", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);
@@ -310,6 +380,60 @@ describe("LSP Extension", () => {
 		);
 
 		expect(result.content[0]?.text).toContain("text=changedSymbol()");
+	});
+
+	test("document sync sends watched-file create and change notifications", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_REPORT_WATCHED: "1" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const opened = await tool.execute(
+			"tool-call-watch-1",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(opened.content[0]?.text).toContain("watched=1");
+
+		await writeFile(project.filePath, "watchedSymbol()\n", "utf8");
+		await project.runtime.touchRunningFile("main.fake");
+
+		const changed = await tool.execute(
+			"tool-call-watch-2",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(changed.content[0]?.text).toContain("watched=2");
+	});
+
+	test("document sync honors incremental text document sync mode", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_REQUIRE_INCREMENTAL_CHANGE: "1" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		await tool.execute(
+			"tool-call-incremental-1",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		await writeFile(project.filePath, "incrementalSymbol()\n", "utf8");
+		await project.runtime.touchRunningFile("main.fake");
+
+		const changed = await tool.execute(
+			"tool-call-incremental-2",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(changed.content[0]?.text).toContain("text=incrementalSymbol()");
+		expect(changed.content[0]?.text).not.toContain("missing incremental range");
 	});
 
 	test("malformed location responses fail visibly", async () => {
@@ -342,6 +466,32 @@ describe("LSP Extension", () => {
 				project.ctx,
 			),
 		).rejects.toThrow("definition is not supported by available LSP clients");
+	});
+
+	test("request errors do not mark language servers broken", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_HOVER_ERROR_COUNT: "1" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		await expect(
+			tool.execute(
+				"tool-call-request-error-1",
+				{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				project.ctx,
+			),
+		).rejects.toThrow("fake hover failed");
+		expect(project.runtime.status()).toMatchObject([{ serverId: "fake", status: "connected" }]);
+
+		const result = await tool.execute(
+			"tool-call-request-error-2",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(result.content[0]?.text).toContain("hover for file://");
 	});
 
 	test("initialization failures are reported instead of mislabeled as missing binaries", async () => {
@@ -378,6 +528,28 @@ describe("LSP Extension", () => {
 		await once(child, "exit");
 
 		await expect(project.runtime.shutdown()).resolves.toBeUndefined();
+	});
+
+	test("shutdown prevents in-flight spawns from installing clients", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_INITIALIZE_DELAY_MS: "100" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const pending = tool.execute(
+			"tool-call-shutdown-inflight",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		await wait(20);
+		await expect(project.runtime.shutdown()).resolves.toBeUndefined();
+		await expect(pending).rejects.toMatchObject({
+			_tag: "LspRuntimeShuttingDown",
+			reason: "LSP runtime is shutting down.",
+		});
+		expect(project.runtime.status()).toEqual([]);
 	});
 
 	test("crashed language servers are skipped until restart", async () => {
@@ -457,5 +629,22 @@ describe("LSP Extension", () => {
 
 		expect(result.content[0]?.text).toContain("hover for file://");
 		expect(secondConfirm).not.toHaveBeenCalled();
+	});
+
+	test("permission store preserves concurrent writes", async () => {
+		const project = await createProject();
+		const left = await LspPermissionStore.load();
+		const right = await LspPermissionStore.load();
+
+		await Promise.all([
+			left.set(project.cwd, "typescript", "allow"),
+			right.set(project.cwd, "eslint", "deny"),
+		]);
+
+		const stored = await LspPermissionStore.load();
+		expect(stored.entries(project.cwd)).toEqual([
+			["eslint", "deny"],
+			["typescript", "allow"],
+		]);
 	});
 });

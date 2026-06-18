@@ -1,8 +1,10 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Deferred, Effect } from "effect";
 
 import { LspClient, type LspClientStatus } from "./client";
+import { lspRuntimeShuttingDown } from "./errors";
 import { findRepositoryRoot } from "./paths";
 import { LspPermissionStore } from "./permissions";
 import {
@@ -39,6 +41,7 @@ export interface ClientResolution {
 interface RuntimeOptions {
 	cwd: string;
 	config: LspConfig;
+	onStatusChange?: () => void;
 }
 
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
@@ -52,11 +55,14 @@ export class LspRuntime {
 	private readonly clients = new Map<string, LspClient>();
 	private readonly clientDefinitions = new Map<string, LspServerDefinition>();
 	private readonly broken = new Map<string, string>();
+	private readonly spawning = new Map<string, Deferred.Deferred<LspClient | undefined, Error>>();
+	private readonly onStatusChange?: () => void;
 	private shuttingDown = false;
 
 	constructor(options: RuntimeOptions) {
 		this.cwd = options.cwd;
 		this.registry = buildServerRegistry(options.config);
+		this.onStatusChange = options.onStatusChange;
 	}
 
 	serverIds(): ReadonlyArray<string> {
@@ -118,6 +124,13 @@ export class LspRuntime {
 				await client?.shutdown();
 			}),
 		);
+		if (keys.length > 0) this.notifyStatusChange();
+
+		for (const key of this.spawning.keys()) {
+			if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
+				this.spawning.delete(key);
+			}
+		}
 
 		for (const key of this.broken.keys()) {
 			if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
@@ -132,6 +145,8 @@ export class LspRuntime {
 		const clients = [...this.clients.values()];
 		this.clients.clear();
 		this.clientDefinitions.clear();
+		this.spawning.clear();
+		this.notifyStatusChange();
 		await Promise.all(clients.map((client) => client.shutdown()));
 	}
 
@@ -141,6 +156,7 @@ export class LspRuntime {
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Promise<ClientResolution> {
+		if (this.shuttingDown) throw lspRuntimeShuttingDown();
 		const file = resolve(ctx.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 		const matches = await this.matchingServers(file, capability);
 		const clients: LocatedClient[] = [];
@@ -152,7 +168,7 @@ export class LspRuntime {
 			if (existing !== undefined) {
 				if (isBrokenClient(existing)) {
 					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-					this.broken.set(key, reason);
+					this.markBroken(key, reason);
 					unavailable.push({ serverId: match.definition.id, reason });
 					continue;
 				}
@@ -160,7 +176,7 @@ export class LspRuntime {
 				await existing.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
 				if (isBrokenClient(existing)) {
 					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-					this.broken.set(key, reason);
+					this.markBroken(key, reason);
 					unavailable.push({ serverId: match.definition.id, reason });
 					continue;
 				}
@@ -174,30 +190,62 @@ export class LspRuntime {
 				continue;
 			}
 
+			const inflight = this.spawning.get(key);
+			if (inflight !== undefined) {
+				const client = await Effect.runPromise(Deferred.await(inflight));
+				if (this.shuttingDown) throw lspRuntimeShuttingDown();
+				if (client === undefined) {
+					const reason =
+						this.broken.get(key) ??
+						`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
+					unavailable.push({ serverId: match.definition.id, reason });
+					continue;
+				}
+				await client.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
+				clients.push({ client, definition: match.definition });
+				continue;
+			}
+
 			if (!options.prompt) {
 				continue;
 			}
 
-			const permission = await this.permissionFor(match.definition, match.root, ctx);
-			if (permission !== "allow") {
-				unavailable.push({
-					serverId: match.definition.id,
-					reason: `Spawn permission is ${permission}.`,
-				});
-				continue;
-			}
+			const deferred = Deferred.makeUnsafe<LspClient | undefined, Error>();
+			this.spawning.set(key, deferred);
+			try {
+				const permission = await this.permissionFor(match.definition, match.root, ctx);
+				if (this.shuttingDown) throw lspRuntimeShuttingDown();
+				if (permission !== "allow") {
+					await Effect.runPromise(Deferred.succeed(deferred, undefined));
+					unavailable.push({
+						serverId: match.definition.id,
+						reason: `Spawn permission is ${permission}.`,
+					});
+					continue;
+				}
 
-			const client = await this.spawnClient(match.definition, match.root, file);
-			if (client === undefined) {
-				const reason =
-					this.broken.get(key) ??
-					`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
-				unavailable.push({ serverId: match.definition.id, reason });
-				continue;
-			}
+				const client = await this.spawnClient(match.definition, match.root, file);
+				if (this.shuttingDown) throw lspRuntimeShuttingDown();
+				await Effect.runPromise(Deferred.succeed(deferred, client));
+				if (client === undefined) {
+					const reason =
+						this.broken.get(key) ??
+						`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
+					unavailable.push({ serverId: match.definition.id, reason });
+					continue;
+				}
 
-			await client.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
-			clients.push({ client, definition: match.definition });
+				await client.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
+				clients.push({ client, definition: match.definition });
+			} catch (error) {
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				await Effect.runPromise(Deferred.fail(deferred, normalized));
+				throw normalized;
+			} finally {
+				if (this.spawning.get(key) === deferred) {
+					this.spawning.delete(key);
+				}
+			}
 		}
 
 		return { clients, unavailable };
@@ -210,13 +258,13 @@ export class LspRuntime {
 				const key = clientKey(client.root, client.serverId);
 				const definition = this.clientDefinitions.get(key);
 				if (isBrokenClient(client)) {
-					this.broken.set(key, `${client.label} server is broken.`);
+					this.markBroken(key, `${client.label} server is broken.`);
 					return;
 				}
 				if (definition === undefined || !matchesExtension(definition, file)) return;
 				await client.open(file, false).catch(() => undefined);
 				if (isBrokenClient(client)) {
-					this.broken.set(key, `${client.label} server is broken.`);
+					this.markBroken(key, `${client.label} server is broken.`);
 				}
 			}),
 		);
@@ -261,6 +309,16 @@ export class LspRuntime {
 		return permission;
 	}
 
+	private markBroken(key: string, reason: string): void {
+		const previous = this.broken.get(key);
+		this.broken.set(key, reason);
+		if (previous !== reason) this.notifyStatusChange();
+	}
+
+	private notifyStatusChange(): void {
+		this.onStatusChange?.();
+	}
+
 	private async spawnClient(
 		definition: LspServerDefinition,
 		root: string,
@@ -269,20 +327,25 @@ export class LspRuntime {
 		const key = clientKey(root, definition.id);
 		const handle = await spawnServer(definition, root, this.cwd).catch((error: unknown) => {
 			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
-			this.broken.set(key, `${reason} (${file})`);
+			this.markBroken(key, `${reason} (${file})`);
 			return undefined;
 		});
 		if (handle === undefined) return undefined;
 
 		try {
 			const client = await LspClient.create(handle);
+			if (this.shuttingDown) {
+				await client.shutdown();
+				return undefined;
+			}
 			this.clients.set(key, client);
 			this.clientDefinitions.set(key, definition);
+			this.notifyStatusChange();
 			return client;
 		} catch (error) {
 			if (!handle.process.killed) handle.process.kill("SIGTERM");
 			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
-			this.broken.set(key, `${reason} (${file})`);
+			this.markBroken(key, `${reason} (${file})`);
 			return undefined;
 		}
 	}

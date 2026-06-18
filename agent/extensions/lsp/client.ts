@@ -18,6 +18,9 @@ const INITIALIZE_TIMEOUT_MS = 45_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const SHUTDOWN_TIMEOUT_MS = 2_000;
 const DIAGNOSTIC_SETTLE_MS = 250;
+const FILE_CHANGE_CREATED = 1;
+const FILE_CHANGE_CHANGED = 2;
+const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2;
 
 interface ServerCapabilities {
 	textDocumentSync?: unknown;
@@ -34,6 +37,11 @@ interface ServerCapabilities {
 interface OpenDocument {
 	version: number;
 	text: string;
+}
+
+interface DocumentDiagnosticReport {
+	items?: Diagnostic[];
+	relatedDocuments?: Record<string, DocumentDiagnosticReport>;
 }
 
 export interface LspClientStatus {
@@ -66,6 +74,21 @@ const withTimeout = async <T>(
 const getFilePath = (uri: string): string | undefined => {
 	if (!uri.startsWith("file://")) return undefined;
 	return fileURLToPath(uri);
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const syncKind = (capabilities: ServerCapabilities): number | undefined => {
+	const sync = capabilities.textDocumentSync;
+	if (typeof sync === "number") return sync;
+	if (isRecord(sync) && typeof sync.change === "number") return sync.change;
+	return undefined;
+};
+
+const endPosition = (text: string): { line: number; character: number } => {
+	const lines = text.split(/\r\n|\r|\n/);
+	return { line: lines.length - 1, character: lines.at(-1)?.length ?? 0 };
 };
 
 const languageIdForPath = (file: string): string => {
@@ -113,6 +136,9 @@ const languageIdForPath = (file: string): string => {
 };
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const diagnosticMessageToText = (message: Diagnostic["message"]): string =>
+	typeof message === "string" ? message : message.value;
 
 type WritableState = NodeJS.WritableStream & {
 	readonly closed?: boolean;
@@ -353,6 +379,7 @@ export class LspClient {
 		const open = this.openDocuments.get(file);
 		if (open === undefined) {
 			this.openDocuments.set(file, { version: 1, text });
+			await this.notifyWatchedFile(file, FILE_CHANGE_CREATED);
 			await this.notify("textDocument/didOpen", {
 				textDocument: {
 					uri,
@@ -364,14 +391,18 @@ export class LspClient {
 		} else if (open.text !== text) {
 			const version = open.version + 1;
 			this.openDocuments.set(file, { version, text });
+			await this.notifyWatchedFile(file, FILE_CHANGE_CHANGED);
 			await this.notify("textDocument/didChange", {
 				textDocument: { uri, version },
-				contentChanges: [{ text }],
+				contentChanges:
+					syncKind(this.serverCapabilities) === TEXT_DOCUMENT_SYNC_INCREMENTAL
+						? [{ range: { start: { line: 0, character: 0 }, end: endPosition(open.text) }, text }]
+						: [{ text }],
 			});
 		}
 
 		if (waitForDiagnostics) {
-			await wait(DIAGNOSTIC_SETTLE_MS);
+			await Promise.all([wait(DIAGNOSTIC_SETTLE_MS), this.pullDocumentDiagnostics(file)]);
 		}
 	}
 
@@ -381,16 +412,11 @@ export class LspClient {
 			throw new Error(`${this.serverId} language server is not running`);
 		}
 
-		try {
-			return await withTimeout(
-				this.connection.sendRequest<T>(method, params),
-				REQUEST_TIMEOUT_MS,
-				`${this.serverId} ${method}`,
-			);
-		} catch (error) {
-			this.broken = true;
-			throw error;
-		}
+		return await withTimeout(
+			this.connection.sendRequest<T>(method, params),
+			REQUEST_TIMEOUT_MS,
+			`${this.serverId} ${method}`,
+		);
 	}
 
 	async shutdown(): Promise<void> {
@@ -429,6 +455,57 @@ export class LspClient {
 
 	private hasProvider(provider: unknown): boolean {
 		return provider !== undefined && provider !== null && provider !== false;
+	}
+
+	private async pullDocumentDiagnostics(file: string): Promise<void> {
+		if (!this.hasProvider(this.serverCapabilities.diagnosticProvider)) return;
+
+		const report = await withTimeout(
+			this.connection.sendRequest<DocumentDiagnosticReport | null>("textDocument/diagnostic", {
+				textDocument: { uri: pathToFileURL(file).href },
+			}),
+			REQUEST_TIMEOUT_MS,
+			`${this.serverId} textDocument/diagnostic`,
+		).catch(() => null);
+		if (report === null) return;
+
+		this.mergeDiagnosticReport(file, report);
+	}
+
+	private mergeDiagnosticReport(file: string, report: DocumentDiagnosticReport): void {
+		if (Array.isArray(report.items)) {
+			this.diagnosticsByFile.set(
+				file,
+				this.dedupeDiagnostics([...(this.diagnosticsByFile.get(file) ?? []), ...report.items]),
+			);
+		}
+		for (const [uri, related] of Object.entries(report.relatedDocuments ?? {})) {
+			const relatedFile = getFilePath(uri);
+			if (relatedFile === undefined) continue;
+			this.mergeDiagnosticReport(relatedFile, related);
+		}
+	}
+
+	private dedupeDiagnostics(diagnostics: ReadonlyArray<Diagnostic>): Diagnostic[] {
+		const seen = new Set<string>();
+		return diagnostics.filter((diagnostic) => {
+			const key = JSON.stringify({
+				code: diagnostic.code,
+				severity: diagnostic.severity,
+				message: diagnosticMessageToText(diagnostic.message),
+				source: diagnostic.source,
+				range: diagnostic.range,
+			});
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	}
+
+	private async notifyWatchedFile(file: string, type: number): Promise<void> {
+		await this.notify("workspace/didChangeWatchedFiles", {
+			changes: [{ uri: pathToFileURL(file).href, type }],
+		});
 	}
 
 	private async notify(method: string, params: unknown): Promise<void> {

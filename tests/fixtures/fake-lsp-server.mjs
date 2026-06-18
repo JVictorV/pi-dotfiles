@@ -9,6 +9,8 @@ const connection = createMessageConnection(
 	new StreamMessageWriter(process.stdout),
 );
 const documents = new Map();
+const watchedChanges = new Map();
+let hoverErrorsRemaining = Number(process.env.FAKE_LSP_HOVER_ERROR_COUNT ?? 0);
 
 const location = (uri, line, character) => ({
 	uri,
@@ -18,30 +20,37 @@ const location = (uri, line, character) => ({
 	},
 });
 
+const fakeDiagnostic = (message = "fake diagnostic") => ({
+	range: {
+		start: { line: 0, character: 0 },
+		end: { line: 0, character: 4 },
+	},
+	severity: 1,
+	message,
+	source: "fake-lsp",
+});
+
 const publishDiagnostics = (uri) => {
+	if (process.env.FAKE_LSP_PULL_DIAGNOSTICS_ONLY === "1") return;
 	connection.sendNotification("textDocument/publishDiagnostics", {
 		uri,
-		diagnostics: [
-			{
-				range: {
-					start: { line: 0, character: 0 },
-					end: { line: 0, character: 4 },
-				},
-				severity: 1,
-				message: "fake diagnostic",
-				source: "fake-lsp",
-			},
-		],
+		diagnostics: [fakeDiagnostic()],
 	});
 };
 
-connection.onRequest("initialize", () => {
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+connection.onRequest("initialize", async () => {
+	const initializeDelay = Number(process.env.FAKE_LSP_INITIALIZE_DELAY_MS ?? 0);
+	if (initializeDelay > 0) await wait(initializeDelay);
+
 	if (process.env.FAKE_LSP_INITIALIZE_ERROR === "1") {
 		throw new Error("fake initialize failed");
 	}
 
 	const capabilities = {
-		textDocumentSync: 1,
+		textDocumentSync: process.env.FAKE_LSP_REQUIRE_INCREMENTAL_CHANGE === "1" ? 2 : 1,
+		diagnosticProvider: true,
 		hoverProvider: true,
 		definitionProvider: true,
 		referencesProvider: true,
@@ -62,16 +71,43 @@ connection.onNotification("textDocument/didOpen", (params) => {
 });
 
 connection.onNotification("textDocument/didChange", (params) => {
-	documents.set(params.textDocument.uri, params.contentChanges.at(-1)?.text ?? "");
+	const change = params.contentChanges.at(-1);
+	if (process.env.FAKE_LSP_REQUIRE_INCREMENTAL_CHANGE === "1" && change?.range === undefined) {
+		documents.set(params.textDocument.uri, "missing incremental range");
+	} else {
+		documents.set(params.textDocument.uri, change?.text ?? "");
+	}
 	publishDiagnostics(params.textDocument.uri);
 });
 
-connection.onRequest("textDocument/hover", (params) => ({
-	contents: {
-		kind: "markdown",
-		value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character} text=${documents.get(params.textDocument.uri) ?? ""}`,
-	},
+connection.onNotification("workspace/didChangeWatchedFiles", (params) => {
+	for (const change of params.changes ?? []) {
+		watchedChanges.set(change.uri, (watchedChanges.get(change.uri) ?? 0) + 1);
+	}
+});
+
+connection.onRequest("textDocument/diagnostic", () => ({
+	kind: "full",
+	items: [fakeDiagnostic("fake pull diagnostic")],
 }));
+
+connection.onRequest("textDocument/hover", (params) => {
+	if (hoverErrorsRemaining > 0) {
+		hoverErrorsRemaining -= 1;
+		throw new Error("fake hover failed");
+	}
+
+	const watchedSuffix =
+		process.env.FAKE_LSP_REPORT_WATCHED === "1"
+			? ` watched=${watchedChanges.get(params.textDocument.uri) ?? 0}`
+			: "";
+	return {
+		contents: {
+			kind: "markdown",
+			value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character} text=${documents.get(params.textDocument.uri) ?? ""}${watchedSuffix}`,
+		},
+	};
+});
 
 connection.onRequest("textDocument/definition", (params) => {
 	if (process.env.FAKE_LSP_MALFORMED_DEFINITION === "1") {

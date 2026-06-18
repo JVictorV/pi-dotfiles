@@ -92,7 +92,11 @@ export default function lspExtension(pi: ExtensionAPI) {
 	let runtime: LspRuntime | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
-		runtime = new LspRuntime({ cwd: ctx.cwd, config: await loadLspConfig() });
+		runtime = new LspRuntime({
+			cwd: ctx.cwd,
+			config: await loadLspConfig(),
+			onStatusChange: () => emitStatus(pi, runtime),
+		});
 		emitStatus(pi, runtime);
 	});
 

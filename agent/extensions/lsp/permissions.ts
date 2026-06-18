@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { Effect, Semaphore } from "effect";
+
 import { permissionPath } from "./paths";
 import type { LspPermission, LspPermissionFile } from "./types";
 
@@ -44,6 +46,31 @@ const parsePermissionFile = (value: unknown): LspPermissionFile => {
 	return { version: 1, repos };
 };
 
+const permissionWriteLock = Semaphore.makeUnsafe(1);
+let tempFileCounter = 0;
+
+const readPermissionFile = async (): Promise<LspPermissionFile> => {
+	const path = permissionPath();
+	const text = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	});
+
+	if (text === undefined) {
+		return emptyPermissionFile();
+	}
+
+	return parsePermissionFile(JSON.parse(text));
+};
+
+const writePermissionFile = async (file: LspPermissionFile): Promise<void> => {
+	const path = permissionPath();
+	await mkdir(dirname(path), { recursive: true });
+	const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
+	await writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8");
+	await rename(tmpPath, path);
+};
+
 export class LspPermissionStore {
 	private file: LspPermissionFile;
 
@@ -52,17 +79,7 @@ export class LspPermissionStore {
 	}
 
 	static async load(): Promise<LspPermissionStore> {
-		const path = permissionPath();
-		const text = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-			if (error.code === "ENOENT") return undefined;
-			throw error;
-		});
-
-		if (text === undefined) {
-			return new LspPermissionStore(emptyPermissionFile());
-		}
-
-		return new LspPermissionStore(parsePermissionFile(JSON.parse(text)));
+		return new LspPermissionStore(await readPermissionFile());
 	}
 
 	get(repoRoot: string, serverId: string): LspPermission | undefined {
@@ -76,36 +93,43 @@ export class LspPermissionStore {
 	}
 
 	async set(repoRoot: string, serverId: string, permission: LspPermission): Promise<void> {
-		this.file.repos[repoRoot] = {
-			...this.file.repos[repoRoot],
-			[serverId]: permission,
-		};
-		await this.save();
+		await Effect.runPromise(
+			permissionWriteLock.withPermit(
+				Effect.promise(async () => {
+					this.file = await readPermissionFile();
+					this.file.repos[repoRoot] = {
+						...this.file.repos[repoRoot],
+						[serverId]: permission,
+					};
+					await writePermissionFile(this.file);
+				}),
+			),
+		);
 	}
 
 	async reset(repoRoot: string, serverId?: string): Promise<void> {
-		if (serverId === undefined) {
-			delete this.file.repos[repoRoot];
-			await this.save();
-			return;
-		}
+		await Effect.runPromise(
+			permissionWriteLock.withPermit(
+				Effect.promise(async () => {
+					this.file = await readPermissionFile();
 
-		const repo = this.file.repos[repoRoot];
-		if (repo !== undefined) {
-			delete repo[serverId];
-			if (Object.keys(repo).length === 0) {
-				delete this.file.repos[repoRoot];
-			}
-		}
+					if (serverId === undefined) {
+						delete this.file.repos[repoRoot];
+						await writePermissionFile(this.file);
+						return;
+					}
 
-		await this.save();
-	}
+					const repo = this.file.repos[repoRoot];
+					if (repo !== undefined) {
+						delete repo[serverId];
+						if (Object.keys(repo).length === 0) {
+							delete this.file.repos[repoRoot];
+						}
+					}
 
-	private async save(): Promise<void> {
-		const path = permissionPath();
-		await mkdir(dirname(path), { recursive: true });
-		const tmpPath = `${path}.${process.pid}.tmp`;
-		await writeFile(tmpPath, `${JSON.stringify(this.file, null, "\t")}\n`, "utf8");
-		await rename(tmpPath, path);
+					await writePermissionFile(this.file);
+				}),
+			),
+		);
 	}
 }
