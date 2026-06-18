@@ -8,7 +8,7 @@ extensions, skills, and settings. Clone into `~/.pi` to use.
 ```bash
 git clone <this-repo> ~/.pi
 cd ~/.pi
-npm install          # installs extension dependencies (effect)
+npm install          # installs extension dependencies
 ```
 
 Then authenticate (recreates the gitignored `agent/auth.json`):
@@ -61,7 +61,7 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 
 ```
 ~/.pi/
-├── package.json            # shared deps for extensions (effect)
+├── package.json            # shared deps for extensions/tests
 ├── tsconfig.json           # type resolution for extension editing
 ├── agent/
 │   ├── settings.json       # models, theme, skill/package config
