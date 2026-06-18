@@ -140,10 +140,6 @@ export class LspRuntime {
 		return this.runOperationEffect(this.restartEffect(serverId));
 	}
 
-	async restart(serverId?: string): Promise<void> {
-		await Effect.runPromise(this.restartProgram(serverId));
-	}
-
 	shutdownProgram(): Effect.Effect<void, unknown> {
 		if (this.shuttingDown) return Effect.succeed(undefined);
 		return this.shutdownEffect().pipe(
@@ -156,10 +152,6 @@ export class LspRuntime {
 		);
 	}
 
-	async shutdown(): Promise<void> {
-		await Effect.runPromise(this.shutdownProgram());
-	}
-
 	clientsForFileProgram(
 		filePath: string,
 		capability: LspCapability,
@@ -169,21 +161,8 @@ export class LspRuntime {
 		return this.runOperationEffect(this.clientsForFileEffect(filePath, capability, ctx, options));
 	}
 
-	async clientsForFile(
-		filePath: string,
-		capability: LspCapability,
-		ctx: ExtensionContext,
-		options: { prompt: boolean; waitForDiagnostics?: boolean },
-	): Promise<ClientResolution> {
-		return await Effect.runPromise(this.clientsForFileProgram(filePath, capability, ctx, options));
-	}
-
 	touchRunningFileProgram(filePath: string): Effect.Effect<void, unknown> {
 		return this.runOperationEffect(this.touchRunningFileEffect(filePath));
-	}
-
-	async touchRunningFile(filePath: string): Promise<void> {
-		await Effect.runPromise(this.touchRunningFileProgram(filePath));
 	}
 
 	private runOperationEffect<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E | unknown> {

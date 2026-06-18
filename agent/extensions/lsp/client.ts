@@ -400,10 +400,6 @@ export class LspClient {
 		});
 	}
 
-	static async create(handle: LspServerHandle): Promise<LspClient> {
-		return await Effect.runPromise(LspClient.createEffect(handle));
-	}
-
 	get status(): LspClientStatus {
 		return {
 			serverId: this.serverId,
@@ -516,10 +512,6 @@ export class LspClient {
 		});
 	}
 
-	async open(file: string, waitForDiagnostics: boolean): Promise<void> {
-		await Effect.runPromise(this.openEffect(file, waitForDiagnostics));
-	}
-
 	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
 		if (!this.canSend()) {
 			this.broken = true;
@@ -546,10 +538,6 @@ export class LspClient {
 				);
 			}),
 		);
-	}
-
-	async request<T>(method: string, params: unknown): Promise<T> {
-		return await Effect.runPromise(this.requestEffect<T>(method, params));
 	}
 
 	shutdownEffect(): Effect.Effect<void, unknown> {
@@ -580,10 +568,6 @@ export class LspClient {
 		});
 	}
 
-	async shutdown(): Promise<void> {
-		await Effect.runPromise(this.shutdownEffect());
-	}
-
 	private canSend(): boolean {
 		return (
 			!this.closing &&
@@ -602,10 +586,6 @@ export class LspClient {
 			return Effect.succeed(undefined);
 		if (this.diagnosticRegistrations.size > 0) return Effect.succeed(undefined);
 		return Effect.sleep(Duration.millis(timeoutMs));
-	}
-
-	private async waitForDiagnosticRegistration(timeoutMs: number): Promise<void> {
-		await Effect.runPromise(this.waitForDiagnosticRegistrationEffect(timeoutMs));
 	}
 
 	private waitForPushDiagnosticsEffect(file: string, timeoutMs: number): Effect.Effect<void> {
@@ -627,10 +607,6 @@ export class LspClient {
 			timeout = setTimeout(finish, timeoutMs);
 			return Effect.sync(finish);
 		});
-	}
-
-	private async waitForPushDiagnostics(file: string, timeoutMs: number): Promise<void> {
-		await Effect.runPromise(this.waitForPushDiagnosticsEffect(file, timeoutMs));
 	}
 
 	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void, unknown> {
@@ -670,10 +646,6 @@ export class LspClient {
 				),
 			{ concurrency: "unbounded", discard: true },
 		);
-	}
-
-	private async pullDocumentDiagnostics(file: string): Promise<void> {
-		await Effect.runPromise(this.pullDocumentDiagnosticsEffect(file));
 	}
 
 	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void, unknown> {
@@ -716,10 +688,6 @@ export class LspClient {
 		);
 	}
 
-	private async pullWorkspaceDiagnostics(): Promise<void> {
-		await Effect.runPromise(this.pullWorkspaceDiagnosticsEffect());
-	}
-
 	private mergeDiagnosticReport(file: string, report: DocumentDiagnosticReport): void {
 		if (Array.isArray(report.items)) {
 			this.diagnosticsByFile.set(
@@ -756,19 +724,11 @@ export class LspClient {
 		});
 	}
 
-	private async notifyWatchedFile(file: string, type: number): Promise<void> {
-		await Effect.runPromise(this.notifyWatchedFileEffect(file, type));
-	}
-
 	private notifySaveEffect(file: string, text: string): Effect.Effect<void, unknown> {
 		return this.notifyEffect("textDocument/didSave", {
 			textDocument: { uri: pathToFileURL(file).href },
 			text,
 		});
-	}
-
-	private async notifySave(file: string, text: string): Promise<void> {
-		await Effect.runPromise(this.notifySaveEffect(file, text));
 	}
 
 	private closeOpenDocumentsEffect(): Effect.Effect<void, unknown> {
@@ -780,10 +740,6 @@ export class LspClient {
 				}),
 			{ concurrency: "unbounded", discard: true },
 		).pipe(Effect.map(() => this.openDocuments.clear()));
-	}
-
-	private async closeOpenDocuments(): Promise<void> {
-		await Effect.runPromise(this.closeOpenDocumentsEffect());
 	}
 
 	private notifyEffect(method: string, params: unknown): Effect.Effect<void, unknown> {
@@ -799,10 +755,6 @@ export class LspClient {
 				}),
 			),
 		);
-	}
-
-	private async notify(method: string, params: unknown): Promise<void> {
-		await Effect.runPromise(this.notifyEffect(method, params));
 	}
 
 	private registerHandlers(): void {

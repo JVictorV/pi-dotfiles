@@ -94,4 +94,5 @@ Boundary functions allowed to consume promises:
 - [ ] Slice 6: boundary cleanup
   - Added Effect-returning public runtime APIs (`restartProgram`, `shutdownProgram`, `clientsForFileProgram`, `touchRunningFileProgram`).
   - `index.ts` and `tool.ts` now call those runtime programs at plugin boundaries instead of Promise runtime methods.
-  - Remaining: remove or quarantine compatibility Promise adapters from `runtime.ts` / `client.ts`, and finish reducing `execute` to one top-level Effect program.
+  - Removed runtime/client compatibility Promise adapters from implementation; tests now use Effect runtime programs directly.
+  - Remaining: finish reducing `execute` to one top-level Effect program.

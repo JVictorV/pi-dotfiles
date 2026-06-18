@@ -124,7 +124,9 @@ describe("LSP Extension", () => {
 	});
 
 	afterEach(async () => {
-		await Promise.all(runtimes.splice(0).map((runtime) => runtime.shutdown()));
+		await Promise.all(
+			runtimes.splice(0).map((runtime) => Effect.runPromise(runtime.shutdownProgram())),
+		);
 		if (originalAgentDir === undefined) {
 			delete process.env.PI_CODING_AGENT_DIR;
 		} else {
@@ -560,7 +562,7 @@ describe("LSP Extension", () => {
 		);
 
 		await writeFile(project.filePath, "changedSymbol()\n", "utf8");
-		await project.runtime.touchRunningFile("main.fake");
+		await Effect.runPromise(project.runtime.touchRunningFileProgram("main.fake"));
 
 		const result = await tool.execute(
 			"tool-call-sync-2",
@@ -588,7 +590,7 @@ describe("LSP Extension", () => {
 		expect(opened.content[0]?.text).toContain("watched=1");
 
 		await writeFile(project.filePath, "watchedSymbol()\n", "utf8");
-		await project.runtime.touchRunningFile("main.fake");
+		await Effect.runPromise(project.runtime.touchRunningFileProgram("main.fake"));
 
 		const changed = await tool.execute(
 			"tool-call-watch-2",
@@ -614,7 +616,7 @@ describe("LSP Extension", () => {
 		);
 
 		await writeFile(project.filePath, "incrementalSymbol()\n", "utf8");
-		await project.runtime.touchRunningFile("main.fake");
+		await Effect.runPromise(project.runtime.touchRunningFileProgram("main.fake"));
 
 		const changed = await tool.execute(
 			"tool-call-incremental-2",
@@ -782,8 +784,8 @@ describe("LSP Extension", () => {
 			baseProject.ctx,
 		);
 		await writeFile(baseProject.filePath, "savedAgain()\n", "utf8");
-		await runtime.touchRunningFile("main.fake");
-		await runtime.shutdown();
+		await Effect.runPromise(runtime.touchRunningFileProgram("main.fake"));
+		await Effect.runPromise(runtime.shutdownProgram());
 
 		const lifecycle = JSON.parse(await readFile(lifecyclePath, "utf8")) as {
 			saves: number;
@@ -810,7 +812,7 @@ describe("LSP Extension", () => {
 		child.kill("SIGTERM");
 		await once(child, "exit");
 
-		await expect(project.runtime.shutdown()).resolves.toBeUndefined();
+		await expect(Effect.runPromise(project.runtime.shutdownProgram())).resolves.toBeUndefined();
 	});
 
 	test("shutdown prevents in-flight spawns from installing clients", async () => {
@@ -827,7 +829,7 @@ describe("LSP Extension", () => {
 		);
 
 		await wait(20);
-		await expect(project.runtime.shutdown()).resolves.toBeUndefined();
+		await expect(Effect.runPromise(project.runtime.shutdownProgram())).resolves.toBeUndefined();
 		await expect(pending).rejects.toMatchObject({
 			_tag: "LspRuntimeShuttingDown",
 			reason: "LSP runtime is shutting down.",
@@ -864,7 +866,7 @@ describe("LSP Extension", () => {
 		expect(project.runtime.status()).toMatchObject([{ serverId: "fake", status: "broken" }]);
 		expect(project.confirm).toHaveBeenCalledOnce();
 
-		await project.runtime.restart("fake");
+		await Effect.runPromise(project.runtime.restartProgram("fake"));
 		const result = await tool.execute(
 			"tool-call-crash-3",
 			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
@@ -889,7 +891,7 @@ describe("LSP Extension", () => {
 			project.ctx,
 		);
 		expect(project.confirm).toHaveBeenCalledOnce();
-		await firstRuntime.shutdown();
+		await Effect.runPromise(firstRuntime.shutdownProgram());
 
 		const secondRuntime = new LspRuntime({ cwd: project.cwd, config: createConfig() });
 		runtimes.push(secondRuntime);
