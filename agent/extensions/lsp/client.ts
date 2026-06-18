@@ -332,73 +332,96 @@ export class LspClient {
 	}
 
 	static createEffect(handle: LspServerHandle): Effect.Effect<LspClient, unknown> {
-		return Effect.tryPromise({
-			try: () => LspClient.create(handle),
-			catch: (cause) => cause,
+		return Effect.gen(function* () {
+			const connection = createMessageConnection(
+				new StreamMessageReader(handle.process.stdout),
+				new SafeMessageWriter(handle.process.stdin),
+			);
+			const client = new LspClient(handle, connection);
+			client.registerHandlers();
+			connection.listen();
+
+			const initializeResult = yield* Effect.tryPromise({
+				try: () =>
+					connection.sendRequest<{ capabilities?: ServerCapabilities }>("initialize", {
+						rootUri: pathToFileURL(handle.root).href,
+						processId: handle.process.pid,
+						workspaceFolders: [
+							{ name: handle.definition.label, uri: pathToFileURL(handle.root).href },
+						],
+						initializationOptions: handle.initializationOptions ?? {},
+						capabilities: {
+							window: { workDoneProgress: true },
+							workspace: {
+								configuration: true,
+								workspaceFolders: true,
+								diagnostics: { refreshSupport: false },
+							},
+							textDocument: {
+								synchronization: {
+									didOpen: true,
+									didChange: true,
+									didSave: true,
+									didClose: true,
+								},
+								definition: { dynamicRegistration: false },
+								references: { dynamicRegistration: false },
+								hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
+								documentSymbol: {
+									dynamicRegistration: false,
+									hierarchicalDocumentSymbolSupport: true,
+								},
+								implementation: { dynamicRegistration: false },
+								callHierarchy: { dynamicRegistration: false },
+								rename: { dynamicRegistration: false, prepareSupport: false },
+								codeAction: {
+									dynamicRegistration: false,
+									codeActionLiteralSupport: {
+										codeActionKind: {
+											valueSet: ["quickfix", "refactor", "source.organizeImports"],
+										},
+									},
+								},
+								formatting: { dynamicRegistration: false },
+								diagnostic: { dynamicRegistration: true, relatedDocumentSupport: true },
+								publishDiagnostics: { versionSupport: false },
+							},
+						},
+					}),
+				catch: (cause) => cause,
+			}).pipe(
+				Effect.timeout(Duration.millis(INITIALIZE_TIMEOUT_MS)),
+				Effect.catch((error) => {
+					const timedOut =
+						isRecord(error) && typeof error._tag === "string" && error._tag.includes("Timeout");
+					const reason = timedOut
+						? `${handle.definition.id} initialize timed out after ${INITIALIZE_TIMEOUT_MS}ms`
+						: error instanceof Error
+							? error.message
+							: String(error);
+					return Effect.fail(LspInitializeError.make({ serverId: handle.definition.id, reason }));
+				}),
+			);
+			client.serverCapabilities = initializeResult.capabilities ?? {};
+
+			yield* Effect.tryPromise({
+				try: () => connection.sendNotification("initialized", {}),
+				catch: (cause) => cause,
+			});
+			handle.process.stderr.resume();
+			handle.process.on("exit", () => {
+				client.broken = true;
+			});
+			handle.process.stdin.on("error", () => {
+				client.broken = true;
+			});
+
+			return client;
 		});
 	}
 
 	static async create(handle: LspServerHandle): Promise<LspClient> {
-		const connection = createMessageConnection(
-			new StreamMessageReader(handle.process.stdout),
-			new SafeMessageWriter(handle.process.stdin),
-		);
-		const client = new LspClient(handle, connection);
-		client.registerHandlers();
-		connection.listen();
-
-		const initializeResult = await withTimeout(
-			connection.sendRequest<{ capabilities?: ServerCapabilities }>("initialize", {
-				rootUri: pathToFileURL(handle.root).href,
-				processId: handle.process.pid,
-				workspaceFolders: [{ name: handle.definition.label, uri: pathToFileURL(handle.root).href }],
-				initializationOptions: handle.initializationOptions ?? {},
-				capabilities: {
-					window: { workDoneProgress: true },
-					workspace: {
-						configuration: true,
-						workspaceFolders: true,
-						diagnostics: { refreshSupport: false },
-					},
-					textDocument: {
-						synchronization: { didOpen: true, didChange: true, didSave: true, didClose: true },
-						definition: { dynamicRegistration: false },
-						references: { dynamicRegistration: false },
-						hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
-						documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
-						implementation: { dynamicRegistration: false },
-						callHierarchy: { dynamicRegistration: false },
-						rename: { dynamicRegistration: false, prepareSupport: false },
-						codeAction: {
-							dynamicRegistration: false,
-							codeActionLiteralSupport: {
-								codeActionKind: { valueSet: ["quickfix", "refactor", "source.organizeImports"] },
-							},
-						},
-						formatting: { dynamicRegistration: false },
-						diagnostic: { dynamicRegistration: true, relatedDocumentSupport: true },
-						publishDiagnostics: { versionSupport: false },
-					},
-				},
-			}),
-			INITIALIZE_TIMEOUT_MS,
-			`${handle.definition.id} initialize`,
-		).catch((error: unknown) => {
-			const reason = error instanceof Error ? error.message : String(error);
-			throw LspInitializeError.make({ serverId: handle.definition.id, reason });
-		});
-		client.serverCapabilities = initializeResult.capabilities ?? {};
-
-		await connection.sendNotification("initialized", {});
-		handle.process.stderr.resume();
-		handle.process.on("exit", () => {
-			client.broken = true;
-		});
-		handle.process.stdin.on("error", () => {
-			client.broken = true;
-		});
-
-		return client;
+		return await Effect.runPromise(LspClient.createEffect(handle));
 	}
 
 	get status(): LspClientStatus {
