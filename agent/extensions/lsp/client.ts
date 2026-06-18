@@ -10,6 +10,7 @@ import {
 	type MessageConnection,
 	type MessageWriter,
 } from "vscode-jsonrpc/node";
+import { Effect } from "effect";
 import type { Diagnostic } from "vscode-languageserver-types";
 
 import { LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
@@ -332,6 +333,13 @@ export class LspClient {
 		this.root = handle.root;
 	}
 
+	static createEffect(handle: LspServerHandle): Effect.Effect<LspClient, unknown> {
+		return Effect.tryPromise({
+			try: () => LspClient.create(handle),
+			catch: (cause) => cause,
+		});
+	}
+
 	static async create(handle: LspServerHandle): Promise<LspClient> {
 		const connection = createMessageConnection(
 			new StreamMessageReader(handle.process.stdout),
@@ -440,6 +448,13 @@ export class LspClient {
 		}
 	}
 
+	openEffect(file: string, waitForDiagnostics: boolean): Effect.Effect<void, unknown> {
+		return Effect.tryPromise({
+			try: () => this.open(file, waitForDiagnostics),
+			catch: (cause) => cause,
+		});
+	}
+
 	async open(file: string, waitForDiagnostics: boolean): Promise<void> {
 		const text = await readFile(file, "utf8");
 		if (!this.canSend()) {
@@ -485,6 +500,13 @@ export class LspClient {
 		}
 	}
 
+	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
+		return Effect.tryPromise({
+			try: () => this.request<T>(method, params),
+			catch: (cause) => cause,
+		});
+	}
+
 	async request<T>(method: string, params: unknown): Promise<T> {
 		if (!this.canSend()) {
 			this.broken = true;
@@ -504,6 +526,13 @@ export class LspClient {
 			}
 			throw LspRequestError.make({ serverId: this.serverId, method, reason });
 		}
+	}
+
+	shutdownEffect(): Effect.Effect<void, unknown> {
+		return Effect.tryPromise({
+			try: () => this.shutdown(),
+			catch: (cause) => cause,
+		});
 	}
 
 	async shutdown(): Promise<void> {

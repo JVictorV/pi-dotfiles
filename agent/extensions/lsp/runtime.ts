@@ -251,9 +251,7 @@ export class LspRuntime {
 					const client = this.clients.get(key);
 					this.clients.delete(key);
 					this.clientDefinitions.delete(key);
-					return client === undefined
-						? Effect.succeed(undefined)
-						: Effect.tryPromise(() => client.shutdown());
+					return client === undefined ? Effect.succeed(undefined) : client.shutdownEffect();
 				},
 				{ concurrency: "unbounded", discard: true },
 			).pipe(
@@ -285,7 +283,7 @@ export class LspRuntime {
 			this.clientDefinitions.clear();
 			this.spawning.clear();
 			this.notifyStatusChange();
-			return Effect.forEach(clients, (client) => Effect.tryPromise(() => client.shutdown()), {
+			return Effect.forEach(clients, (client) => client.shutdownEffect(), {
 				concurrency: "unbounded",
 				discard: true,
 			});
@@ -506,9 +504,9 @@ export class LspRuntime {
 		file: string,
 		waitForDiagnostics: boolean,
 	): Effect.Effect<void, unknown> {
-		return Effect.tryPromise(() => client.open(file, waitForDiagnostics)).pipe(
-			Effect.catch(() => Effect.succeed(undefined)),
-		);
+		return client
+			.openEffect(file, waitForDiagnostics)
+			.pipe(Effect.catch(() => Effect.succeed(undefined)));
 	}
 
 	private spawnClientEffect(
@@ -529,10 +527,7 @@ export class LspRuntime {
 			);
 			if (handle === undefined) return undefined;
 
-			const client = yield* Effect.tryPromise({
-				try: () => LspClient.create(handle),
-				catch: (cause) => cause,
-			}).pipe(
+			const client = yield* LspClient.createEffect(handle).pipe(
 				Effect.catch((error) => {
 					if (!handle.process.killed) handle.process.kill("SIGTERM");
 					const reason = errorReason(error, `Failed to start ${definition.id}`);
@@ -542,9 +537,7 @@ export class LspRuntime {
 			);
 			if (client === undefined) return undefined;
 			if (runtime.shuttingDown) {
-				yield* Effect.tryPromise(() => client.shutdown()).pipe(
-					Effect.catch(() => Effect.succeed(undefined)),
-				);
+				yield* client.shutdownEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
 				return undefined;
 			}
 			runtime.clients.set(key, client);
