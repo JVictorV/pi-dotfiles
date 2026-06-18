@@ -188,8 +188,6 @@ const languageIdForPath = (file: string): string => {
 	return LANGUAGE_IDS[extname(lower)] ?? "plaintext";
 };
 
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 const diagnosticMessageToText = (message: Diagnostic["message"]): string =>
 	typeof message === "string" ? message : message.value;
 
@@ -449,55 +447,74 @@ export class LspClient {
 	}
 
 	openEffect(file: string, waitForDiagnostics: boolean): Effect.Effect<void, unknown> {
-		return Effect.tryPromise({
-			try: () => this.open(file, waitForDiagnostics),
-			catch: (cause) => cause,
+		// oxlint-disable-next-line typescript/no-this-alias
+		const client = this;
+		return Effect.gen(function* () {
+			const text = yield* Effect.tryPromise({
+				try: () => readFile(file, "utf8"),
+				catch: (cause) => cause,
+			});
+			if (!client.canSend()) {
+				client.broken = true;
+				return;
+			}
+
+			const uri = pathToFileURL(file).href;
+			const open = client.openDocuments.get(file);
+			if (open === undefined) {
+				client.openDocuments.set(file, { version: 1, text });
+				yield* client.notifyWatchedFileEffect(file, FILE_CHANGE_CREATED);
+				yield* client.notifyEffect("textDocument/didOpen", {
+					textDocument: {
+						uri,
+						languageId: languageIdForPath(file),
+						version: 1,
+						text,
+					},
+				});
+				yield* client.notifySaveEffect(file, text);
+			} else if (open.text !== text) {
+				const version = open.version + 1;
+				client.openDocuments.set(file, { version, text });
+				yield* client.notifyWatchedFileEffect(file, FILE_CHANGE_CHANGED);
+				yield* client.notifyEffect("textDocument/didChange", {
+					textDocument: { uri, version },
+					contentChanges:
+						syncKind(client.serverCapabilities) === TEXT_DOCUMENT_SYNC_INCREMENTAL
+							? [{ range: { start: { line: 0, character: 0 }, end: endPosition(open.text) }, text }]
+							: [{ text }],
+				});
+				yield* client.notifySaveEffect(file, text);
+			}
+
+			if (waitForDiagnostics) {
+				yield* Effect.forEach(
+					[
+						client.waitForPushDiagnosticsEffect(file, DIAGNOSTIC_WAIT_TIMEOUT_MS),
+						client
+							.waitForDiagnosticRegistrationEffect(DIAGNOSTIC_WAIT_TIMEOUT_MS)
+							.pipe(
+								Effect.flatMap(() =>
+									Effect.forEach(
+										[
+											client.pullDocumentDiagnosticsEffect(file),
+											client.pullWorkspaceDiagnosticsEffect(),
+										],
+										(effect) => effect,
+										{ concurrency: "unbounded", discard: true },
+									),
+								),
+							),
+					],
+					(effect) => effect,
+					{ concurrency: "unbounded", discard: true },
+				);
+			}
 		});
 	}
 
 	async open(file: string, waitForDiagnostics: boolean): Promise<void> {
-		const text = await readFile(file, "utf8");
-		if (!this.canSend()) {
-			this.broken = true;
-			return;
-		}
-
-		const uri = pathToFileURL(file).href;
-		const open = this.openDocuments.get(file);
-		if (open === undefined) {
-			this.openDocuments.set(file, { version: 1, text });
-			await this.notifyWatchedFile(file, FILE_CHANGE_CREATED);
-			await this.notify("textDocument/didOpen", {
-				textDocument: {
-					uri,
-					languageId: languageIdForPath(file),
-					version: 1,
-					text,
-				},
-			});
-			await this.notifySave(file, text);
-		} else if (open.text !== text) {
-			const version = open.version + 1;
-			this.openDocuments.set(file, { version, text });
-			await this.notifyWatchedFile(file, FILE_CHANGE_CHANGED);
-			await this.notify("textDocument/didChange", {
-				textDocument: { uri, version },
-				contentChanges:
-					syncKind(this.serverCapabilities) === TEXT_DOCUMENT_SYNC_INCREMENTAL
-						? [{ range: { start: { line: 0, character: 0 }, end: endPosition(open.text) }, text }]
-						: [{ text }],
-			});
-			await this.notifySave(file, text);
-		}
-
-		if (waitForDiagnostics) {
-			await Promise.all([
-				this.waitForPushDiagnostics(file, DIAGNOSTIC_WAIT_TIMEOUT_MS),
-				this.waitForDiagnosticRegistration(DIAGNOSTIC_WAIT_TIMEOUT_MS).then(() =>
-					Promise.all([this.pullDocumentDiagnostics(file), this.pullWorkspaceDiagnostics()]),
-				),
-			]);
-		}
+		await Effect.runPromise(this.openEffect(file, waitForDiagnostics));
 	}
 
 	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
@@ -577,15 +594,20 @@ export class LspClient {
 		return provider !== undefined && provider !== null && provider !== false;
 	}
 
-	private async waitForDiagnosticRegistration(timeoutMs: number): Promise<void> {
-		if (this.hasProvider(this.serverCapabilities.diagnosticProvider)) return;
-		if (this.diagnosticRegistrations.size > 0) return;
-		await wait(timeoutMs);
+	private waitForDiagnosticRegistrationEffect(timeoutMs: number): Effect.Effect<void> {
+		if (this.hasProvider(this.serverCapabilities.diagnosticProvider))
+			return Effect.succeed(undefined);
+		if (this.diagnosticRegistrations.size > 0) return Effect.succeed(undefined);
+		return Effect.sleep(Duration.millis(timeoutMs));
 	}
 
-	private async waitForPushDiagnostics(file: string, timeoutMs: number): Promise<void> {
-		if (this.diagnosticsByFile.has(file)) return;
-		await new Promise<void>((resolve) => {
+	private async waitForDiagnosticRegistration(timeoutMs: number): Promise<void> {
+		await Effect.runPromise(this.waitForDiagnosticRegistrationEffect(timeoutMs));
+	}
+
+	private waitForPushDiagnosticsEffect(file: string, timeoutMs: number): Effect.Effect<void> {
+		if (this.diagnosticsByFile.has(file)) return Effect.succeed(undefined);
+		return Effect.callback<void>((resume) => {
 			let finished = false;
 			let timeout: NodeJS.Timeout | undefined;
 			const finish = () => {
@@ -593,13 +615,25 @@ export class LspClient {
 				finished = true;
 				if (timeout !== undefined) clearTimeout(timeout);
 				this.diagnosticListeners.delete(listener);
-				resolve();
+				resume(Effect.succeed(undefined));
 			};
 			const listener = (diagnosticFile: string) => {
 				if (diagnosticFile === file) finish();
 			};
 			this.diagnosticListeners.add(listener);
 			timeout = setTimeout(finish, timeoutMs);
+			return Effect.sync(finish);
+		});
+	}
+
+	private async waitForPushDiagnostics(file: string, timeoutMs: number): Promise<void> {
+		await Effect.runPromise(this.waitForPushDiagnosticsEffect(file, timeoutMs));
+	}
+
+	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void, unknown> {
+		return Effect.tryPromise({
+			try: () => this.pullDocumentDiagnostics(file),
+			catch: (cause) => cause,
 		});
 	}
 
@@ -631,6 +665,13 @@ export class LspClient {
 				this.mergeDiagnosticReport(file, report);
 			}),
 		);
+	}
+
+	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void, unknown> {
+		return Effect.tryPromise({
+			try: () => this.pullWorkspaceDiagnostics(),
+			catch: (cause) => cause,
+		});
 	}
 
 	private async pullWorkspaceDiagnostics(): Promise<void> {
