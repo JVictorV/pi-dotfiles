@@ -197,6 +197,84 @@ describe("LSP Extension", () => {
 		expect(result.content[0]?.text).toContain("language=vue");
 	});
 
+	test("lsp tool applies rename edits after explicit approval", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-rename",
+			{
+				operation: "rename",
+				filePath: "main.fake",
+				line: 1,
+				character: 1,
+				newName: "renamedSymbol",
+			},
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("Applied rename");
+		expect(await readFile(project.filePath, "utf8")).toBe("renamedSymbol()\n");
+		expect(project.confirm).toHaveBeenCalledTimes(2);
+	});
+
+	test("lsp tool lists and applies code actions by title", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const listed = await tool.execute(
+			"tool-call-code-action-list",
+			{ operation: "codeAction", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(listed.content[0]?.text).toContain("Apply fake fix");
+
+		const applied = await tool.execute(
+			"tool-call-code-action-apply",
+			{ operation: "codeAction", filePath: "main.fake", actionTitle: "Apply fake fix" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(applied.content[0]?.text).toContain("Applied code action");
+		expect(await readFile(project.filePath, "utf8")).toBe("fixedSymbol()\n");
+	});
+
+	test("lsp tool applies formatting and organize imports edits", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const formatted = await tool.execute(
+			"tool-call-formatting",
+			{ operation: "formatting", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(formatted.content[0]?.text).toContain("Applied formatting");
+		expect(await readFile(project.filePath, "utf8")).toBe("formattedSymbol()");
+
+		const organized = await tool.execute(
+			"tool-call-organize-imports",
+			{ operation: "organizeImports", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+		expect(organized.content[0]?.text).toContain("Applied organize imports");
+		expect(await readFile(project.filePath, "utf8")).toBe(
+			"import fake from 'fake';\nformattedSymbol()",
+		);
+	});
+
 	test("lsp tool converts language server locations into editor-friendly one-based positions", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);

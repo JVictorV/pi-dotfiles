@@ -33,6 +33,9 @@ interface ServerCapabilities {
 	workspaceSymbolProvider?: unknown;
 	implementationProvider?: unknown;
 	callHierarchyProvider?: unknown;
+	renameProvider?: unknown;
+	codeActionProvider?: unknown;
+	documentFormattingProvider?: unknown;
 }
 
 interface OpenDocument {
@@ -352,13 +355,21 @@ export class LspClient {
 						diagnostics: { refreshSupport: false },
 					},
 					textDocument: {
-						synchronization: { didOpen: true, didChange: true },
+						synchronization: { didOpen: true, didChange: true, didSave: true, didClose: true },
 						definition: { dynamicRegistration: false },
 						references: { dynamicRegistration: false },
 						hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
 						documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
 						implementation: { dynamicRegistration: false },
 						callHierarchy: { dynamicRegistration: false },
+						rename: { dynamicRegistration: false, prepareSupport: false },
+						codeAction: {
+							dynamicRegistration: false,
+							codeActionLiteralSupport: {
+								codeActionKind: { valueSet: ["quickfix", "refactor", "source.organizeImports"] },
+							},
+						},
+						formatting: { dynamicRegistration: false },
 						diagnostic: { dynamicRegistration: true, relatedDocumentSupport: true },
 						publishDiagnostics: { versionSupport: false },
 					},
@@ -415,6 +426,13 @@ export class LspClient {
 			case "incomingCalls":
 			case "outgoingCalls":
 				return this.hasProvider(this.serverCapabilities.callHierarchyProvider);
+			case "rename":
+				return this.hasProvider(this.serverCapabilities.renameProvider);
+			case "codeAction":
+			case "organizeImports":
+				return this.hasProvider(this.serverCapabilities.codeActionProvider);
+			case "formatting":
+				return this.hasProvider(this.serverCapabilities.documentFormattingProvider);
 			case "diagnostics":
 				return true;
 			default:

@@ -65,6 +65,9 @@ connection.onRequest("initialize", async () => {
 		workspaceSymbolProvider: true,
 		implementationProvider: true,
 		callHierarchyProvider: true,
+		renameProvider: true,
+		codeActionProvider: { resolveProvider: false },
+		documentFormattingProvider: true,
 	};
 	if (
 		process.env.FAKE_LSP_DYNAMIC_DOCUMENT_DIAGNOSTICS === "1" ||
@@ -243,6 +246,62 @@ connection.onRequest("callHierarchy/outgoingCalls", (params) => [
 		fromRanges: [],
 	},
 ]);
+
+connection.onRequest("textDocument/rename", (params) => ({
+	changes: {
+		[params.textDocument.uri]: [
+			{
+				range: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } },
+				newText: params.newName,
+			},
+		],
+	},
+}));
+
+connection.onRequest("textDocument/formatting", (params) => [
+	{
+		range: { start: { line: 0, character: 0 }, end: { line: 0, character: 999 } },
+		newText: "formattedSymbol()",
+	},
+]);
+
+connection.onRequest("textDocument/codeAction", (params) => {
+	const uri = params.textDocument.uri;
+	if (params.context?.only?.includes("source.organizeImports")) {
+		return [
+			{
+				title: "Organize Imports",
+				kind: "source.organizeImports",
+				edit: {
+					changes: {
+						[uri]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+								newText: "import fake from 'fake';\n",
+							},
+						],
+					},
+				},
+			},
+		];
+	}
+	return [
+		{
+			title: "Apply fake fix",
+			kind: "quickfix",
+			edit: {
+				changes: {
+					[uri]: [
+						{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } },
+							newText: "fixedSymbol",
+						},
+					],
+				},
+			},
+		},
+	];
+});
 
 connection.onRequest("shutdown", async () => {
 	if (process.env.FAKE_LSP_LIFECYCLE_FILE) {

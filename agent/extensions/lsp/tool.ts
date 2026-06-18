@@ -1,3 +1,4 @@
+import { readFile, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -34,6 +35,10 @@ const OPERATIONS = [
 	"incomingCalls",
 	"outgoingCalls",
 	"diagnostics",
+	"rename",
+	"codeAction",
+	"formatting",
+	"organizeImports",
 	"status",
 ] as const;
 
@@ -46,6 +51,9 @@ interface LspParams {
 	character?: number;
 	query?: string;
 	limit?: number;
+	newName?: string;
+	actionTitle?: string;
+	codeActionKind?: string;
 }
 
 interface NormalizedLocation {
@@ -92,6 +100,9 @@ const paramsSchema = Type.Object({
 	),
 	query: Type.Optional(Type.String({ description: "Workspace symbol query." })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of results to return." })),
+	newName: Type.Optional(Type.String({ description: "New symbol name for rename." })),
+	actionTitle: Type.Optional(Type.String({ description: "Exact code action title to apply." })),
+	codeActionKind: Type.Optional(Type.String({ description: "Code action kind filter." })),
 });
 
 const textContent = (text: string): TextContent => ({ type: "text", text });
@@ -459,12 +470,202 @@ const runAcrossClients = async <T>(
 const absolutePath = (cwd: string, filePath: string): string =>
 	resolve(cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 
+interface LspPosition {
+	line: number;
+	character: number;
+}
+
+interface LspRange {
+	start: LspPosition;
+	end: LspPosition;
+}
+
+interface TextEditLike {
+	range: LspRange;
+	newText: string;
+}
+
+interface CodeActionLike {
+	title: string;
+	kind?: string;
+	edit?: unknown;
+	command?: unknown;
+}
+
+const isPosition = (value: unknown): value is LspPosition =>
+	isRecord(value) && typeof value.line === "number" && typeof value.character === "number";
+
+const isRange = (value: unknown): value is LspRange =>
+	isRecord(value) && isPosition(value.start) && isPosition(value.end);
+
+const isTextEdit = (value: unknown): value is TextEditLike =>
+	isRecord(value) && isRange(value.range) && typeof value.newText === "string";
+
+const isCodeAction = (value: unknown): value is CodeActionLike =>
+	isRecord(value) && typeof value.title === "string";
+
+const endPosition = (text: string): LspPosition => {
+	const lines = text.split(/\r\n|\r|\n/);
+	return { line: lines.length - 1, character: lines.at(-1)?.length ?? 0 };
+};
+
+const offsetAt = (text: string, position: LspPosition): number => {
+	let offset = 0;
+	let line = 0;
+	while (line < position.line && offset < text.length) {
+		const next = text.indexOf("\n", offset);
+		if (next === -1) return text.length;
+		offset = next + 1;
+		line += 1;
+	}
+	return Math.min(text.length, offset + Math.max(0, position.character));
+};
+
+const applyTextEdits = (
+	operation: LspOperation,
+	text: string,
+	edits: ReadonlyArray<TextEditLike>,
+): string => {
+	const ranges = edits.map((edit) => ({
+		edit,
+		start: offsetAt(text, edit.range.start),
+		end: offsetAt(text, edit.range.end),
+	}));
+	ranges.sort((left, right) => right.start - left.start);
+	let result = text;
+	let previousStart = text.length + 1;
+	for (const item of ranges) {
+		if (item.start > item.end || item.end > previousStart) {
+			throw LspMalformedResponse.make({
+				operation,
+				reason: `${operation} returned overlapping edits`,
+			});
+		}
+		result = `${result.slice(0, item.start)}${item.edit.newText}${result.slice(item.end)}`;
+		previousStart = item.start;
+	}
+	return result;
+};
+
+const workspaceEditEntries = (
+	operation: LspOperation,
+	edit: unknown,
+): ReadonlyArray<readonly [string, ReadonlyArray<TextEditLike>]> => {
+	if (!isRecord(edit)) {
+		throw LspMalformedResponse.make({
+			operation,
+			reason: `${operation} returned no workspace edit`,
+		});
+	}
+	const entries: Array<readonly [string, ReadonlyArray<TextEditLike>]> = [];
+	if (isRecord(edit.changes)) {
+		for (const [uri, edits] of Object.entries(edit.changes)) {
+			if (!Array.isArray(edits) || !edits.every(isTextEdit)) {
+				throw LspMalformedResponse.make({
+					operation,
+					reason: `${operation} returned malformed edits`,
+				});
+			}
+			entries.push([uri, edits]);
+		}
+	}
+	if (Array.isArray(edit.documentChanges)) {
+		for (const change of edit.documentChanges) {
+			if (
+				!isRecord(change) ||
+				!isRecord(change.textDocument) ||
+				typeof change.textDocument.uri !== "string"
+			) {
+				throw LspMalformedResponse.make({
+					operation,
+					reason: `${operation} returned unsupported document changes`,
+				});
+			}
+			if (!Array.isArray(change.edits) || !change.edits.every(isTextEdit)) {
+				throw LspMalformedResponse.make({
+					operation,
+					reason: `${operation} returned malformed document changes`,
+				});
+			}
+			entries.push([change.textDocument.uri, change.edits]);
+		}
+	}
+	return entries;
+};
+
+const applyWorkspaceEdit = async (
+	operation: LspOperation,
+	cwd: string,
+	edit: unknown,
+): Promise<ReadonlyArray<string>> => {
+	const changedFiles: string[] = [];
+	for (const [uri, edits] of workspaceEditEntries(operation, edit)) {
+		const file = uriToPath(uri);
+		if (file === undefined) {
+			throw LspMalformedResponse.make({
+				operation,
+				reason: `${operation} returned non-file edit URI`,
+			});
+		}
+		const text = await readFile(file, "utf8");
+		const next = applyTextEdits(operation, text, edits);
+		if (next !== text) {
+			await writeFile(file, next, "utf8");
+			changedFiles.push(formatPath(cwd, file));
+		}
+	}
+	return changedFiles;
+};
+
+const mutationApproval = async (
+	ctx: ExtensionContext,
+	title: string,
+	body: string,
+): Promise<void> => {
+	if (!ctx.hasUI) throw new Error(`${title} requires interactive approval.`);
+	const approved = await ctx.ui.confirm(title, body);
+	if (!approved) throw new Error(`${title} was declined.`);
+};
+
+const formatApplied = (label: string, files: ReadonlyArray<string>): string =>
+	files.length === 0
+		? `${label}: no edits returned.`
+		: `${label} to:\n${files.map((file) => `- ${file}`).join("\n")}`;
+
+const fullDocumentRange = async (file: string): Promise<LspRange> => ({
+	start: { line: 0, character: 0 },
+	end: endPosition(await readFile(file, "utf8")),
+});
+
+const codeActionRequestParams = async (
+	file: string,
+	kind?: string,
+): Promise<Record<string, unknown>> => ({
+	textDocument: { uri: pathToFileURL(file).href },
+	range: await fullDocumentRange(file),
+	context: { diagnostics: [], ...(kind ? { only: [kind] } : {}) },
+});
+
+const firstMutationClient = (
+	operation: LspOperation,
+	clients: ReadonlyArray<LocatedClient>,
+): LocatedClient => {
+	const client = clients[0];
+	if (client === undefined) {
+		throw LspUnsupportedOperation.make({
+			operation,
+			reason: `No ${operation} client available.`,
+		});
+	}
+	return client;
+};
+
 export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime | undefined) => {
 	pi.registerTool({
 		name: "lsp",
 		label: "LSP",
 		description:
-			"Interact with Language Server Protocol servers for read-only code intelligence: definitions, references, hover/type info, symbols, call hierarchy, status, and diagnostics. Lines and characters are 1-based; characters are UTF-16 offsets. Output is truncated to pi's standard limits.",
+			"Interact with Language Server Protocol servers for code intelligence and approved edits: definitions, references, hover/type info, symbols, call hierarchy, diagnostics, rename, code actions, formatting, and organize imports. Lines and characters are 1-based; characters are UTF-16 offsets. Output is truncated to pi's standard limits.",
 		promptSnippet:
 			"Query language servers for semantic code navigation, symbols, hover/type info, call hierarchy, and diagnostics",
 		promptGuidelines: [
@@ -609,6 +810,134 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const diagnostics = runtime.diagnostics(params.filePath);
 					results = normalizeDiagnostics(diagnostics);
 					text = formatDiagnostics(ctx.cwd, diagnostics, limitFor(params, 200));
+					break;
+				}
+				case "rename": {
+					const { filePath, line, character } = requirePosition(params);
+					if (!params.newName) throw new Error("rename requires newName");
+					const { client } = firstMutationClient(
+						"rename",
+						requireOperationSupport(
+							"rename",
+							await ensureClients(runtime, params, ctx, "navigation"),
+						),
+					);
+					serverIds = [client.serverId];
+					const file = absolutePath(ctx.cwd, filePath);
+					const edit = await client.request("textDocument/rename", {
+						textDocument: { uri: pathToFileURL(file).href },
+						position: { line: line - 1, character: character - 1 },
+						newName: params.newName,
+					});
+					await mutationApproval(ctx, "Apply LSP rename?", `Apply rename to ${params.newName}?`);
+					const files = await applyWorkspaceEdit("rename", ctx.cwd, edit);
+					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					results = { files };
+					text = formatApplied("Applied rename", files);
+					break;
+				}
+				case "formatting": {
+					const filePath = requireFile(params);
+					const { client } = firstMutationClient(
+						"formatting",
+						requireOperationSupport(
+							"formatting",
+							await ensureClients(runtime, params, ctx, "navigation"),
+						),
+					);
+					serverIds = [client.serverId];
+					const file = absolutePath(ctx.cwd, filePath);
+					const uri = pathToFileURL(file).href;
+					const edits = await client.request("textDocument/formatting", {
+						textDocument: { uri },
+						options: { tabSize: 2, insertSpaces: false },
+					});
+					await mutationApproval(ctx, "Apply LSP formatting?", `Apply formatting to ${filePath}?`);
+					const files = await applyWorkspaceEdit("formatting", ctx.cwd, {
+						changes: { [uri]: edits },
+					});
+					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					results = { files };
+					text = formatApplied("Applied formatting", files);
+					break;
+				}
+				case "codeAction": {
+					const filePath = requireFile(params);
+					const { client } = firstMutationClient(
+						"codeAction",
+						requireOperationSupport(
+							"codeAction",
+							await ensureClients(runtime, params, ctx, "navigation"),
+						),
+					);
+					serverIds = [client.serverId];
+					const file = absolutePath(ctx.cwd, filePath);
+					const actions = (
+						await client.request<unknown[]>(
+							"textDocument/codeAction",
+							await codeActionRequestParams(file, params.codeActionKind),
+						)
+					).filter(isCodeAction);
+					if (!params.actionTitle) {
+						results = actions.map((action) => ({ title: action.title, kind: action.kind }));
+						text =
+							actions.length === 0
+								? "No code actions found."
+								: `Code actions:\n${actions.map((action) => `- ${action.title}${action.kind ? ` [${action.kind}]` : ""}`).join("\n")}`;
+						break;
+					}
+					const action = actions.find((item) => item.title === params.actionTitle);
+					if (action === undefined) throw new Error(`No code action titled ${params.actionTitle}`);
+					if (action.edit === undefined) {
+						throw LspUnsupportedOperation.make({
+							operation: "codeAction",
+							reason: "Code actions without workspace edits are not supported.",
+						});
+					}
+					await mutationApproval(
+						ctx,
+						"Apply LSP code action?",
+						`Apply code action ${action.title}?`,
+					);
+					const files = await applyWorkspaceEdit("codeAction", ctx.cwd, action.edit);
+					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					results = { action: action.title, files };
+					text = formatApplied("Applied code action", files);
+					break;
+				}
+				case "organizeImports": {
+					const filePath = requireFile(params);
+					const { client } = firstMutationClient(
+						"organizeImports",
+						requireOperationSupport(
+							"organizeImports",
+							await ensureClients(runtime, params, ctx, "navigation"),
+						),
+					);
+					serverIds = [client.serverId];
+					const file = absolutePath(ctx.cwd, filePath);
+					const actions = (
+						await client.request<unknown[]>(
+							"textDocument/codeAction",
+							await codeActionRequestParams(file, "source.organizeImports"),
+						)
+					).filter(isCodeAction);
+					const action = actions.find((item) => item.edit !== undefined);
+					if (action === undefined || action.edit === undefined) {
+						throw LspUnsupportedOperation.make({
+							operation: "organizeImports",
+							reason: "No organize imports edit was returned.",
+						});
+					}
+					await mutationApproval(
+						ctx,
+						"Apply LSP organize imports?",
+						`Apply organize imports to ${filePath}?`,
+					);
+					const files = await applyWorkspaceEdit("organizeImports", ctx.cwd, action.edit);
+					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					results = { action: action.title, files };
+					text = formatApplied("Applied organize imports", files);
 					break;
 				}
 			}

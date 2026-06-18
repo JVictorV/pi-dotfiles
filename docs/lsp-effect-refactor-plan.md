@@ -303,8 +303,21 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 Remaining follow-ups are now product backlog rather than runtime hardening blockers:
 
 1. Add more built-in servers.
-2. Consider mutating LSP features behind explicit permission gates: rename, code actions, formatting, organize imports.
-3. If needed, split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+2. Split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+
+## Mutating LSP operations
+
+**Status:** Done.
+
+**Notes:**
+
+- Added approved mutating `lsp` operations: `rename`, `codeAction`, `formatting`, and `organizeImports`.
+- Mutations request edits from the LSP server first, then require explicit UI confirmation before writing files.
+- `codeAction` without `actionTitle` lists available actions without mutating; with `actionTitle`, it applies the matching workspace edit.
+- Workspace edits support `changes` and text-edit `documentChanges` for file URIs.
+- Changed files are re-synced to running LSP clients after application.
+- Added regression coverage for rename, code-action listing/application, formatting, and organize imports.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ## Lifecycle extras
 
