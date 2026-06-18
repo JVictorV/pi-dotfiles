@@ -1,7 +1,7 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect } from "effect";
+import { Context, Deferred, Effect, Layer, ManagedRuntime } from "effect";
 
 import { LspClient, type LspClientStatus } from "./client";
 import { lspRuntimeShuttingDown } from "./errors";
@@ -48,6 +48,29 @@ const clientKey = (root: string, serverId: string): string => `${root}\u0000${se
 
 const isBrokenClient = (client: LspClient): boolean => client.status.status === "broken";
 
+class LspRuntimeSession extends Context.Service<
+	LspRuntimeSession,
+	{
+		serverIds: Effect.Effect<ReadonlyArray<string>>;
+		status: Effect.Effect<ReadonlyArray<LspRuntimeStatus>>;
+		runningClients(capability: LspCapability): Effect.Effect<ReadonlyArray<LocatedClient>>;
+		diagnostics(
+			file?: string,
+		): Effect.Effect<
+			ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>>
+		>;
+		restart(serverId?: string): Effect.Effect<void>;
+		shutdown: Effect.Effect<void>;
+		clientsForFile(
+			filePath: string,
+			capability: LspCapability,
+			ctx: ExtensionContext,
+			options: { prompt: boolean; waitForDiagnostics?: boolean },
+		): Effect.Effect<ClientResolution, unknown>;
+		touchRunningFile(filePath: string): Effect.Effect<void>;
+	}
+>()("pi/lsp/LspRuntimeSession") {}
+
 export class LspRuntime {
 	readonly cwd: string;
 
@@ -57,26 +80,99 @@ export class LspRuntime {
 	private readonly broken = new Map<string, string>();
 	private readonly spawning = new Map<string, Deferred.Deferred<LspClient | undefined, Error>>();
 	private readonly onStatusChange?: () => void;
+	private readonly sessionRuntime: ManagedRuntime.ManagedRuntime<LspRuntimeSession, never>;
 	private shuttingDown = false;
 
 	constructor(options: RuntimeOptions) {
 		this.cwd = options.cwd;
 		this.registry = buildServerRegistry(options.config);
 		this.onStatusChange = options.onStatusChange;
+		this.sessionRuntime = ManagedRuntime.make(
+			Layer.succeed(
+				LspRuntimeSession,
+				LspRuntimeSession.of({
+					serverIds: Effect.sync(() => this.serverIdsUnsafe()),
+					status: Effect.sync(() => this.statusUnsafe()),
+					runningClients: (capability) => Effect.sync(() => this.runningClientsUnsafe(capability)),
+					diagnostics: (file) => Effect.sync(() => this.diagnosticsUnsafe(file)),
+					restart: (serverId) => Effect.promise(() => this.restartUnsafe(serverId)),
+					shutdown: Effect.promise(() => this.shutdownUnsafe()),
+					clientsForFile: (filePath, capability, ctx, options) =>
+						Effect.tryPromise({
+							try: () => this.clientsForFileUnsafe(filePath, capability, ctx, options),
+							catch: (cause) => cause,
+						}),
+					touchRunningFile: (filePath) =>
+						Effect.promise(() => this.touchRunningFileUnsafe(filePath)),
+				}),
+			),
+		);
 	}
 
 	serverIds(): ReadonlyArray<string> {
-		return [...this.registry.keys()].sort();
+		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.serverIds));
 	}
 
 	status(): ReadonlyArray<LspRuntimeStatus> {
+		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.status));
+	}
+
+	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
+		return this.sessionRuntime.runSync(
+			LspRuntimeSession.use((session) => session.runningClients(capability)),
+		);
+	}
+
+	diagnostics(
+		file?: string,
+	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
+		return this.sessionRuntime.runSync(
+			LspRuntimeSession.use((session) => session.diagnostics(file)),
+		);
+	}
+
+	async restart(serverId?: string): Promise<void> {
+		await this.sessionRuntime.runPromise(
+			LspRuntimeSession.use((session) => session.restart(serverId)),
+		);
+	}
+
+	async shutdown(): Promise<void> {
+		if (this.shuttingDown) return;
+		await this.sessionRuntime.runPromise(LspRuntimeSession.use((session) => session.shutdown));
+	}
+
+	async clientsForFile(
+		filePath: string,
+		capability: LspCapability,
+		ctx: ExtensionContext,
+		options: { prompt: boolean; waitForDiagnostics?: boolean },
+	): Promise<ClientResolution> {
+		return await this.sessionRuntime.runPromise(
+			LspRuntimeSession.use((session) =>
+				session.clientsForFile(filePath, capability, ctx, options),
+			),
+		);
+	}
+
+	async touchRunningFile(filePath: string): Promise<void> {
+		await this.sessionRuntime.runPromise(
+			LspRuntimeSession.use((session) => session.touchRunningFile(filePath)),
+		);
+	}
+
+	private serverIdsUnsafe(): ReadonlyArray<string> {
+		return [...this.registry.keys()].sort();
+	}
+
+	private statusUnsafe(): ReadonlyArray<LspRuntimeStatus> {
 		return [...this.clients.values()].map((client) => ({
 			...client.status,
 			displayRoot: displayRoot(client.root, this.cwd),
 		}));
 	}
 
-	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
+	private runningClientsUnsafe(capability: LspCapability): ReadonlyArray<LocatedClient> {
 		const clients: LocatedClient[] = [];
 		for (const client of this.clients.values()) {
 			const key = clientKey(client.root, client.serverId);
@@ -91,7 +187,7 @@ export class LspRuntime {
 		return clients;
 	}
 
-	diagnostics(
+	private diagnosticsUnsafe(
 		file?: string,
 	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
 		const result = new Map<
@@ -111,7 +207,7 @@ export class LspRuntime {
 		return result;
 	}
 
-	async restart(serverId?: string): Promise<void> {
+	private async restartUnsafe(serverId?: string): Promise<void> {
 		const keys = [...this.clients.entries()]
 			.filter(([, client]) => serverId === undefined || client.serverId === serverId)
 			.map(([key]) => key);
@@ -139,7 +235,7 @@ export class LspRuntime {
 		}
 	}
 
-	async shutdown(): Promise<void> {
+	private async shutdownUnsafe(): Promise<void> {
 		if (this.shuttingDown) return;
 		this.shuttingDown = true;
 		const clients = [...this.clients.values()];
@@ -150,7 +246,7 @@ export class LspRuntime {
 		await Promise.all(clients.map((client) => client.shutdown()));
 	}
 
-	async clientsForFile(
+	private async clientsForFileUnsafe(
 		filePath: string,
 		capability: LspCapability,
 		ctx: ExtensionContext,
@@ -251,7 +347,7 @@ export class LspRuntime {
 		return { clients, unavailable };
 	}
 
-	async touchRunningFile(filePath: string): Promise<void> {
+	private async touchRunningFileUnsafe(filePath: string): Promise<void> {
 		const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 		await Promise.all(
 			[...this.clients.values()].map(async (client) => {

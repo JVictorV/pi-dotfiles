@@ -44,6 +44,19 @@ interface DocumentDiagnosticReport {
 	relatedDocuments?: Record<string, DocumentDiagnosticReport>;
 }
 
+interface WorkspaceDiagnosticReport {
+	items?: Array<{ uri?: string; items?: Diagnostic[] }>;
+}
+
+interface DiagnosticRegistration {
+	id: string;
+	method: string;
+	registerOptions?: {
+		identifier?: string;
+		workspaceDiagnostics?: boolean;
+	};
+}
+
 export interface LspClientStatus {
 	serverId: string;
 	label: string;
@@ -91,48 +104,83 @@ const endPosition = (text: string): { line: number; character: number } => {
 	return { line: lines.length - 1, character: lines.at(-1)?.length ?? 0 };
 };
 
+const LANGUAGE_IDS: Readonly<Record<string, string>> = {
+	".astro": "astro",
+	".bash": "shellscript",
+	".bat": "bat",
+	".bib": "bibtex",
+	".c": "c",
+	".cc": "cpp",
+	".clj": "clojure",
+	".cljs": "clojure",
+	".cljc": "clojure",
+	".cmake": "cmake",
+	".cpp": "cpp",
+	".cs": "csharp",
+	".csh": "shellscript",
+	".css": "css",
+	".cts": "typescript",
+	".dart": "dart",
+	".dockerfile": "dockerfile",
+	".ex": "elixir",
+	".exs": "elixir",
+	".fs": "fsharp",
+	".fsi": "fsharp",
+	".fsx": "fsharp",
+	".gleam": "gleam",
+	".go": "go",
+	".h": "c",
+	".hpp": "cpp",
+	".hs": "haskell",
+	".htm": "html",
+	".html": "html",
+	".java": "java",
+	".jl": "julia",
+	".js": "javascript",
+	".json": "json",
+	".jsonc": "jsonc",
+	".jsx": "javascriptreact",
+	".kt": "kotlin",
+	".kts": "kotlin",
+	".less": "less",
+	".lhs": "haskell",
+	".lua": "lua",
+	".mjs": "javascript",
+	".ml": "ocaml",
+	".mli": "ocaml",
+	".mts": "typescript",
+	".nix": "nix",
+	".php": "php",
+	".prisma": "prisma",
+	".ps1": "powershell",
+	".py": "python",
+	".pyi": "python",
+	".r": "r",
+	".rb": "ruby",
+	".rs": "rust",
+	".sass": "sass",
+	".scala": "scala",
+	".scss": "scss",
+	".sh": "shellscript",
+	".svelte": "svelte",
+	".swift": "swift",
+	".tf": "terraform",
+	".tfvars": "terraform-vars",
+	".ts": "typescript",
+	".tsx": "typescriptreact",
+	".typ": "typst",
+	".vue": "vue",
+	".yaml": "yaml",
+	".yml": "yaml",
+	".zig": "zig",
+	".zon": "zig",
+};
+
 const languageIdForPath = (file: string): string => {
-	switch (extname(file).toLowerCase()) {
-		case ".ts":
-			return "typescript";
-		case ".tsx":
-			return "typescriptreact";
-		case ".js":
-		case ".mjs":
-		case ".cjs":
-			return "javascript";
-		case ".jsx":
-			return "javascriptreact";
-		case ".json":
-			return "json";
-		case ".jsonc":
-			return "jsonc";
-		case ".css":
-			return "css";
-		case ".scss":
-			return "scss";
-		case ".less":
-			return "less";
-		case ".html":
-		case ".htm":
-			return "html";
-		case ".py":
-		case ".pyi":
-			return "python";
-		case ".rs":
-			return "rust";
-		case ".go":
-			return "go";
-		case ".sh":
-		case ".bash":
-		case ".zsh":
-			return "shellscript";
-		case ".yaml":
-		case ".yml":
-			return "yaml";
-		default:
-			return "plaintext";
-	}
+	const lower = file.toLowerCase();
+	if (lower.endsWith("dockerfile")) return "dockerfile";
+	if (lower.endsWith("makefile")) return "makefile";
+	return LANGUAGE_IDS[extname(lower)] ?? "plaintext";
 };
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -266,6 +314,7 @@ export class LspClient {
 	private serverCapabilities: ServerCapabilities = {};
 	private readonly diagnosticsByFile = new Map<string, Diagnostic[]>();
 	private readonly openDocuments = new Map<string, OpenDocument>();
+	private readonly diagnosticRegistrations = new Map<string, DiagnosticRegistration>();
 	private broken = false;
 	private closing = false;
 	private disposed = false;
@@ -402,7 +451,12 @@ export class LspClient {
 		}
 
 		if (waitForDiagnostics) {
-			await Promise.all([wait(DIAGNOSTIC_SETTLE_MS), this.pullDocumentDiagnostics(file)]);
+			await Promise.all([
+				wait(DIAGNOSTIC_SETTLE_MS),
+				this.waitForDiagnosticRegistration(DIAGNOSTIC_SETTLE_MS).then(() =>
+					Promise.all([this.pullDocumentDiagnostics(file), this.pullWorkspaceDiagnostics()]),
+				),
+			]);
 		}
 	}
 
@@ -457,19 +511,71 @@ export class LspClient {
 		return provider !== undefined && provider !== null && provider !== false;
 	}
 
+	private async waitForDiagnosticRegistration(timeoutMs: number): Promise<void> {
+		if (this.hasProvider(this.serverCapabilities.diagnosticProvider)) return;
+		if (this.diagnosticRegistrations.size > 0) return;
+		await wait(timeoutMs);
+	}
+
 	private async pullDocumentDiagnostics(file: string): Promise<void> {
-		if (!this.hasProvider(this.serverCapabilities.diagnosticProvider)) return;
+		const documentIdentifiers = [...this.diagnosticRegistrations.values()]
+			.filter((registration) => registration.registerOptions?.workspaceDiagnostics !== true)
+			.map((registration) => registration.registerOptions?.identifier)
+			.filter((identifier): identifier is string => identifier !== undefined);
+		const supportsDocumentDiagnostics =
+			this.hasProvider(this.serverCapabilities.diagnosticProvider) ||
+			documentIdentifiers.length > 0;
+		if (!supportsDocumentDiagnostics) return;
 
-		const report = await withTimeout(
-			this.connection.sendRequest<DocumentDiagnosticReport | null>("textDocument/diagnostic", {
-				textDocument: { uri: pathToFileURL(file).href },
+		const requests = [
+			...(this.hasProvider(this.serverCapabilities.diagnosticProvider) ? [undefined] : []),
+			...documentIdentifiers,
+		];
+		await Promise.all(
+			requests.map(async (identifier) => {
+				const report = await withTimeout(
+					this.connection.sendRequest<DocumentDiagnosticReport | null>("textDocument/diagnostic", {
+						...(identifier ? { identifier } : {}),
+						textDocument: { uri: pathToFileURL(file).href },
+					}),
+					REQUEST_TIMEOUT_MS,
+					`${this.serverId} textDocument/diagnostic`,
+				).catch(() => null);
+				if (report === null) return;
+				this.mergeDiagnosticReport(file, report);
 			}),
-			REQUEST_TIMEOUT_MS,
-			`${this.serverId} textDocument/diagnostic`,
-		).catch(() => null);
-		if (report === null) return;
+		);
+	}
 
-		this.mergeDiagnosticReport(file, report);
+	private async pullWorkspaceDiagnostics(): Promise<void> {
+		const workspaceIdentifiers = [...this.diagnosticRegistrations.values()]
+			.filter((registration) => registration.registerOptions?.workspaceDiagnostics === true)
+			.map((registration) => registration.registerOptions?.identifier)
+			.filter((identifier): identifier is string => identifier !== undefined);
+		if (workspaceIdentifiers.length === 0) return;
+
+		await Promise.all(
+			workspaceIdentifiers.map(async (identifier) => {
+				const report = await withTimeout(
+					this.connection.sendRequest<WorkspaceDiagnosticReport | null>("workspace/diagnostic", {
+						identifier,
+						previousResultIds: [],
+					}),
+					REQUEST_TIMEOUT_MS,
+					`${this.serverId} workspace/diagnostic`,
+				).catch(() => null);
+				if (report === null) return;
+				for (const item of report.items ?? []) {
+					if (item.uri === undefined || !Array.isArray(item.items)) continue;
+					const file = getFilePath(item.uri);
+					if (file === undefined) continue;
+					this.diagnosticsByFile.set(
+						file,
+						this.dedupeDiagnostics([...(this.diagnosticsByFile.get(file) ?? []), ...item.items]),
+					);
+				}
+			}),
+		);
 	}
 
 	private mergeDiagnosticReport(file: string, report: DocumentDiagnosticReport): void {
@@ -532,12 +638,44 @@ export class LspClient {
 		]);
 		this.connection.onRequest("workspace/configuration", async () => []);
 		this.connection.onRequest("workspace/diagnostic/refresh", async () => null);
-		this.connection.onRequest("client/registerCapability", async () => null);
-		this.connection.onRequest("client/unregisterCapability", async () => null);
+		this.connection.onRequest("client/registerCapability", async (params: unknown) => {
+			const registrations =
+				isRecord(params) && Array.isArray(params.registrations) ? params.registrations : [];
+			for (const registration of registrations) {
+				if (!isDiagnosticRegistration(registration)) continue;
+				if (registration.method !== "textDocument/diagnostic") continue;
+				this.diagnosticRegistrations.set(registration.id, registration);
+			}
+			return null;
+		});
+		this.connection.onRequest("client/unregisterCapability", async (params: unknown) => {
+			const registrations =
+				isRecord(params) && Array.isArray(params.unregisterations) ? params.unregisterations : [];
+			for (const registration of registrations) {
+				if (!isRecord(registration)) continue;
+				if (registration.method !== "textDocument/diagnostic") continue;
+				if (typeof registration.id !== "string") continue;
+				this.diagnosticRegistrations.delete(registration.id);
+			}
+			return null;
+		});
 	}
 }
 
 const isDiagnosticArray = (value: unknown): value is Diagnostic[] => Array.isArray(value);
+
+const isDiagnosticRegistration = (value: unknown): value is DiagnosticRegistration => {
+	if (!isRecord(value)) return false;
+	if (typeof value.id !== "string" || typeof value.method !== "string") return false;
+	if (value.registerOptions === undefined) return true;
+	if (!isRecord(value.registerOptions)) return false;
+	return (
+		(value.registerOptions.identifier === undefined ||
+			typeof value.registerOptions.identifier === "string") &&
+		(value.registerOptions.workspaceDiagnostics === undefined ||
+			typeof value.registerOptions.workspaceDiagnostics === "boolean")
+	);
+};
 
 const isPublishDiagnostics = (
 	value: unknown,

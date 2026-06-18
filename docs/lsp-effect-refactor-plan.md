@@ -178,6 +178,26 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Kept the existing `tool_result` status emission for now as a harmless compatibility fallback; it can be removed after the service bridge centralizes eventing.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
+### Slice 4.7 — Typed tool boundary errors
+
+**Behavior:** Common tool failure modes should reject with typed LSP errors instead of anonymous `Error` objects.
+
+**Plan:**
+
+- Convert malformed response, unsupported operation, and no-client failures to the typed error taxonomy.
+- Update tests to assert `_tag` and `reason` while preserving useful reason text.
+
+**Status:** Done for common tool boundary failures.
+
+**Notes:**
+
+- Converted malformed location responses to `LspMalformedResponse`.
+- Converted unsupported operation failures to `LspUnsupportedOperation`.
+- Converted no-client failures to `LspNoClients`.
+- Updated regression tests to assert typed `_tag` + `reason`.
+- Remaining typed-error adoption: config parse, direct request timeout/error wrapping, spawn/init subtyping, and permission denial subtyping.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
+
 ### Slice 5 — Effect service bridge
 
 **Behavior:** Existing public `LspRuntime` methods still work, but implementation runs through an Effect service/layer.
@@ -189,13 +209,21 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Move maps into `SynchronizedRef` state.
 - Keep current `LspRuntime` as compatibility wrapper.
 
-**Status:** Not started.
+**Status:** Initial bridge done.
+
+**Notes:**
+
+- Added `LspRuntimeSession` Effect service in `runtime.ts`.
+- Public `LspRuntime` methods now enter through a `ManagedRuntime` service layer and delegate to private unsafe implementations.
+- This creates the bridge needed for later moving maps behind `SynchronizedRef` without changing the public API.
+- State is not fully behind `SynchronizedRef` yet; that remains the next structural step.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 6 — Diagnostics parity with opencode
 
 **Behavior:** Diagnostics are stable across push and pull diagnostic servers.
 
-**Current sub-slice:** Add document pull diagnostics for servers that expose `diagnosticProvider`.
+**Current sub-slice:** Add dynamic diagnostic registration and workspace diagnostics.
 
 **Plan:**
 
@@ -204,7 +232,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Merge/dedupe push + pull diagnostics.
 - Replace fixed settle sleep with wait helpers.
 
-**Status:** In progress; document pull diagnostics sub-slice done.
+**Status:** In progress; document pull, dynamic registration, and workspace diagnostic sub-slices done.
 
 **Notes:**
 
@@ -212,14 +240,18 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Added regression coverage: `diagnostics operation supports document pull diagnostics`.
 - `LspClient.open(..., waitForDiagnostics: true)` now requests document pull diagnostics when the server advertises `diagnosticProvider`.
 - Pull results merge with existing pushed diagnostics and dedupe by `{code,severity,message,source,range}`.
-- Still remaining for full parity: dynamic diagnostic registration, workspace diagnostics, better wait-for-fresh diagnostics timing.
+- Added dynamic diagnostic registration tracking for `client/registerCapability` / `client/unregisterCapability`.
+- Added regression coverage: `diagnostics operation supports dynamic document diagnostic registration`.
+- Added workspace pull diagnostics through dynamic `workspaceDiagnostics` registrations.
+- Added regression coverage: `diagnostics operation supports workspace pull diagnostics`.
+- Still remaining for full parity: better wait-for-fresh diagnostics timing.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 7 — Document sync parity with opencode
 
 **Behavior:** Open/change notifications match server sync capabilities and file watcher expectations.
 
-**Current sub-slice:** Send incremental full-file replacement ranges when the server requests incremental document sync.
+**Current sub-slice:** Expand language-id mapping for additional common file types.
 
 **Plan:**
 
@@ -228,7 +260,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Send `workspace/didChangeWatchedFiles` create/change events.
 - Use incremental full-file replacement when sync mode is incremental.
 
-**Status:** In progress; watched-file and incremental sync sub-slices done.
+**Status:** Done for planned v1 parity.
 
 **Notes:**
 
@@ -237,7 +269,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - `LspClient.open()` now sends `workspace/didChangeWatchedFiles` with create before first `didOpen` and change before subsequent `didChange`.
 - Added fake-server incremental-sync enforcement and regression coverage: `document sync honors incremental text document sync mode`.
 - `LspClient.open()` now honors numeric/object `textDocumentSync` change mode and sends a full-document replacement range when the server requests incremental sync.
-- Still remaining for full parity: expanded language id table.
+- Expanded language-id mapping for common file types and added regression coverage: `document open uses language ids for common file types`.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 8 — Status events from state transitions

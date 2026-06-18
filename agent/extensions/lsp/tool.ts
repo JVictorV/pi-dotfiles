@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Diagnostic } from "vscode-languageserver-types";
 
+import { LspMalformedResponse, LspNoClients, LspUnsupportedOperation } from "./errors";
 import type { LspRuntime, LocatedClient } from "./runtime";
 
 const OPERATIONS = [
@@ -175,7 +176,10 @@ const requireNormalizedLocations = (
 	const values = responseItems(value);
 	const locations = normalizeLocations(values);
 	if (locations.length !== values.length) {
-		throw new Error(`${operation} returned malformed locations`);
+		throw LspMalformedResponse.make({
+			operation,
+			reason: `${operation} returned malformed locations`,
+		});
 	}
 	return locations;
 };
@@ -387,9 +391,11 @@ const ensureClients = async (
 		const reasons = resolution.unavailable
 			.map((item) => `- ${item.serverId}: ${item.reason}`)
 			.join("\n");
-		throw new Error(
-			reasons ? `No LSP clients available.\n${reasons}` : "No LSP clients available for this file.",
-		);
+		throw LspNoClients.make({
+			reason: reasons
+				? `No LSP clients available.\n${reasons}`
+				: "No LSP clients available for this file.",
+		});
 	}
 	return resolution.clients;
 };
@@ -400,7 +406,10 @@ const requireOperationSupport = (
 ): ReadonlyArray<LocatedClient> => {
 	const supported = clients.filter(({ client }) => client.supportsOperation(operation));
 	if (supported.length === 0) {
-		throw new Error(`${operation} is not supported by available LSP clients.`);
+		throw LspUnsupportedOperation.make({
+			operation,
+			reason: `${operation} is not supported by available LSP clients.`,
+		});
 	}
 	return supported;
 };

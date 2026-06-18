@@ -9,6 +9,7 @@ const connection = createMessageConnection(
 	new StreamMessageWriter(process.stdout),
 );
 const documents = new Map();
+const languageIds = new Map();
 const watchedChanges = new Map();
 let hoverErrorsRemaining = Number(process.env.FAKE_LSP_HOVER_ERROR_COUNT ?? 0);
 
@@ -59,14 +60,47 @@ connection.onRequest("initialize", async () => {
 		implementationProvider: true,
 		callHierarchyProvider: true,
 	};
+	if (
+		process.env.FAKE_LSP_DYNAMIC_DOCUMENT_DIAGNOSTICS === "1" ||
+		process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1"
+	) {
+		delete capabilities.diagnosticProvider;
+	}
 	if (process.env.FAKE_LSP_NO_DEFINITION === "1") delete capabilities.definitionProvider;
 	return { capabilities };
 });
 
-connection.onNotification("initialized", () => {});
+connection.onNotification("initialized", async () => {
+	if (process.env.FAKE_LSP_DYNAMIC_DOCUMENT_DIAGNOSTICS === "1") {
+		await connection.sendRequest("client/registerCapability", {
+			registrations: [
+				{
+					id: "fake-document-diagnostics",
+					method: "textDocument/diagnostic",
+					registerOptions: { identifier: "fake-document-diagnostics" },
+				},
+			],
+		});
+	}
+	if (process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1") {
+		await connection.sendRequest("client/registerCapability", {
+			registrations: [
+				{
+					id: "fake-workspace-diagnostics",
+					method: "textDocument/diagnostic",
+					registerOptions: {
+						identifier: "fake-workspace-diagnostics",
+						workspaceDiagnostics: true,
+					},
+				},
+			],
+		});
+	}
+});
 
 connection.onNotification("textDocument/didOpen", (params) => {
 	documents.set(params.textDocument.uri, params.textDocument.text);
+	languageIds.set(params.textDocument.uri, params.textDocument.languageId);
 	publishDiagnostics(params.textDocument.uri);
 });
 
@@ -86,9 +120,25 @@ connection.onNotification("workspace/didChangeWatchedFiles", (params) => {
 	}
 });
 
-connection.onRequest("textDocument/diagnostic", () => ({
+connection.onRequest("textDocument/diagnostic", (params) => ({
 	kind: "full",
-	items: [fakeDiagnostic("fake pull diagnostic")],
+	items: [
+		fakeDiagnostic(
+			params.identifier === "fake-document-diagnostics"
+				? "fake dynamic document diagnostic"
+				: "fake pull diagnostic",
+		),
+	],
+}));
+
+connection.onRequest("workspace/diagnostic", () => ({
+	kind: "full",
+	items: [
+		{
+			uri: documents.keys().next().value,
+			items: [fakeDiagnostic("fake workspace diagnostic")],
+		},
+	],
 }));
 
 connection.onRequest("textDocument/hover", (params) => {
@@ -101,10 +151,14 @@ connection.onRequest("textDocument/hover", (params) => {
 		process.env.FAKE_LSP_REPORT_WATCHED === "1"
 			? ` watched=${watchedChanges.get(params.textDocument.uri) ?? 0}`
 			: "";
+	const languageSuffix =
+		process.env.FAKE_LSP_REPORT_LANGUAGE_ID === "1"
+			? ` language=${languageIds.get(params.textDocument.uri) ?? ""}`
+			: "";
 	return {
 		contents: {
 			kind: "markdown",
-			value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character} text=${documents.get(params.textDocument.uri) ?? ""}${watchedSuffix}`,
+			value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character} text=${documents.get(params.textDocument.uri) ?? ""}${watchedSuffix}${languageSuffix}`,
 		},
 	};
 });

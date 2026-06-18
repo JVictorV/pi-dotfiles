@@ -41,19 +41,25 @@ interface CapturedCommand {
 	handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
 }
 
-const createConfig = (env?: Record<string, string>): LspConfig => ({
+const createConfig = (
+	env?: Record<string, string>,
+	extensions: ReadonlyArray<string> = [".fake"],
+): LspConfig => ({
 	servers: {
 		fake: {
 			command: ["node", fakeServerPath],
 			env,
-			extensions: [".fake"],
+			extensions,
 			rootMarkers: ["project.marker"],
 			capabilities: { navigation: true, diagnostics: true },
 		},
 	},
 });
 
-const createProject = async (config = createConfig()): Promise<TestProject> => {
+const createProject = async (
+	config = createConfig(),
+	fileName = "main.fake",
+): Promise<TestProject> => {
 	const root = await mkdtemp(join(tmpdir(), "pi-lsp-test-"));
 	const agentDir = join(root, "agent");
 	process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -63,7 +69,7 @@ const createProject = async (config = createConfig()): Promise<TestProject> => {
 		await import("node:fs/promises").then(({ mkdir }) => mkdir(cwd, { recursive: true }));
 		await writeFile(join(cwd, "project.marker"), "", { flag: "w" });
 	});
-	const filePath = join(cwd, "main.fake");
+	const filePath = join(cwd, fileName);
 	await writeFile(filePath, "fakeSymbol()\n", "utf8");
 
 	const confirm = vi.fn(async () => true);
@@ -171,6 +177,25 @@ describe("LSP Extension", () => {
 		expect(project.runtime.status()).toHaveLength(1);
 	});
 
+	test("document open uses language ids for common file types", async () => {
+		const project = await createProject(
+			createConfig({ FAKE_LSP_REPORT_LANGUAGE_ID: "1" }, [".vue"]),
+			"main.vue",
+		);
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-language-id",
+			{ operation: "hover", filePath: "main.vue", line: 1, character: 1 },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("language=vue");
+	});
+
 	test("lsp tool converts language server locations into editor-friendly one-based positions", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);
@@ -225,6 +250,52 @@ describe("LSP Extension", () => {
 
 		expect(result.content[0]?.text).toContain("Diagnostics:");
 		expect(result.content[0]?.text).toContain("main.fake:1:1 [error] fake pull diagnostic");
+	});
+
+	test("diagnostics operation supports dynamic document diagnostic registration", async () => {
+		const project = await createProject(
+			createConfig({
+				FAKE_LSP_DYNAMIC_DOCUMENT_DIAGNOSTICS: "1",
+				FAKE_LSP_PULL_DIAGNOSTICS_ONLY: "1",
+			}),
+		);
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-dynamic-diagnostics",
+			{ operation: "diagnostics", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("Diagnostics:");
+		expect(result.content[0]?.text).toContain(
+			"main.fake:1:1 [error] fake dynamic document diagnostic",
+		);
+	});
+
+	test("diagnostics operation supports workspace pull diagnostics", async () => {
+		const project = await createProject(
+			createConfig({
+				FAKE_LSP_WORKSPACE_DIAGNOSTICS: "1",
+				FAKE_LSP_PULL_DIAGNOSTICS_ONLY: "1",
+			}),
+		);
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-workspace-diagnostics",
+			{ operation: "diagnostics", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("Diagnostics:");
+		expect(result.content[0]?.text).toContain("main.fake:1:1 [error] fake workspace diagnostic");
 	});
 
 	test("remaining navigation operations return formatted results and honor limits", async () => {
@@ -449,7 +520,10 @@ describe("LSP Extension", () => {
 				undefined,
 				project.ctx,
 			),
-		).rejects.toThrow("definition returned malformed locations");
+		).rejects.toMatchObject({
+			_tag: "LspMalformedResponse",
+			reason: "definition returned malformed locations",
+		});
 	});
 
 	test("unsupported server capabilities fail before issuing requests", async () => {
@@ -465,7 +539,10 @@ describe("LSP Extension", () => {
 				undefined,
 				project.ctx,
 			),
-		).rejects.toThrow("definition is not supported by available LSP clients");
+		).rejects.toMatchObject({
+			_tag: "LspUnsupportedOperation",
+			reason: "definition is not supported by available LSP clients.",
+		});
 	});
 
 	test("request errors do not mark language servers broken", async () => {
@@ -507,7 +584,10 @@ describe("LSP Extension", () => {
 				undefined,
 				project.ctx,
 			),
-		).rejects.toThrow("fake initialize failed");
+		).rejects.toMatchObject({
+			_tag: "LspNoClients",
+			reason: expect.stringContaining("fake initialize failed"),
+		});
 	});
 
 	test("shutdown tolerates language servers that already closed their stdio", async () => {
@@ -577,7 +657,7 @@ describe("LSP Extension", () => {
 				undefined,
 				project.ctx,
 			),
-		).rejects.toThrow("No LSP clients available");
+		).rejects.toMatchObject({ _tag: "LspNoClients" });
 		expect(project.runtime.status()).toMatchObject([{ serverId: "fake", status: "broken" }]);
 		expect(project.confirm).toHaveBeenCalledOnce();
 
