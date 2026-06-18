@@ -58,6 +58,16 @@ For diagnostics:
 }
 ```
 
+### Status line
+
+The extension emits `lsp:status` events consumed by `statusline.ts`. The bar shows compact LSP state as:
+
+```txt
+LSP <running>/<available> [!broken]
+```
+
+Examples: `LSP 1/10`, `LSP 2/10 !1`.
+
 ### Slash commands
 
 Human-facing commands:

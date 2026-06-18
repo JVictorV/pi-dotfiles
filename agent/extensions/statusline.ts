@@ -43,6 +43,7 @@ const THINKING_COLOR = {
 } as const;
 
 type GitState = { branch: string; added: number; removed: number };
+type LspState = { running: number; broken: number; servers: number };
 type PrState = { number: number; url: string } | null;
 
 /** Shape of `gh pr view --json number,url` output. */
@@ -154,7 +155,18 @@ type LeftParts = {
 	session: string | undefined;
 	git: GitState;
 	pr: PrState;
+	lsp: LspState;
 };
+
+function isLspState(value: unknown): value is LspState {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.running === "number" &&
+		typeof record.broken === "number" &&
+		typeof record.servers === "number"
+	);
+}
 
 /** Build the left side: model · thinking │ ~/dir (branch) +ins -del • session. */
 function buildLeft(theme: Theme, p: LeftParts): string {
@@ -177,6 +189,11 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 		if (p.git.added) parts.push(theme.fg("toolDiffAdded", `+${p.git.added}`));
 		if (p.git.removed) parts.push(theme.fg("toolDiffRemoved", `-${p.git.removed}`));
 		segs.push(parts.join(" "));
+	}
+	if (p.lsp.servers > 0) {
+		const color: ThemeColor = p.lsp.broken > 0 ? "warning" : p.lsp.running > 0 ? "success" : "dim";
+		const broken = p.lsp.broken > 0 ? ` !${p.lsp.broken}` : "";
+		segs.push(theme.fg(color, `LSP ${p.lsp.running}/${p.lsp.servers}${broken}`));
 	}
 	if (p.session) {
 		segs.push(theme.fg("dim", `• ${p.session}`));
@@ -214,6 +231,7 @@ function renderLine(
 	theme: Theme,
 	git: GitState,
 	pr: PrState,
+	lsp: LspState,
 	width: number,
 ): string[] {
 	const usage = ctx.getContextUsage();
@@ -225,6 +243,7 @@ function renderLine(
 		session: ctx.sessionManager.getSessionName(),
 		git,
 		pr,
+		lsp,
 	});
 	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
 	return [layout(theme, left, right, width)];
@@ -233,6 +252,7 @@ function renderLine(
 export default function (pi: ExtensionAPI) {
 	// Cached git state, refreshed off the render path.
 	let gitState: GitState = { branch: "", added: 0, removed: 0 };
+	let lspState: LspState = { running: 0, broken: 0, servers: 0 };
 	let prState: PrState = null;
 	// Branch the cached PR was looked up for — avoids showing a stale PR after a switch.
 	let prBranch = "";
@@ -265,6 +285,12 @@ export default function (pi: ExtensionAPI) {
 		Effect.runFork(refresh);
 	};
 
+	pi.events.on("lsp:status", (data) => {
+		if (!isLspState(data)) return;
+		lspState = data;
+		requestRender?.();
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		runRefresh();
 
@@ -281,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 					},
 					invalidate() {},
 					render(width: number): string[] {
-						return renderLine(pi, ctx, theme, gitState, prState, width);
+						return renderLine(pi, ctx, theme, gitState, prState, lspState, width);
 					},
 				};
 			},

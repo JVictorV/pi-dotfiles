@@ -59,6 +59,15 @@ const resetPermission = async (cwd: string, args: string): Promise<string> => {
 	return `Reset ${serverId} LSP permission for ${repoRoot}`;
 };
 
+const emitStatus = (pi: ExtensionAPI, runtime: LspRuntime | undefined): void => {
+	const statuses = runtime?.status() ?? [];
+	pi.events.emit("lsp:status", {
+		running: statuses.filter((status) => status.status === "connected").length,
+		broken: statuses.filter((status) => status.status === "broken").length,
+		servers: runtime?.serverIds().length ?? 0,
+	});
+};
+
 const formatStatus = (runtime: LspRuntime | undefined): string => {
 	if (runtime === undefined) return "LSP runtime is not initialized.";
 	const statuses = runtime.status();
@@ -81,17 +90,23 @@ export default function lspExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		runtime = new LspRuntime({ cwd: ctx.cwd, config: await loadLspConfig() });
+		emitStatus(pi, runtime);
 	});
 
 	pi.on("session_shutdown", async () => {
 		const current = runtime;
 		runtime = undefined;
+		emitStatus(pi, runtime);
 		await current?.shutdown();
 	});
 
 	registerLspTool(pi, () => runtime);
 
 	pi.on("tool_result", async (event) => {
+		if (event.toolName === "lsp") {
+			emitStatus(pi, runtime);
+			return;
+		}
 		if (event.isError || runtime === undefined) return;
 		if (event.toolName !== "read" && event.toolName !== "write" && event.toolName !== "edit")
 			return;
@@ -154,6 +169,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 			}
 			const serverId = parseServerId(args);
 			await runtime.restart(serverId === "all" ? undefined : serverId);
+			emitStatus(pi, runtime);
 			ctx.ui.notify(
 				serverId === undefined || serverId === "all"
 					? "Restarted all LSP clients."

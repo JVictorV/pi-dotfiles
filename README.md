@@ -85,7 +85,7 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 | `sound.ts`           | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
 | `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed.                                                    |
 | `lsp/`               | LSP Extension: read-only language-server-backed code navigation, hover/type info, symbols, call hierarchy, diagnostics, persisted per-repo spawn permissions, and passive sync for files touched by tools.                                                           |
-| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                                             |
+| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · LSP clients · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                               |
 
 ## Skills
 
