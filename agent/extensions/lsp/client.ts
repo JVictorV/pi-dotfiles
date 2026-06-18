@@ -69,26 +69,6 @@ export interface LspClientStatus {
 	status: "connected" | "broken";
 }
 
-const withTimeout = async <T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-	label: string,
-): Promise<T> => {
-	let timeout: NodeJS.Timeout | undefined;
-	const timeoutPromise = new Promise<never>((_resolve, reject) => {
-		timeout = setTimeout(
-			() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
-			timeoutMs,
-		);
-	});
-
-	try {
-		return await Promise.race([promise, timeoutPromise]);
-	} finally {
-		if (timeout !== undefined) clearTimeout(timeout);
-	}
-};
-
 const getFilePath = (uri: string): string | undefined => {
 	if (!uri.startsWith("file://")) return undefined;
 	return fileURLToPath(uri);
@@ -654,13 +634,6 @@ export class LspClient {
 	}
 
 	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void, unknown> {
-		return Effect.tryPromise({
-			try: () => this.pullDocumentDiagnostics(file),
-			catch: (cause) => cause,
-		});
-	}
-
-	private async pullDocumentDiagnostics(file: string): Promise<void> {
 		const documentIdentifiers = [...this.diagnosticRegistrations.values()]
 			.filter((registration) => registration.registerOptions?.workspaceDiagnostics !== true)
 			.map((registration) => registration.registerOptions?.identifier)
@@ -668,64 +641,83 @@ export class LspClient {
 		const supportsDocumentDiagnostics =
 			this.hasProvider(this.serverCapabilities.diagnosticProvider) ||
 			documentIdentifiers.length > 0;
-		if (!supportsDocumentDiagnostics) return;
+		if (!supportsDocumentDiagnostics) return Effect.succeed(undefined);
 
 		const requests = [
 			...(this.hasProvider(this.serverCapabilities.diagnosticProvider) ? [undefined] : []),
 			...documentIdentifiers,
 		];
-		await Promise.all(
-			requests.map(async (identifier) => {
-				const report = await withTimeout(
-					this.connection.sendRequest<DocumentDiagnosticReport | null>("textDocument/diagnostic", {
-						...(identifier ? { identifier } : {}),
-						textDocument: { uri: pathToFileURL(file).href },
+		return Effect.forEach(
+			requests,
+			(identifier) =>
+				Effect.tryPromise({
+					try: () =>
+						this.connection.sendRequest<DocumentDiagnosticReport | null>(
+							"textDocument/diagnostic",
+							{
+								...(identifier ? { identifier } : {}),
+								textDocument: { uri: pathToFileURL(file).href },
+							},
+						),
+					catch: () => null,
+				}).pipe(
+					Effect.timeout(Duration.millis(REQUEST_TIMEOUT_MS)),
+					Effect.catch(() => Effect.succeed(null)),
+					Effect.map((report) => {
+						if (report === null) return;
+						this.mergeDiagnosticReport(file, report);
 					}),
-					REQUEST_TIMEOUT_MS,
-					`${this.serverId} textDocument/diagnostic`,
-				).catch(() => null);
-				if (report === null) return;
-				this.mergeDiagnosticReport(file, report);
-			}),
+				),
+			{ concurrency: "unbounded", discard: true },
 		);
 	}
 
-	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void, unknown> {
-		return Effect.tryPromise({
-			try: () => this.pullWorkspaceDiagnostics(),
-			catch: (cause) => cause,
-		});
+	private async pullDocumentDiagnostics(file: string): Promise<void> {
+		await Effect.runPromise(this.pullDocumentDiagnosticsEffect(file));
 	}
 
-	private async pullWorkspaceDiagnostics(): Promise<void> {
+	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void, unknown> {
 		const workspaceIdentifiers = [...this.diagnosticRegistrations.values()]
 			.filter((registration) => registration.registerOptions?.workspaceDiagnostics === true)
 			.map((registration) => registration.registerOptions?.identifier)
 			.filter((identifier): identifier is string => identifier !== undefined);
-		if (workspaceIdentifiers.length === 0) return;
+		if (workspaceIdentifiers.length === 0) return Effect.succeed(undefined);
 
-		await Promise.all(
-			workspaceIdentifiers.map(async (identifier) => {
-				const report = await withTimeout(
-					this.connection.sendRequest<WorkspaceDiagnosticReport | null>("workspace/diagnostic", {
-						identifier,
-						previousResultIds: [],
+		return Effect.forEach(
+			workspaceIdentifiers,
+			(identifier) =>
+				Effect.tryPromise({
+					try: () =>
+						this.connection.sendRequest<WorkspaceDiagnosticReport | null>("workspace/diagnostic", {
+							identifier,
+							previousResultIds: [],
+						}),
+					catch: () => null,
+				}).pipe(
+					Effect.timeout(Duration.millis(REQUEST_TIMEOUT_MS)),
+					Effect.catch(() => Effect.succeed(null)),
+					Effect.map((report) => {
+						if (report === null) return;
+						for (const item of report.items ?? []) {
+							if (item.uri === undefined || !Array.isArray(item.items)) continue;
+							const file = getFilePath(item.uri);
+							if (file === undefined) continue;
+							this.diagnosticsByFile.set(
+								file,
+								this.dedupeDiagnostics([
+									...(this.diagnosticsByFile.get(file) ?? []),
+									...item.items,
+								]),
+							);
+						}
 					}),
-					REQUEST_TIMEOUT_MS,
-					`${this.serverId} workspace/diagnostic`,
-				).catch(() => null);
-				if (report === null) return;
-				for (const item of report.items ?? []) {
-					if (item.uri === undefined || !Array.isArray(item.items)) continue;
-					const file = getFilePath(item.uri);
-					if (file === undefined) continue;
-					this.diagnosticsByFile.set(
-						file,
-						this.dedupeDiagnostics([...(this.diagnosticsByFile.get(file) ?? []), ...item.items]),
-					);
-				}
-			}),
+				),
+			{ concurrency: "unbounded", discard: true },
 		);
+	}
+
+	private async pullWorkspaceDiagnostics(): Promise<void> {
+		await Effect.runPromise(this.pullWorkspaceDiagnosticsEffect());
 	}
 
 	private mergeDiagnosticReport(file: string, report: DocumentDiagnosticReport): void {

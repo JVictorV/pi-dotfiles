@@ -71,7 +71,7 @@ Boundary functions allowed to consume promises:
   - `server.ts` executable lookup, node module resolution, root detection, and spawn construction now return Effects.
   - `LspServerDefinition.spawn` is Effect-based.
   - Temporary `Effect.runPromise` adapters remain in `runtime.ts` until runtime workflows are converted.
-- [ ] Slice 3: client workflows
+- [x] Slice 3: client workflows
   - Added Effect-returning client API adapters (`createEffect`, `openEffect`, `requestEffect`, `shutdownEffect`).
   - Runtime now consumes client lifecycle through the Effect adapters instead of direct Promise bridges.
   - `requestEffect` now owns request timeout/error mapping directly; `request()` is only a compatibility Promise adapter.
@@ -80,7 +80,8 @@ Boundary functions allowed to consume promises:
   - `openEffect` now owns document read/open/change/save sequencing directly.
   - Diagnostic wait and notification helpers now have Effect-native entry points.
   - `createEffect` now owns initialization directly, including initialize timeout/error mapping and initialized notification.
-  - Remaining: rewrite pull-diagnostic internals so those adapters no longer wrap Promise-native implementations.
+  - Pull document/workspace diagnostics now compose Effects directly.
+  - Remaining Promise surface in `client.ts` is compatibility adapters plus required `vscode-jsonrpc` `MessageWriter` / callback interfaces.
 - [x] Slice 4: runtime workflows
   - `runtime.ts` private orchestration now composes Effect workflows directly for restart, shutdown, client resolution, file touch, matching, permission, and spawn.
   - Remaining Promise surface in `runtime.ts` is the public compatibility adapter (`restart`, `shutdown`, `clientsForFile`, `touchRunningFile`) plus temporary `Effect.tryPromise` bridges to `LspClient` until Slice 3 lands.
