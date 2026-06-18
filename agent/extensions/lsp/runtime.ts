@@ -1,7 +1,7 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
+import { Deferred, Effect, Layer, ManagedRuntime, Option, Schema, SynchronizedRef } from "effect";
 
 import { LspClient } from "./client";
 import { lspRuntimeShuttingDown } from "./errors";
@@ -44,12 +44,17 @@ const clientKey = (root: string, serverId: string): string => `${root}\u0000${se
 
 const isBrokenClient = (client: LspClient): boolean => client.status.status === "broken";
 
+const ErrorReason = Schema.Struct({ reason: Schema.String });
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const decodeErrorReasonOption = Schema.decodeUnknownOption(ErrorReason);
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
+
 const errorReason = (error: unknown, fallback: string): string => {
-	if (typeof error === "object" && error !== null && "reason" in error) {
-		const reason = (error as { reason?: unknown }).reason;
-		if (typeof reason === "string") return reason;
-	}
-	return error instanceof Error && error.message ? error.message : fallback;
+	const reason = decodeErrorReasonOption(error);
+	if (Option.isSome(reason) && reason.value.reason.length > 0) return reason.value.reason;
+	const message = decodeErrorMessageOption(error);
+	if (Option.isSome(message) && message.value.message.length > 0) return message.value.message;
+	return fallback;
 };
 
 export class LspRuntime {
@@ -363,7 +368,7 @@ export class LspRuntime {
 
 				if (!options.prompt) continue;
 
-				const deferred = Deferred.makeUnsafe<LspClient | undefined, Error>();
+				const deferred = Deferred.makeUnsafe<LspClient | undefined, unknown>();
 				runtime.spawning.set(key, deferred);
 				const spawned = yield* runtime.spawnForMatchEffect(match, key, file, ctx, deferred).pipe(
 					Effect.ensuring(
@@ -480,7 +485,7 @@ export class LspRuntime {
 		key: string,
 		file: string,
 		ctx: ExtensionContext,
-		deferred: Deferred.Deferred<LspClient | undefined, Error>,
+		deferred: Deferred.Deferred<LspClient | undefined, unknown>,
 	): Effect.Effect<
 		| { readonly client: LspClient; readonly permissionDenied?: never }
 		| { readonly client?: never; readonly permissionDenied: LspPermission }
@@ -502,12 +507,9 @@ export class LspRuntime {
 			yield* Deferred.succeed(deferred, client);
 			return client === undefined ? undefined : { client };
 		}).pipe(
-			Effect.catch((error) => {
-				const normalized = error instanceof Error ? error : new Error(String(error));
-				return Deferred.fail(deferred, normalized).pipe(
-					Effect.flatMap(() => Effect.fail(normalized)),
-				);
-			}),
+			Effect.catch((error) =>
+				Deferred.fail(deferred, error).pipe(Effect.flatMap(() => Effect.fail(error))),
+			),
 		);
 	}
 

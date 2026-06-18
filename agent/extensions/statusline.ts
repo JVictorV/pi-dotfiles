@@ -32,15 +32,17 @@ import type {
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { getCapabilities, hyperlink, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 
-const THINKING_COLOR = {
+type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const THINKING_COLOR: Record<ThinkingLevel, ThemeColor> = {
 	minimal: "thinkingMinimal",
 	low: "thinkingLow",
 	medium: "thinkingMedium",
 	high: "thinkingHigh",
 	xhigh: "thinkingXhigh",
-} as const;
+};
 
 type GitState = { branch: string; added: number; removed: number };
 type LspClientState = { id: string; label: string };
@@ -49,6 +51,16 @@ type PrState = { number: number; url: string } | null;
 
 /** Shape of `gh pr view --json number,url` output. */
 const PrInfo = Schema.Struct({ number: Schema.Number, url: Schema.String });
+const PrInfoJson = Schema.fromJsonString(PrInfo);
+const LspClientStateSchema = Schema.Struct({ id: Schema.String, label: Schema.String });
+const LspStateSchema = Schema.Struct({
+	running: Schema.Array(LspClientStateSchema),
+	broken: Schema.Array(LspClientStateSchema),
+});
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const decodeLspStateOption = Schema.decodeUnknownOption(LspStateSchema);
+const decodePrInfoJson = Schema.decodeUnknownEffect(PrInfoJson);
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
 
 /** Typed failure for any subprocess / decoding step in the data layer. */
 class StatusLineError extends Schema.TaggedErrorClass<StatusLineError>()("StatusLineError", {
@@ -57,11 +69,18 @@ class StatusLineError extends Schema.TaggedErrorClass<StatusLineError>()("Status
 
 const statusLineError = (reason: string): StatusLineError => StatusLineError.make({ reason });
 
+const unknownReason = (cause: unknown, fallback: string): string => {
+	if (typeof cause === "string" && cause.length > 0) return cause;
+	const decoded = decodeErrorMessageOption(cause);
+	if (Option.isSome(decoded) && decoded.value.message.length > 0) return decoded.value.message;
+	return fallback;
+};
+
 /** Wrap `pi.exec` as an Effect, surfacing spawn rejections as StatusLineError. */
 const runExec = (pi: ExtensionAPI, cmd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
 	Effect.tryPromise({
 		try: () => pi.exec(cmd, [...args], { timeout: timeoutMs }),
-		catch: (cause) => statusLineError(`${cmd} exec failed: ${String(cause)}`),
+		catch: (cause) => statusLineError(`${cmd} exec failed: ${unknownReason(cause, "unknown")}`),
 	});
 
 /** Branch + staged/unstaged line changes from git (non-zero exit → empty state). */
@@ -83,11 +102,9 @@ const fetchPr = Effect.fn("fetchPr")(function* (pi: ExtensionAPI, branch: string
 	if (!branch) return null;
 	const res = yield* runExec(pi, "gh", ["pr", "view", branch, "--json", "number,url"], 5000);
 	if (res.code !== 0) return null;
-	const json = yield* Effect.try({
-		try: () => JSON.parse(res.stdout) as unknown,
-		catch: (cause) => statusLineError(`gh json parse failed: ${String(cause)}`),
-	});
-	return yield* Schema.decodeUnknownEffect(PrInfo)(json);
+	return yield* decodePrInfoJson(res.stdout).pipe(
+		Effect.mapError(() => statusLineError("gh json parse failed")),
+	);
 });
 
 /** Sum staged + unstaged line changes from `git diff --numstat` output. */
@@ -151,7 +168,7 @@ function usageColor(pct: number): ThemeColor {
 
 type LeftParts = {
 	model: string;
-	thinking: keyof typeof THINKING_COLOR | "off" | undefined;
+	thinking: ThinkingLevel | "off" | undefined;
 	dir: string;
 	session: string | undefined;
 	git: GitState;
@@ -159,21 +176,8 @@ type LeftParts = {
 	lsp: LspState;
 };
 
-function isLspClientState(value: unknown): value is LspClientState {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	return typeof record.id === "string" && typeof record.label === "string";
-}
-
 function isLspState(value: unknown): value is LspState {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	return (
-		Array.isArray(record.running) &&
-		record.running.every(isLspClientState) &&
-		Array.isArray(record.broken) &&
-		record.broken.every(isLspClientState)
-	);
+	return Option.isSome(decodeLspStateOption(value));
 }
 
 function shortLspName(client: LspClientState): string {

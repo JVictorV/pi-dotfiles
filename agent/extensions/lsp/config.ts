@@ -1,84 +1,100 @@
 import { readFile } from "node:fs/promises";
 
-import { Effect } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import { LspConfigError } from "./errors";
 import { configPath } from "./paths";
-import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
+import type { UserServerConfig } from "./types";
+const failConfig = (reason: string): Effect.Effect<never, LspConfigError> =>
+	Effect.fail(LspConfigError.make({ reason }));
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const optionalBoolean = (value: unknown, field: string): boolean | undefined => {
-	if (value === undefined) return undefined;
-	if (typeof value === "boolean") return value;
-	throw LspConfigError.make({ reason: `agent/lsp.json field ${field} must be a boolean` });
-};
+const NotFoundError = Schema.Struct({ code: Schema.Literal("ENOENT") });
+const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeNotFoundError = Schema.decodeUnknownOption(NotFoundError);
 
-const optionalStringArray = (value: unknown, field: string): ReadonlyArray<string> | undefined => {
-	if (value === undefined) return undefined;
-	if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
-	throw LspConfigError.make({
-		reason: `agent/lsp.json field ${field} must be an array of strings`,
-	});
-};
+const isNotFoundError = (error: unknown): boolean => Option.isSome(decodeNotFoundError(error));
 
-const optionalStringRecord = (
+const optionalBoolean = (
 	value: unknown,
 	field: string,
-): Readonly<Record<string, string>> | undefined => {
+): Effect.Effect<boolean | undefined, LspConfigError> => {
+	if (value === undefined) return Effect.succeed(undefined);
+	if (typeof value === "boolean") return Effect.succeed(value);
+	return failConfig(`agent/lsp.json field ${field} must be a boolean`);
+};
+
+const optionalStringArray = (
+	value: unknown,
+	field: string,
+): Effect.Effect<ReadonlyArray<string> | undefined, LspConfigError> => {
+	if (value === undefined) return Effect.succeed(undefined);
+	if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+		return Effect.succeed(value);
+	}
+	return failConfig(`agent/lsp.json field ${field} must be an array of strings`);
+};
+
+const optionalStringRecord = Effect.fn("optionalStringRecord")(function* (
+	value: unknown,
+	field: string,
+) {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) {
-		throw LspConfigError.make({
-			reason: `agent/lsp.json field ${field} must be an object of string values`,
-		});
+		return yield* failConfig(`agent/lsp.json field ${field} must be an object of string values`);
 	}
 
 	const result: Record<string, string> = {};
 	for (const [key, item] of Object.entries(value)) {
 		if (typeof item !== "string") {
-			throw LspConfigError.make({
-				reason: `agent/lsp.json field ${field}.${key} must be a string`,
-			});
+			return yield* failConfig(`agent/lsp.json field ${field}.${key} must be a string`);
 		}
 		result[key] = item;
 	}
 	return result;
-};
+});
 
-const optionalCapabilities = (
+const optionalCapabilities = Effect.fn("optionalCapabilities")(function* (
 	value: unknown,
 	field: string,
-): Partial<ServerCapabilities> | undefined => {
+) {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) {
-		throw LspConfigError.make({ reason: `agent/lsp.json field ${field} must be an object` });
+		return yield* failConfig(`agent/lsp.json field ${field} must be an object`);
 	}
 	return {
-		navigation: optionalBoolean(value.navigation, `${field}.navigation`),
-		diagnostics: optionalBoolean(value.diagnostics, `${field}.diagnostics`),
+		navigation: yield* optionalBoolean(value.navigation, `${field}.navigation`),
+		diagnostics: yield* optionalBoolean(value.diagnostics, `${field}.diagnostics`),
 	};
-};
+});
 
-const parseServerConfig = (serverId: string, value: unknown): UserServerConfig => {
+const parseServerConfig = Effect.fn("parseServerConfig")(function* (
+	serverId: string,
+	value: unknown,
+) {
 	if (!isRecord(value)) {
-		throw LspConfigError.make({ reason: `agent/lsp.json server ${serverId} must be an object` });
+		return yield* failConfig(`agent/lsp.json server ${serverId} must be an object`);
 	}
 
 	return {
-		disabled: optionalBoolean(value.disabled, `servers.${serverId}.disabled`),
-		command: optionalStringArray(value.command, `servers.${serverId}.command`),
-		env: optionalStringRecord(value.env, `servers.${serverId}.env`),
-		extensions: optionalStringArray(value.extensions, `servers.${serverId}.extensions`),
-		rootMarkers: optionalStringArray(value.rootMarkers, `servers.${serverId}.rootMarkers`),
-		strictRoot: optionalBoolean(value.strictRoot, `servers.${serverId}.strictRoot`),
-		capabilities: optionalCapabilities(value.capabilities, `servers.${serverId}.capabilities`),
+		disabled: yield* optionalBoolean(value.disabled, `servers.${serverId}.disabled`),
+		command: yield* optionalStringArray(value.command, `servers.${serverId}.command`),
+		env: yield* optionalStringRecord(value.env, `servers.${serverId}.env`),
+		extensions: yield* optionalStringArray(value.extensions, `servers.${serverId}.extensions`),
+		rootMarkers: yield* optionalStringArray(value.rootMarkers, `servers.${serverId}.rootMarkers`),
+		strictRoot: yield* optionalBoolean(value.strictRoot, `servers.${serverId}.strictRoot`),
+		capabilities: yield* optionalCapabilities(
+			value.capabilities,
+			`servers.${serverId}.capabilities`,
+		),
 	};
-};
+});
 
-const parseConfig = (value: unknown): LspConfig => {
+const parseConfig = Effect.fn("parseConfig")(function* (value: unknown) {
 	if (!isRecord(value)) {
-		throw LspConfigError.make({ reason: "agent/lsp.json must contain a JSON object" });
+		return yield* failConfig("agent/lsp.json must contain a JSON object");
 	}
 
 	if (value.servers === undefined) {
@@ -86,37 +102,37 @@ const parseConfig = (value: unknown): LspConfig => {
 	}
 
 	if (!isRecord(value.servers)) {
-		throw LspConfigError.make({ reason: "agent/lsp.json field servers must be an object" });
+		return yield* failConfig("agent/lsp.json field servers must be an object");
 	}
 
 	const servers: Record<string, UserServerConfig> = {};
 	for (const [serverId, server] of Object.entries(value.servers)) {
-		servers[serverId] = parseServerConfig(serverId, server);
+		servers[serverId] = yield* parseServerConfig(serverId, server);
 	}
 	return { servers };
-};
+});
 
-export const loadLspConfig = (): Effect.Effect<LspConfig, unknown> =>
-	Effect.gen(function* () {
-		const path = configPath();
-		const text = yield* Effect.tryPromise({
-			try: () => readFile(path, "utf8"),
-			catch: (error) => error as NodeJS.ErrnoException,
-		}).pipe(
-			Effect.catch((error) => {
-				if (error.code === "ENOENT") return Effect.succeed(undefined);
-				return Effect.fail(error);
-			}),
-		);
+const parseJson = (text: string): Effect.Effect<unknown, LspConfigError> =>
+	decodeUnknownJson(text).pipe(
+		Effect.mapError(() =>
+			LspConfigError.make({ reason: "agent/lsp.json must contain valid JSON" }),
+		),
+	);
 
-		if (text === undefined) return { servers: {} };
+export const loadLspConfig = Effect.fn("loadLspConfig")(function* () {
+	const path = configPath();
+	const text = yield* Effect.tryPromise({
+		try: () => readFile(path, "utf8"),
+		catch: (error) => error,
+	}).pipe(
+		Effect.catch((error) => {
+			if (isNotFoundError(error)) return Effect.succeed(undefined);
+			return Effect.fail(error);
+		}),
+	);
 
-		return yield* Effect.try({
-			try: () => parseConfig(JSON.parse(text)),
-			catch: (error) => {
-				if (error instanceof LspConfigError) return error;
-				const reason = error instanceof Error ? error.message : String(error);
-				return LspConfigError.make({ reason });
-			},
-		});
-	});
+	if (text === undefined) return { servers: {} };
+
+	const json = yield* parseJson(text);
+	return yield* parseConfig(json);
+});

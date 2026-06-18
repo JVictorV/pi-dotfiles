@@ -20,7 +20,7 @@
 
 import { type Api, complete, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Effect, Schema } from "effect";
+import { Clock, Effect, Option, Schema } from "effect";
 
 const MAX_TITLE_LENGTH = 60;
 const MAX_PROMPT_CHARS = 2000;
@@ -47,6 +47,16 @@ class TitleError extends Schema.TaggedErrorClass<TitleError>()("TitleError", {
 
 const titleError = (reason: string): TitleError => TitleError.make({ reason });
 
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
+
+const unknownReason = (cause: unknown, fallback: string): string => {
+	if (typeof cause === "string" && cause.length > 0) return cause;
+	const decoded = decodeErrorMessageOption(cause);
+	if (Option.isSome(decoded) && decoded.value.message.length > 0) return decoded.value.message;
+	return fallback;
+};
+
 /**
  * Pick the first preferred cheap model that exists and is authed, falling back
  * to the active model. Fails with TitleError when none are authenticated.
@@ -61,7 +71,7 @@ const resolveTitleModel = Effect.fn("resolveTitleModel")(function* (ctx: Extensi
 		if (!model) continue;
 		const auth = yield* Effect.tryPromise({
 			try: () => ctx.modelRegistry.getApiKeyAndHeaders(model),
-			catch: (cause) => titleError(`auth lookup failed: ${String(cause)}`),
+			catch: (cause) => titleError(`auth lookup failed: ${unknownReason(cause, "unknown")}`),
 		});
 		if (auth?.ok && auth.apiKey) {
 			return { model, apiKey: auth.apiKey, headers: auth.headers } satisfies ResolvedModel;
@@ -75,6 +85,7 @@ const resolveTitleModel = Effect.fn("resolveTitleModel")(function* (ctx: Extensi
 const generateTitle = Effect.fn("generateTitle")(function* (ctx: ExtensionContext, prompt: string) {
 	const resolved = yield* resolveTitleModel(ctx);
 
+	const timestamp = yield* Clock.currentTimeMillis;
 	const response = yield* Effect.tryPromise({
 		try: () =>
 			complete(
@@ -82,15 +93,15 @@ const generateTitle = Effect.fn("generateTitle")(function* (ctx: ExtensionContex
 				{
 					messages: [
 						{
-							role: "user" as const,
-							content: [{ type: "text" as const, text: buildPrompt(prompt) }],
-							timestamp: Date.now(),
+							role: "user",
+							content: [{ type: "text", text: buildPrompt(prompt) }],
+							timestamp,
 						},
 					],
 				},
 				{ apiKey: resolved.apiKey, headers: resolved.headers, reasoningEffort: "low" },
 			),
-		catch: (cause) => titleError(`completion failed: ${String(cause)}`),
+		catch: (cause) => titleError(`completion failed: ${unknownReason(cause, "unknown")}`),
 	});
 
 	const text = response.content

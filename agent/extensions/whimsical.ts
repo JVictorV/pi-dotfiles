@@ -70,7 +70,10 @@ const messages = [
 ];
 
 function pickRandom(): string {
-	return messages[Math.floor(Math.random() * messages.length)]!;
+	return (
+		messages[Math.floor(Math.random() * messages.length)] ??
+		"Checking if luck is currently online..."
+	);
 }
 
 export default function (pi: ExtensionAPI) {

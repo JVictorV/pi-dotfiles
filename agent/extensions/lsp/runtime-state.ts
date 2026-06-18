@@ -7,7 +7,7 @@ export interface RuntimeState {
 	clients: Map<string, LspClient>;
 	clientDefinitions: Map<string, LspServerDefinition>;
 	broken: Map<string, string>;
-	spawning: Map<string, Deferred.Deferred<LspClient | undefined, Error>>;
+	spawning: Map<string, Deferred.Deferred<LspClient | undefined, unknown>>;
 	shuttingDown: boolean;
 	activeOperations: number;
 	disposeRequested: boolean;

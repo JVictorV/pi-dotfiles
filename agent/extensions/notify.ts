@@ -34,8 +34,13 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { env } from "node:process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Option, Schema } from "effect";
+
+const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String });
+const decodeTextPartOption = Schema.decodeUnknownOption(TextPart);
 
 /** Locate the growlrrr CLI once at load; undefined if not installed. */
 const grrrPath = ["/usr/local/bin/grrr", "/opt/homebrew/bin/grrr"].find((candidate) =>
@@ -50,7 +55,7 @@ const escapeAppleScript = (text: string): string =>
 const shSingleQuote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`;
 
 /** True when running inside Ghostty (Window-menu tab focusing only applies there). */
-const isGhostty = process.env.TERM_PROGRAM === "ghostty";
+const isGhostty = env.TERM_PROGRAM === "ghostty";
 
 /**
  * Build a `sh -c` command that activates Ghostty and clicks the Window-menu
@@ -67,12 +72,8 @@ const buildTabFocusCommand = (sessionName: string): string => {
 
 /** Non-blocking spawn that never blocks pi or throws. Errors ignored. */
 const spawnQuiet = (command: string, args: string[]): void => {
-	try {
-		const child = spawn(command, args, { stdio: "ignore" });
-		child.on("error", () => {});
-	} catch {
-		// ignore — best effort
-	}
+	const child = spawn(command, args, { stdio: "ignore" });
+	child.on("error", () => {});
 };
 
 /**
@@ -102,9 +103,7 @@ const notify = (title: string, body: string, focusName: string | null): void => 
 };
 
 const isTextPart = (part: unknown): part is { type: "text"; text: string } =>
-	Boolean(
-		part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part,
-	);
+	Option.isSome(decodeTextPartOption(part));
 
 const extractLastAssistantText = (
 	messages: Array<{ role?: string; content?: unknown }>,

@@ -1,40 +1,52 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { Effect, Semaphore } from "effect";
+import { Effect, Option, Schema, Semaphore } from "effect";
 
+import { LspPermissionFileError } from "./errors";
 import { permissionPath } from "./paths";
 import type { LspPermission, LspPermissionFile } from "./types";
 
+const failPermissionFile = (reason: string): Effect.Effect<never, LspPermissionFileError> =>
+	Effect.fail(LspPermissionFileError.make({ reason }));
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const NotFoundError = Schema.Struct({ code: Schema.Literal("ENOENT") });
+const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeNotFoundError = Schema.decodeUnknownOption(NotFoundError);
+
+const isNotFoundError = (error: unknown): boolean => Option.isSome(decodeNotFoundError(error));
 
 const isPermission = (value: unknown): value is LspPermission =>
 	value === "allow" || value === "deny";
 
 const emptyPermissionFile = (): LspPermissionFile => ({ version: 1, repos: {} });
 
-const parsePermissionFile = (value: unknown): LspPermissionFile => {
+const parsePermissionFile = Effect.fn("parsePermissionFile")(function* (value: unknown) {
 	if (!isRecord(value)) {
-		throw new Error("agent/lsp-permissions.json must contain a JSON object");
+		return yield* failPermissionFile("agent/lsp-permissions.json must contain a JSON object");
 	}
 	if (value.version !== 1) {
-		throw new Error("agent/lsp-permissions.json has an unsupported version");
+		return yield* failPermissionFile("agent/lsp-permissions.json has an unsupported version");
 	}
 	if (!isRecord(value.repos)) {
-		throw new Error("agent/lsp-permissions.json field repos must be an object");
+		return yield* failPermissionFile("agent/lsp-permissions.json field repos must be an object");
 	}
 
 	const repos: Record<string, Record<string, LspPermission>> = {};
 	for (const [repoRoot, repoPermissions] of Object.entries(value.repos)) {
 		if (!isRecord(repoPermissions)) {
-			throw new Error(`agent/lsp-permissions.json repo ${repoRoot} must be an object`);
+			return yield* failPermissionFile(
+				`agent/lsp-permissions.json repo ${repoRoot} must be an object`,
+			);
 		}
 
 		const permissions: Record<string, LspPermission> = {};
 		for (const [serverId, permission] of Object.entries(repoPermissions)) {
 			if (!isPermission(permission)) {
-				throw new Error(
+				return yield* failPermissionFile(
 					`agent/lsp-permissions.json permission ${repoRoot}.${serverId} must be allow or deny`,
 				);
 			}
@@ -43,43 +55,48 @@ const parsePermissionFile = (value: unknown): LspPermissionFile => {
 		repos[repoRoot] = permissions;
 	}
 
-	return { version: 1, repos };
-};
+	return { version: 1, repos } satisfies LspPermissionFile;
+});
 
 const permissionWriteLock = Semaphore.makeUnsafe(1);
 let tempFileCounter = 0;
 
-const readPermissionFile = (): Effect.Effect<LspPermissionFile, unknown> =>
-	Effect.gen(function* () {
-		const path = permissionPath();
-		const text = yield* Effect.tryPromise({
-			try: () => readFile(path, "utf8"),
-			catch: (error) => error as NodeJS.ErrnoException,
-		}).pipe(
-			Effect.catch((error) => {
-				if (error.code === "ENOENT") return Effect.succeed(undefined);
-				return Effect.fail(error);
+const parseJson = (text: string): Effect.Effect<unknown, LspPermissionFileError> =>
+	decodeUnknownJson(text).pipe(
+		Effect.mapError(() =>
+			LspPermissionFileError.make({
+				reason: "agent/lsp-permissions.json must contain valid JSON",
 			}),
-		);
+		),
+	);
 
-		if (text === undefined) return emptyPermissionFile();
+const readPermissionFile = Effect.fn("readPermissionFile")(function* () {
+	const path = permissionPath();
+	const text = yield* Effect.tryPromise({
+		try: () => readFile(path, "utf8"),
+		catch: (error) => error,
+	}).pipe(
+		Effect.catch((error) => {
+			if (isNotFoundError(error)) return Effect.succeed(undefined);
+			return Effect.fail(error);
+		}),
+	);
 
-		return yield* Effect.try({
-			try: () => parsePermissionFile(JSON.parse(text)),
-			catch: (error) => error,
-		});
-	});
+	if (text === undefined) return emptyPermissionFile();
 
-const writePermissionFile = (file: LspPermissionFile): Effect.Effect<void, unknown> =>
-	Effect.gen(function* () {
-		const path = permissionPath();
-		yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
-		const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
-		yield* Effect.tryPromise(() =>
-			writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
-		);
-		yield* Effect.tryPromise(() => rename(tmpPath, path));
-	});
+	const json = yield* parseJson(text);
+	return yield* parsePermissionFile(json);
+});
+
+const writePermissionFile = Effect.fn("writePermissionFile")(function* (file: LspPermissionFile) {
+	const path = permissionPath();
+	yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
+	const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
+	yield* Effect.tryPromise(() =>
+		writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
+	);
+	yield* Effect.tryPromise(() => rename(tmpPath, path));
+});
 
 export class LspPermissionStore {
 	private file: LspPermissionFile;

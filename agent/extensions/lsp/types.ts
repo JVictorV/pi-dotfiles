@@ -1,4 +1,4 @@
-export const LSP_PERMISSION_VALUES = ["allow", "deny"] as const;
+export const LSP_PERMISSION_VALUES: readonly ["allow", "deny"] = ["allow", "deny"];
 
 export type LspPermission = (typeof LSP_PERMISSION_VALUES)[number];
 

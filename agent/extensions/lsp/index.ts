@@ -21,47 +21,44 @@ const parseServerId = (args: string): string | undefined => {
 	return serverId.length > 0 ? serverId : undefined;
 };
 
-const permissionSummary = (cwd: string): Effect.Effect<string, unknown> =>
-	Effect.gen(function* () {
-		const repoRoot = yield* findRepositoryRoot(cwd);
-		const store = yield* LspPermissionStore.load();
-		const entries = store.entries(repoRoot);
-		if (entries.length === 0) {
-			return `LSP permissions for ${repoRoot}:\n(no stored preferences)`;
-		}
+const permissionSummary = Effect.fn("permissionSummary")(function* (cwd: string) {
+	const repoRoot = yield* findRepositoryRoot(cwd);
+	const store = yield* LspPermissionStore.load();
+	const entries = store.entries(repoRoot);
+	if (entries.length === 0) {
+		return `LSP permissions for ${repoRoot}:\n(no stored preferences)`;
+	}
 
-		const lines = entries.map(
-			([serverId, permission]) => `- ${serverId}: ${formatPermission(permission)}`,
-		);
-		return `LSP permissions for ${repoRoot}:\n${lines.join("\n")}`;
-	});
+	const lines = entries.map(
+		([serverId, permission]) => `- ${serverId}: ${formatPermission(permission)}`,
+	);
+	return `LSP permissions for ${repoRoot}:\n${lines.join("\n")}`;
+});
 
-const setPermission = (
+const setPermission = Effect.fn("setPermission")(function* (
 	cwd: string,
 	serverId: string,
 	permission: LspPermission,
-): Effect.Effect<string, unknown> =>
-	Effect.gen(function* () {
-		const repoRoot = yield* findRepositoryRoot(cwd);
-		const store = yield* LspPermissionStore.load();
-		yield* store.set(repoRoot, serverId, permission);
-		return `Set ${serverId} to ${permission} for ${repoRoot}`;
-	});
+) {
+	const repoRoot = yield* findRepositoryRoot(cwd);
+	const store = yield* LspPermissionStore.load();
+	yield* store.set(repoRoot, serverId, permission);
+	return `Set ${serverId} to ${permission} for ${repoRoot}`;
+});
 
-const resetPermission = (cwd: string, args: string): Effect.Effect<string, unknown> =>
-	Effect.gen(function* () {
-		const repoRoot = yield* findRepositoryRoot(cwd);
-		const serverId = parseServerId(args);
-		const store = yield* LspPermissionStore.load();
+const resetPermission = Effect.fn("resetPermission")(function* (cwd: string, args: string) {
+	const repoRoot = yield* findRepositoryRoot(cwd);
+	const serverId = parseServerId(args);
+	const store = yield* LspPermissionStore.load();
 
-		if (serverId === undefined || serverId === "all") {
-			yield* store.reset(repoRoot);
-			return `Reset all LSP permissions for ${repoRoot}`;
-		}
+	if (serverId === undefined || serverId === "all") {
+		yield* store.reset(repoRoot);
+		return `Reset all LSP permissions for ${repoRoot}`;
+	}
 
-		yield* store.reset(repoRoot, serverId);
-		return `Reset ${serverId} LSP permission for ${repoRoot}`;
-	});
+	yield* store.reset(repoRoot, serverId);
+	return `Reset ${serverId} LSP permission for ${repoRoot}`;
+});
 
 const emitStatus = (pi: ExtensionAPI, runtime: LspRuntime | undefined): void => {
 	const statuses = runtime?.status() ?? [];

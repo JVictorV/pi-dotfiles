@@ -21,11 +21,12 @@ import {
 	LspNoClients,
 	LspPermissionDenied,
 	LspSpawnError,
+	LspToolInputError,
 	LspUnsupportedOperation,
 } from "./errors";
 import type { LspRuntime, LocatedClient } from "./runtime";
 
-const OPERATIONS = [
+const OPERATIONS: readonly [
 	"definition",
 	"references",
 	"hover",
@@ -41,7 +42,23 @@ const OPERATIONS = [
 	"formatting",
 	"organizeImports",
 	"status",
-] as const;
+] = [
+	"definition",
+	"references",
+	"hover",
+	"documentSymbol",
+	"workspaceSymbol",
+	"implementation",
+	"prepareCallHierarchy",
+	"incomingCalls",
+	"outgoingCalls",
+	"diagnostics",
+	"rename",
+	"codeAction",
+	"formatting",
+	"organizeImports",
+	"status",
+];
 
 type LspOperation = (typeof OPERATIONS)[number];
 
@@ -108,22 +125,24 @@ const paramsSchema = Type.Object({
 
 const textContent = (text: string): TextContent => ({ type: "text", text });
 
-const requireFile = (params: LspParams): string => {
-	if (!params.filePath) throw new Error(`${params.operation} requires filePath`);
-	return params.filePath;
+const failInput = (reason: string): Effect.Effect<never, LspToolInputError> =>
+	Effect.fail(LspToolInputError.make({ reason }));
+
+const requireFile = (params: LspParams): Effect.Effect<string, LspToolInputError> => {
+	if (!params.filePath) return failInput(`${params.operation} requires filePath`);
+	return Effect.succeed(params.filePath);
 };
 
-const requirePosition = (
-	params: LspParams,
-): { filePath: string; line: number; character: number } => {
-	const filePath = requireFile(params);
-	if (params.line === undefined || params.line < 1)
-		throw new Error(`${params.operation} requires line >= 1`);
+const requirePosition = Effect.fn("requirePosition")(function* (params: LspParams) {
+	const filePath = yield* requireFile(params);
+	if (params.line === undefined || params.line < 1) {
+		return yield* failInput(`${params.operation} requires line >= 1`);
+	}
 	if (params.character === undefined || params.character < 1) {
-		throw new Error(`${params.operation} requires character >= 1`);
+		return yield* failInput(`${params.operation} requires character >= 1`);
 	}
 	return { filePath, line: Math.floor(params.line), character: Math.floor(params.character) };
-};
+});
 
 const limitFor = (params: LspParams, fallback: number): number => {
 	if (params.limit === undefined || !Number.isFinite(params.limit)) return fallback;
@@ -192,16 +211,18 @@ const normalizeLocations = (value: unknown): ReadonlyArray<NormalizedLocation> =
 const requireNormalizedLocations = (
 	operation: LspOperation,
 	value: unknown,
-): ReadonlyArray<NormalizedLocation> => {
+): Effect.Effect<ReadonlyArray<NormalizedLocation>, LspMalformedResponse> => {
 	const values = responseItems(value);
 	const locations = normalizeLocations(values);
 	if (locations.length !== values.length) {
-		throw LspMalformedResponse.make({
-			operation,
-			reason: `${operation} returned malformed locations`,
-		});
+		return Effect.fail(
+			LspMalformedResponse.make({
+				operation,
+				reason: `${operation} returned malformed locations`,
+			}),
+		);
 	}
-	return locations;
+	return Effect.succeed(locations);
 };
 
 const formatPath = (cwd: string, file: string): string => {
@@ -396,82 +417,83 @@ const truncateText = (text: string): { text: string; truncated: boolean } => {
 	};
 };
 
-const ensureClients = (
+const ensureClients = Effect.fn("ensureClients")(function* (
 	runtime: LspRuntime,
 	params: LspParams,
 	ctx: ExtensionContext,
 	capability: "navigation" | "diagnostics",
-): Effect.Effect<ReadonlyArray<LocatedClient>, unknown> =>
-	Effect.gen(function* () {
-		const filePath = requireFile(params);
-		const resolution = yield* runtime.clientsForFileProgram(filePath, capability, ctx, {
-			prompt: true,
-			waitForDiagnostics: capability === "diagnostics",
-		});
-		if (resolution.clients.length === 0) {
-			if (resolution.unavailable.length === 1) {
-				const unavailable = resolution.unavailable[0];
-				if (unavailable !== undefined) {
-					if (unavailable.reason.includes("Spawn permission is")) {
-						return yield* Effect.fail(
-							LspPermissionDenied.make({
-								serverId: unavailable.serverId,
-								reason: unavailable.reason,
-							}),
-						);
-					}
-					if (unavailable.reason.includes("server binary found")) {
-						return yield* Effect.fail(
-							LspBinaryMissing.make({
-								serverId: unavailable.serverId,
-								reason: unavailable.reason,
-							}),
-						);
-					}
-					if (unavailable.reason.includes("initialize")) {
-						return yield* Effect.fail(
-							LspInitializeError.make({
-								serverId: unavailable.serverId,
-								reason: unavailable.reason,
-							}),
-						);
-					}
-					if (unavailable.reason.includes("Failed to start")) {
-						return yield* Effect.fail(
-							LspSpawnError.make({
-								serverId: unavailable.serverId,
-								reason: unavailable.reason,
-							}),
-						);
-					}
+) {
+	const filePath = yield* requireFile(params);
+	const resolution = yield* runtime.clientsForFileProgram(filePath, capability, ctx, {
+		prompt: true,
+		waitForDiagnostics: capability === "diagnostics",
+	});
+	if (resolution.clients.length === 0) {
+		if (resolution.unavailable.length === 1) {
+			const unavailable = resolution.unavailable[0];
+			if (unavailable !== undefined) {
+				if (unavailable.reason.includes("Spawn permission is")) {
+					return yield* Effect.fail(
+						LspPermissionDenied.make({
+							serverId: unavailable.serverId,
+							reason: unavailable.reason,
+						}),
+					);
+				}
+				if (unavailable.reason.includes("server binary found")) {
+					return yield* Effect.fail(
+						LspBinaryMissing.make({
+							serverId: unavailable.serverId,
+							reason: unavailable.reason,
+						}),
+					);
+				}
+				if (unavailable.reason.includes("initialize")) {
+					return yield* Effect.fail(
+						LspInitializeError.make({
+							serverId: unavailable.serverId,
+							reason: unavailable.reason,
+						}),
+					);
+				}
+				if (unavailable.reason.includes("Failed to start")) {
+					return yield* Effect.fail(
+						LspSpawnError.make({
+							serverId: unavailable.serverId,
+							reason: unavailable.reason,
+						}),
+					);
 				}
 			}
-			const reasons = resolution.unavailable
-				.map((item) => `- ${item.serverId}: ${item.reason}`)
-				.join("\n");
-			return yield* Effect.fail(
-				LspNoClients.make({
-					reason: reasons
-						? `No LSP clients available.\n${reasons}`
-						: "No LSP clients available for this file.",
-				}),
-			);
 		}
-		return resolution.clients;
-	});
+		const reasons = resolution.unavailable
+			.map((item) => `- ${item.serverId}: ${item.reason}`)
+			.join("\n");
+		return yield* Effect.fail(
+			LspNoClients.make({
+				reason: reasons
+					? `No LSP clients available.\n${reasons}`
+					: "No LSP clients available for this file.",
+			}),
+		);
+	}
+	return resolution.clients;
+});
 
 const requireOperationSupport = (
 	operation: LspOperation,
 	clients: ReadonlyArray<LocatedClient>,
-): ReadonlyArray<LocatedClient> => {
+): Effect.Effect<ReadonlyArray<LocatedClient>, LspUnsupportedOperation> => {
 	const supported = clients.filter(({ client }) => client.supportsOperation(operation));
 	if (supported.length === 0) {
-		throw LspUnsupportedOperation.make({
-			operation,
-			reason: `${operation} is not supported by available LSP clients.`,
-		});
+		return Effect.fail(
+			LspUnsupportedOperation.make({
+				operation,
+				reason: `${operation} is not supported by available LSP clients.`,
+			}),
+		);
 	}
-	return supported;
+	return Effect.succeed(supported);
 };
 
 const runAcrossClients = <T>(
@@ -540,7 +562,7 @@ const applyTextEdits = (
 	operation: LspOperation,
 	text: string,
 	edits: ReadonlyArray<TextEditLike>,
-): string => {
+): Effect.Effect<string, LspMalformedResponse> => {
 	const ranges = edits.map((edit) => ({
 		edit,
 		start: offsetAt(text, edit.range.start),
@@ -551,35 +573,41 @@ const applyTextEdits = (
 	let previousStart = text.length + 1;
 	for (const item of ranges) {
 		if (item.start > item.end || item.end > previousStart) {
-			throw LspMalformedResponse.make({
-				operation,
-				reason: `${operation} returned overlapping edits`,
-			});
+			return Effect.fail(
+				LspMalformedResponse.make({
+					operation,
+					reason: `${operation} returned overlapping edits`,
+				}),
+			);
 		}
 		result = `${result.slice(0, item.start)}${item.edit.newText}${result.slice(item.end)}`;
 		previousStart = item.start;
 	}
-	return result;
+	return Effect.succeed(result);
 };
 
-const workspaceEditEntries = (
+const workspaceEditEntries = Effect.fn("workspaceEditEntries")(function* (
 	operation: LspOperation,
 	edit: unknown,
-): ReadonlyArray<readonly [string, ReadonlyArray<TextEditLike>]> => {
+) {
 	if (!isRecord(edit)) {
-		throw LspMalformedResponse.make({
-			operation,
-			reason: `${operation} returned no workspace edit`,
-		});
+		return yield* Effect.fail(
+			LspMalformedResponse.make({
+				operation,
+				reason: `${operation} returned no workspace edit`,
+			}),
+		);
 	}
 	const entries: Array<readonly [string, ReadonlyArray<TextEditLike>]> = [];
 	if (isRecord(edit.changes)) {
 		for (const [uri, edits] of Object.entries(edit.changes)) {
 			if (!Array.isArray(edits) || !edits.every(isTextEdit)) {
-				throw LspMalformedResponse.make({
-					operation,
-					reason: `${operation} returned malformed edits`,
-				});
+				return yield* Effect.fail(
+					LspMalformedResponse.make({
+						operation,
+						reason: `${operation} returned malformed edits`,
+					}),
+				);
 			}
 			entries.push([uri, edits]);
 		}
@@ -591,69 +619,77 @@ const workspaceEditEntries = (
 				!isRecord(change.textDocument) ||
 				typeof change.textDocument.uri !== "string"
 			) {
-				throw LspMalformedResponse.make({
-					operation,
-					reason: `${operation} returned unsupported document changes`,
-				});
+				return yield* Effect.fail(
+					LspMalformedResponse.make({
+						operation,
+						reason: `${operation} returned unsupported document changes`,
+					}),
+				);
 			}
 			if (!Array.isArray(change.edits) || !change.edits.every(isTextEdit)) {
-				throw LspMalformedResponse.make({
-					operation,
-					reason: `${operation} returned malformed document changes`,
-				});
+				return yield* Effect.fail(
+					LspMalformedResponse.make({
+						operation,
+						reason: `${operation} returned malformed document changes`,
+					}),
+				);
 			}
 			entries.push([change.textDocument.uri, change.edits]);
 		}
 	}
 	return entries;
-};
+});
 
-const applyWorkspaceEdit = (
+const applyWorkspaceEdit = Effect.fn("applyWorkspaceEdit")(function* (
 	operation: LspOperation,
 	cwd: string,
 	edit: unknown,
-): Effect.Effect<ReadonlyArray<string>, unknown> =>
-	Effect.gen(function* () {
-		const changedFiles: string[] = [];
-		for (const [uri, edits] of workspaceEditEntries(operation, edit)) {
-			const file = uriToPath(uri);
-			if (file === undefined) {
-				return yield* Effect.fail(
-					LspMalformedResponse.make({
-						operation,
-						reason: `${operation} returned non-file edit URI`,
-					}),
-				);
-			}
-			const text = yield* Effect.tryPromise({
-				try: () => readFile(file, "utf8"),
+) {
+	const changedFiles: string[] = [];
+	for (const [uri, edits] of yield* workspaceEditEntries(operation, edit)) {
+		const file = uriToPath(uri);
+		if (file === undefined) {
+			return yield* Effect.fail(
+				LspMalformedResponse.make({
+					operation,
+					reason: `${operation} returned non-file edit URI`,
+				}),
+			);
+		}
+		const text = yield* Effect.tryPromise({
+			try: () => readFile(file, "utf8"),
+			catch: (cause) => cause,
+		});
+		const next = yield* applyTextEdits(operation, text, edits);
+		if (next !== text) {
+			yield* Effect.tryPromise({
+				try: () => writeFile(file, next, "utf8"),
 				catch: (cause) => cause,
 			});
-			const next = applyTextEdits(operation, text, edits);
-			if (next !== text) {
-				yield* Effect.tryPromise({
-					try: () => writeFile(file, next, "utf8"),
-					catch: (cause) => cause,
-				});
-				changedFiles.push(formatPath(cwd, file));
-			}
+			changedFiles.push(formatPath(cwd, file));
 		}
-		return changedFiles;
-	});
+	}
+	return changedFiles;
+});
 
-const mutationApproval = (
+const mutationApproval = Effect.fn("mutationApproval")(function* (
 	ctx: ExtensionContext,
 	title: string,
 	body: string,
-): Effect.Effect<void, unknown> =>
-	Effect.gen(function* () {
-		if (!ctx.hasUI) return yield* Effect.fail(new Error(`${title} requires interactive approval.`));
-		const approved = yield* Effect.tryPromise({
-			try: () => ctx.ui.confirm(title, body),
-			catch: (cause) => cause,
-		});
-		if (!approved) return yield* Effect.fail(new Error(`${title} was declined.`));
+) {
+	if (!ctx.hasUI) {
+		return yield* Effect.fail(
+			LspToolInputError.make({ reason: `${title} requires interactive approval.` }),
+		);
+	}
+	const approved = yield* Effect.tryPromise({
+		try: () => ctx.ui.confirm(title, body),
+		catch: (cause) => cause,
 	});
+	if (!approved) {
+		return yield* Effect.fail(LspToolInputError.make({ reason: `${title} was declined.` }));
+	}
+});
 
 const formatApplied = (label: string, files: ReadonlyArray<string>): string =>
 	files.length === 0
@@ -695,15 +731,17 @@ const codeActionRequestParams = (
 const firstMutationClient = (
 	operation: LspOperation,
 	clients: ReadonlyArray<LocatedClient>,
-): LocatedClient => {
+): Effect.Effect<LocatedClient, LspUnsupportedOperation> => {
 	const client = clients[0];
 	if (client === undefined) {
-		throw LspUnsupportedOperation.make({
-			operation,
-			reason: `No ${operation} client available.`,
-		});
+		return Effect.fail(
+			LspUnsupportedOperation.make({
+				operation,
+				reason: `No ${operation} client available.`,
+			}),
+		);
 	}
-	return client;
+	return Effect.succeed(client);
 };
 
 export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime | undefined) => {
@@ -720,11 +758,15 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 		],
 		parameters: paramsSchema,
 		async execute(_toolCallId, params: LspParams, _signal, _onUpdate, ctx) {
-			const runtime = getRuntime();
-			if (runtime === undefined) throw new Error("LSP runtime is not initialized.");
-
 			return await Effect.runPromise(
 				Effect.gen(function* () {
+					const runtime = getRuntime();
+					if (runtime === undefined) {
+						return yield* Effect.fail(
+							LspToolInputError.make({ reason: "LSP runtime is not initialized." }),
+						);
+					}
+
 					const ensureClientsFor = (capability: "navigation" | "diagnostics") =>
 						ensureClients(runtime, params, ctx, capability);
 
@@ -746,22 +788,22 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						case "references":
 						case "implementation":
 						case "prepareCallHierarchy": {
-							const { filePath, line, character } = requirePosition(params);
-							const clients = requireOperationSupport(
+							const { filePath, line, character } = yield* requirePosition(params);
+							const clients = yield* requireOperationSupport(
 								params.operation,
 								yield* ensureClientsFor("navigation"),
 							);
 							serverIds = clients.map(({ client }) => client.serverId);
 							const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 							const position = { line: line - 1, character: character - 1 };
-							const method = methodForOperation(params.operation);
+							const method = yield* methodForOperation(params.operation);
 							const raw = yield* runAcrossClients(clients, ({ client }) =>
 								client.requestEffect<unknown[]>(
 									method,
 									requestParamsForOperation(params.operation, file, position),
 								),
 							);
-							const locations = requireNormalizedLocations(params.operation, raw);
+							const locations = yield* requireNormalizedLocations(params.operation, raw);
 							results = locations;
 							text = formatLocationList(
 								ctx.cwd,
@@ -773,8 +815,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						}
 						case "incomingCalls":
 						case "outgoingCalls": {
-							const { filePath, line, character } = requirePosition(params);
-							const clients = requireOperationSupport(
+							const { filePath, line, character } = yield* requirePosition(params);
+							const clients = yield* requireOperationSupport(
 								params.operation,
 								yield* ensureClientsFor("navigation"),
 							);
@@ -790,7 +832,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 									const item = items[0];
 									if (item === undefined) return [];
 									return yield* client.requestEffect<unknown[]>(
-										methodForOperation(params.operation),
+										yield* methodForOperation(params.operation),
 										{
 											item,
 										},
@@ -808,8 +850,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "hover": {
-							const { filePath, line, character } = requirePosition(params);
-							const clients = requireOperationSupport(
+							const { filePath, line, character } = yield* requirePosition(params);
+							const clients = yield* requireOperationSupport(
 								params.operation,
 								yield* ensureClientsFor("navigation"),
 							);
@@ -830,8 +872,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "documentSymbol": {
-							const filePath = requireFile(params);
-							const clients = requireOperationSupport(
+							const filePath = yield* requireFile(params);
+							const clients = yield* requireOperationSupport(
 								params.operation,
 								yield* ensureClientsFor("navigation"),
 							);
@@ -854,7 +896,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "workspaceSymbol": {
-							const clients = requireOperationSupport(
+							const clients = yield* requireOperationSupport(
 								params.operation,
 								params.filePath
 									? yield* ensureClientsFor("navigation")
@@ -862,7 +904,9 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							);
 							if (clients.length === 0) {
 								return yield* Effect.fail(
-									new Error("No running LSP clients. Pass filePath to start a matching server."),
+									LspToolInputError.make({
+										reason: "No running LSP clients. Pass filePath to start a matching server.",
+									}),
 								);
 							}
 							serverIds = clients.map(({ client }) => client.serverId);
@@ -890,11 +934,15 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "rename": {
-							const { filePath, line, character } = requirePosition(params);
-							if (!params.newName) return yield* Effect.fail(new Error("rename requires newName"));
-							const { client } = firstMutationClient(
+							const { filePath, line, character } = yield* requirePosition(params);
+							if (!params.newName) {
+								return yield* Effect.fail(
+									LspToolInputError.make({ reason: "rename requires newName" }),
+								);
+							}
+							const { client } = yield* firstMutationClient(
 								"rename",
-								requireOperationSupport("rename", yield* ensureClientsFor("navigation")),
+								yield* requireOperationSupport("rename", yield* ensureClientsFor("navigation")),
 							);
 							serverIds = [client.serverId];
 							const file = absolutePath(ctx.cwd, filePath);
@@ -915,10 +963,10 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "formatting": {
-							const filePath = requireFile(params);
-							const { client } = firstMutationClient(
+							const filePath = yield* requireFile(params);
+							const { client } = yield* firstMutationClient(
 								"formatting",
-								requireOperationSupport("formatting", yield* ensureClientsFor("navigation")),
+								yield* requireOperationSupport("formatting", yield* ensureClientsFor("navigation")),
 							);
 							serverIds = [client.serverId];
 							const file = absolutePath(ctx.cwd, filePath);
@@ -941,10 +989,10 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "codeAction": {
-							const filePath = requireFile(params);
-							const { client } = firstMutationClient(
+							const filePath = yield* requireFile(params);
+							const { client } = yield* firstMutationClient(
 								"codeAction",
-								requireOperationSupport("codeAction", yield* ensureClientsFor("navigation")),
+								yield* requireOperationSupport("codeAction", yield* ensureClientsFor("navigation")),
 							);
 							serverIds = [client.serverId];
 							const file = absolutePath(ctx.cwd, filePath);
@@ -963,7 +1011,9 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							}
 							const action = actions.find((item) => item.title === params.actionTitle);
 							if (action === undefined)
-								return yield* Effect.fail(new Error(`No code action titled ${params.actionTitle}`));
+								return yield* Effect.fail(
+									LspToolInputError.make({ reason: `No code action titled ${params.actionTitle}` }),
+								);
 							if (action.edit === undefined) {
 								return yield* Effect.fail(
 									LspUnsupportedOperation.make({
@@ -984,10 +1034,13 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							break;
 						}
 						case "organizeImports": {
-							const filePath = requireFile(params);
-							const { client } = firstMutationClient(
+							const filePath = yield* requireFile(params);
+							const { client } = yield* firstMutationClient(
 								"organizeImports",
-								requireOperationSupport("organizeImports", yield* ensureClientsFor("navigation")),
+								yield* requireOperationSupport(
+									"organizeImports",
+									yield* ensureClientsFor("navigation"),
+								),
 							);
 							serverIds = [client.serverId];
 							const file = absolutePath(ctx.cwd, filePath);
@@ -1032,22 +1085,29 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 	});
 };
 
-const methodForOperation = (operation: LspOperation): string => {
+const methodForOperation = (
+	operation: LspOperation,
+): Effect.Effect<string, LspUnsupportedOperation> => {
 	switch (operation) {
 		case "definition":
-			return "textDocument/definition";
+			return Effect.succeed("textDocument/definition");
 		case "references":
-			return "textDocument/references";
+			return Effect.succeed("textDocument/references");
 		case "implementation":
-			return "textDocument/implementation";
+			return Effect.succeed("textDocument/implementation");
 		case "prepareCallHierarchy":
-			return "textDocument/prepareCallHierarchy";
+			return Effect.succeed("textDocument/prepareCallHierarchy");
 		case "incomingCalls":
-			return "callHierarchy/incomingCalls";
+			return Effect.succeed("callHierarchy/incomingCalls");
 		case "outgoingCalls":
-			return "callHierarchy/outgoingCalls";
+			return Effect.succeed("callHierarchy/outgoingCalls");
 		default:
-			throw new Error(`${operation} does not map to a location method`);
+			return Effect.fail(
+				LspUnsupportedOperation.make({
+					operation,
+					reason: `${operation} does not map to a location method`,
+				}),
+			);
 	}
 };
 

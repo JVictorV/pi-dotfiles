@@ -4,6 +4,13 @@ export class LspConfigError extends Schema.TaggedErrorClass<LspConfigError>()("L
 	reason: Schema.String,
 }) {}
 
+export class LspPermissionFileError extends Schema.TaggedErrorClass<LspPermissionFileError>()(
+	"LspPermissionFileError",
+	{
+		reason: Schema.String,
+	},
+) {}
+
 export class LspPermissionDenied extends Schema.TaggedErrorClass<LspPermissionDenied>()(
 	"LspPermissionDenied",
 	{
@@ -56,6 +63,13 @@ export class LspClientBroken extends Schema.TaggedErrorClass<LspClientBroken>()(
 export class LspNoClients extends Schema.TaggedErrorClass<LspNoClients>()("LspNoClients", {
 	reason: Schema.String,
 }) {}
+
+export class LspToolInputError extends Schema.TaggedErrorClass<LspToolInputError>()(
+	"LspToolInputError",
+	{
+		reason: Schema.String,
+	},
+) {}
 
 export class LspUnsupportedOperation extends Schema.TaggedErrorClass<LspUnsupportedOperation>()(
 	"LspUnsupportedOperation",

@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { constants } from "node:fs";
+import { env } from "node:process";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { Effect } from "effect";
@@ -57,75 +58,71 @@ const pathCandidates = (bin: string, dir: string): ReadonlyArray<string> => {
 	return executableExtensions.map((extension) => join(dir, `${bin}${extension}`));
 };
 
-const findInNodeModules = (
+const findInNodeModules = Effect.fn("findInNodeModules")(function* (
 	bin: string,
 	start: string,
 	stop: string,
-): Effect.Effect<string | undefined> =>
-	Effect.gen(function* () {
-		let current = start;
-		while (isWithin(current, stop)) {
-			for (const candidate of pathCandidates(bin, join(current, "node_modules", ".bin"))) {
-				if (yield* canExecute(candidate)) return candidate;
-			}
-			if (current === stop) break;
-			const next = dirname(current);
-			if (next === current) break;
-			current = next;
+) {
+	let current = start;
+	while (isWithin(current, stop)) {
+		for (const candidate of pathCandidates(bin, join(current, "node_modules", ".bin"))) {
+			if (yield* canExecute(candidate)) return candidate;
 		}
-		return undefined;
-	});
+		if (current === stop) break;
+		const next = dirname(current);
+		if (next === current) break;
+		current = next;
+	}
+	return undefined;
+});
 
-const findOnPath = (bin: string): Effect.Effect<string | undefined> =>
-	Effect.gen(function* () {
-		for (const pathEntry of (process.env.PATH ?? "").split(delimiter)) {
-			if (!pathEntry) continue;
-			for (const candidate of pathCandidates(bin, pathEntry)) {
-				if (yield* canExecute(candidate)) return candidate;
-			}
+const findOnPath = Effect.fn("findOnPath")(function* (bin: string) {
+	for (const pathEntry of (env.PATH ?? "").split(delimiter)) {
+		if (!pathEntry) continue;
+		for (const candidate of pathCandidates(bin, pathEntry)) {
+			if (yield* canExecute(candidate)) return candidate;
 		}
-		return undefined;
-	});
+	}
+	return undefined;
+});
 
-export const findExecutable = (
+export const findExecutable = Effect.fn("findExecutable")(function* (
 	bin: string,
 	root: string,
 	cwd: string,
-): Effect.Effect<string | undefined> =>
-	Effect.gen(function* () {
-		if (bin.includes("/") || bin.includes("\\") || isAbsolute(bin)) {
-			const resolved = isAbsolute(bin) ? bin : resolve(root, bin);
-			return (yield* canExecute(resolved)) ? resolved : undefined;
-		}
+) {
+	if (bin.includes("/") || bin.includes("\\") || isAbsolute(bin)) {
+		const resolved = isAbsolute(bin) ? bin : resolve(root, bin);
+		return (yield* canExecute(resolved)) ? resolved : undefined;
+	}
 
-		return (
-			(yield* findInNodeModules(bin, root, cwd)) ??
-			(yield* findInNodeModules(bin, cwd, cwd)) ??
-			(yield* findOnPath(bin))
-		);
-	});
+	return (
+		(yield* findInNodeModules(bin, root, cwd)) ??
+		(yield* findInNodeModules(bin, cwd, cwd)) ??
+		(yield* findOnPath(bin))
+	);
+});
 
-export const resolveNodeModuleFile = (
+export const resolveNodeModuleFile = Effect.fn("resolveNodeModuleFile")(function* (
 	modulePath: string,
 	root: string,
 	cwd: string,
-): Effect.Effect<string | undefined> =>
-	Effect.gen(function* () {
-		let current = root;
-		while (isWithin(current, cwd)) {
-			const candidate = join(current, "node_modules", ...modulePath.split("/"));
-			const exists = yield* Effect.tryPromise(() => access(candidate, constants.F_OK)).pipe(
-				Effect.as(true),
-				Effect.catch(() => Effect.succeed(false)),
-			);
-			if (exists) return candidate;
-			if (current === cwd) break;
-			const next = dirname(current);
-			if (next === current) break;
-			current = next;
-		}
-		return undefined;
-	});
+) {
+	let current = root;
+	while (isWithin(current, cwd)) {
+		const candidate = join(current, "node_modules", ...modulePath.split("/"));
+		const exists = yield* Effect.tryPromise(() => access(candidate, constants.F_OK)).pipe(
+			Effect.as(true),
+			Effect.catch(() => Effect.succeed(false)),
+		);
+		if (exists) return candidate;
+		if (current === cwd) break;
+		const next = dirname(current);
+		if (next === current) break;
+		current = next;
+	}
+	return undefined;
+});
 
 const commandServer = (input: {
 	id: string;
@@ -434,59 +431,57 @@ export const buildServerRegistry = (
 	return registry;
 };
 
-export const findServerRoot = (
+export const findServerRoot = Effect.fn("findServerRoot")(function* (
 	file: string,
 	cwd: string,
 	definition: LspServerDefinition,
-): Effect.Effect<string | undefined, unknown> =>
-	Effect.gen(function* () {
-		let current = dirname(yield* canonicalPath(file));
-		const stop = yield* canonicalPath(cwd);
+) {
+	let current = dirname(yield* canonicalPath(file));
+	const stop = yield* canonicalPath(cwd);
 
-		while (isWithin(current, stop)) {
-			for (const marker of definition.rootMarkers) {
-				const markerPath = join(current, marker);
-				const exists = yield* Effect.tryPromise(() => access(markerPath, constants.F_OK)).pipe(
-					Effect.as(true),
-					Effect.catch(() => Effect.succeed(false)),
-				);
-				if (exists) return current;
-			}
-
-			if (current === stop) break;
-			const next = dirname(current);
-			if (next === current) break;
-			current = next;
+	while (isWithin(current, stop)) {
+		for (const marker of definition.rootMarkers) {
+			const markerPath = join(current, marker);
+			const exists = yield* Effect.tryPromise(() => access(markerPath, constants.F_OK)).pipe(
+				Effect.as(true),
+				Effect.catch(() => Effect.succeed(false)),
+			);
+			if (exists) return current;
 		}
 
-		return definition.strictRoot ? undefined : stop;
-	});
+		if (current === stop) break;
+		const next = dirname(current);
+		if (next === current) break;
+		current = next;
+	}
+
+	return definition.strictRoot ? undefined : stop;
+});
 
 export const matchesExtension = (definition: LspServerDefinition, file: string): boolean => {
 	const lowerFile = file.toLowerCase();
 	return definition.extensions.some((extension) => lowerFile.endsWith(extension.toLowerCase()));
 };
 
-export const spawnServer = (
+export const spawnServer = Effect.fn("spawnServer")(function* (
 	definition: LspServerDefinition,
 	root: string,
 	cwd: string,
-): Effect.Effect<LspServerHandle | undefined, unknown> =>
-	Effect.gen(function* () {
-		const spec = yield* definition.spawn({ root, cwd, definition });
-		if (spec === undefined) return undefined;
+) {
+	const spec = yield* definition.spawn({ root, cwd, definition });
+	if (spec === undefined) return undefined;
 
-		return yield* Effect.sync(() => ({
-			definition,
-			root,
-			process: spawn(spec.command, [...spec.args], {
-				cwd: root,
-				env: { ...process.env, ...spec.env },
-				stdio: ["pipe", "pipe", "pipe"],
-			}) as ChildProcessWithoutNullStreams,
-			initializationOptions: spec.initializationOptions,
-		}));
-	});
+	return yield* Effect.sync(() => ({
+		definition,
+		root,
+		process: spawn(spec.command, [...spec.args], {
+			cwd: root,
+			env: { ...env, ...spec.env },
+			stdio: ["pipe", "pipe", "pipe"],
+		}),
+		initializationOptions: spec.initializationOptions,
+	}));
+});
 
 export const displayRoot = (root: string, cwd: string): string => {
 	const rel = relative(cwd, root);

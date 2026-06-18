@@ -10,10 +10,10 @@ import {
 	type MessageConnection,
 	type MessageWriter,
 } from "vscode-jsonrpc/node";
-import { Duration, Effect } from "effect";
+import { Duration, Effect, Option, Result, Schema } from "effect";
 import type { Diagnostic } from "vscode-languageserver-types";
 
-import { LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
+import { LspClientBroken, LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
 import type { LspServerHandle } from "./server";
 
 const INITIALIZE_TIMEOUT_MS = 45_000;
@@ -179,16 +179,35 @@ type WritableState = NodeJS.WritableStream & {
 	readonly writableFinished?: boolean;
 };
 
-const streamCanAcceptWrites = (stream: NodeJS.WritableStream): boolean => {
-	const state = stream as WritableState;
-	return (
-		state.destroyed !== true &&
-		state.closed !== true &&
-		state.writableEnded !== true &&
-		state.writableFinished !== true &&
-		state.writable !== false
-	);
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const TimeoutTag = Schema.Struct({ _tag: Schema.String });
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
+const decodeTimeoutTagOption = Schema.decodeUnknownOption(TimeoutTag);
+
+const unknownReason = (error: unknown, fallback: string): string => {
+	if (typeof error === "string" && error.length > 0) return error;
+	const decoded = decodeErrorMessageOption(error);
+	if (Option.isSome(decoded) && decoded.value.message.length > 0) return decoded.value.message;
+	return fallback;
 };
+
+const isTimeoutError = (error: unknown): boolean => {
+	const decoded = decodeTimeoutTagOption(error);
+	return Option.isSome(decoded) && decoded.value._tag.includes("Timeout");
+};
+
+class LspMessageWriterError extends Error {
+	constructor() {
+		super("LSP message writer failed");
+	}
+}
+
+const streamCanAcceptWrites = (stream: WritableState): boolean =>
+	stream.destroyed !== true &&
+	stream.closed !== true &&
+	stream.writableEnded !== true &&
+	stream.writableFinished !== true &&
+	stream.writable !== false;
 
 class SafeMessageWriter implements MessageWriter {
 	private readonly errorEmitter = new Emitter<[Error, Message | undefined, number | undefined]>();
@@ -223,11 +242,15 @@ class SafeMessageWriter implements MessageWriter {
 
 	end(): void {
 		if (!streamCanAcceptWrites(this.stream)) return;
-		try {
-			this.stream.end();
-		} catch (error) {
-			this.fireError(error);
-		}
+		const result = Effect.runSync(
+			Effect.result(
+				Effect.try({
+					try: () => this.stream.end(),
+					catch: () => new LspMessageWriterError(),
+				}),
+			),
+		);
+		if (Result.isFailure(result)) this.fireError(result.failure);
 	}
 
 	dispose(): void {
@@ -241,14 +264,20 @@ class SafeMessageWriter implements MessageWriter {
 	private async doWrite(message: Message): Promise<void> {
 		if (this.disposed || !streamCanAcceptWrites(this.stream)) return;
 
-		let payload: Buffer;
-		try {
-			payload = Buffer.from(JSON.stringify(message), "utf8");
-		} catch (error) {
-			this.fireError(error, message);
+		const payloadResult = Effect.runSync(
+			Effect.result(
+				Effect.try({
+					try: () => Buffer.from(JSON.stringify(message), "utf8"),
+					catch: () => new LspMessageWriterError(),
+				}),
+			),
+		);
+		if (Result.isFailure(payloadResult)) {
+			this.fireError(payloadResult.failure, message);
 			return;
 		}
 
+		const payload = payloadResult.success;
 		const headers = `Content-Length: ${payload.byteLength}\r\n\r\n`;
 		await this.writeChunk(headers, "ascii", message);
 		await this.writeChunk(payload, undefined, message);
@@ -267,23 +296,30 @@ class SafeMessageWriter implements MessageWriter {
 				resolve();
 			};
 
-			try {
-				if (typeof chunk === "string") {
-					this.stream.write(chunk, encoding, callback);
-				} else {
-					this.stream.write(chunk, callback);
-				}
-			} catch (error) {
-				this.fireError(error, message);
+			const result = Effect.runSync(
+				Effect.result(
+					Effect.try({
+						try: () => {
+							if (typeof chunk === "string") {
+								this.stream.write(chunk, encoding, callback);
+							} else {
+								this.stream.write(chunk, callback);
+							}
+						},
+						catch: () => new LspMessageWriterError(),
+					}),
+				),
+			);
+			if (Result.isFailure(result)) {
+				this.fireError(result.failure, message);
 				resolve();
 			}
 		});
 	}
 
-	private fireError(error: unknown, message?: Message): void {
-		const normalized = error instanceof Error ? error : new Error(String(error));
+	private fireError(error: Error, message?: Message): void {
 		this.errorCount += 1;
-		this.errorEmitter.fire([normalized, message, this.errorCount]);
+		this.errorEmitter.fire([error, message, this.errorCount]);
 	}
 }
 
@@ -372,13 +408,10 @@ export class LspClient {
 			}).pipe(
 				Effect.timeout(Duration.millis(INITIALIZE_TIMEOUT_MS)),
 				Effect.catch((error) => {
-					const timedOut =
-						isRecord(error) && typeof error._tag === "string" && error._tag.includes("Timeout");
+					const timedOut = isTimeoutError(error);
 					const reason = timedOut
 						? `${handle.definition.id} initialize timed out after ${INITIALIZE_TIMEOUT_MS}ms`
-						: error instanceof Error
-							? error.message
-							: String(error);
+						: unknownReason(error, `${handle.definition.id} initialize failed`);
 					return Effect.fail(LspInitializeError.make({ serverId: handle.definition.id, reason }));
 				}),
 			);
@@ -515,7 +548,12 @@ export class LspClient {
 	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
 		if (!this.canSend()) {
 			this.broken = true;
-			return Effect.fail(new Error(`${this.serverId} language server is not running`));
+			return Effect.fail(
+				LspClientBroken.make({
+					serverId: this.serverId,
+					reason: `${this.serverId} language server is not running`,
+				}),
+			);
 		}
 
 		return Effect.tryPromise({
@@ -524,13 +562,10 @@ export class LspClient {
 		}).pipe(
 			Effect.timeout(Duration.millis(REQUEST_TIMEOUT_MS)),
 			Effect.catch((error) => {
-				const timedOut =
-					isRecord(error) && typeof error._tag === "string" && error._tag.includes("Timeout");
+				const timedOut = isTimeoutError(error);
 				const reason = timedOut
 					? `${this.serverId} ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`
-					: error instanceof Error
-						? error.message
-						: String(error);
+					: unknownReason(error, `${this.serverId} ${method} failed`);
 				return Effect.fail(
 					timedOut
 						? LspRequestTimeout.make({ serverId: this.serverId, method, reason })
@@ -590,23 +625,16 @@ export class LspClient {
 
 	private waitForPushDiagnosticsEffect(file: string, timeoutMs: number): Effect.Effect<void> {
 		if (this.diagnosticsByFile.has(file)) return Effect.succeed(undefined);
-		return Effect.callback<void>((resume) => {
-			let finished = false;
-			let timeout: NodeJS.Timeout | undefined;
-			const finish = () => {
-				if (finished) return;
-				finished = true;
-				if (timeout !== undefined) clearTimeout(timeout);
-				this.diagnosticListeners.delete(listener);
-				resume(Effect.succeed(undefined));
-			};
+		const waitForPush = Effect.callback<void>((resume) => {
 			const listener = (diagnosticFile: string) => {
-				if (diagnosticFile === file) finish();
+				if (diagnosticFile === file) resume(Effect.succeed(undefined));
 			};
 			this.diagnosticListeners.add(listener);
-			timeout = setTimeout(finish, timeoutMs);
-			return Effect.sync(finish);
+			return Effect.sync(() => {
+				this.diagnosticListeners.delete(listener);
+			});
 		});
+		return waitForPush.pipe(Effect.race(Effect.sleep(Duration.millis(timeoutMs))));
 	}
 
 	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void, unknown> {
@@ -813,8 +841,5 @@ const isDiagnosticRegistration = (value: unknown): value is DiagnosticRegistrati
 
 const isPublishDiagnostics = (
 	value: unknown,
-): value is { uri: string; diagnostics: Diagnostic[] } => {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	return typeof record.uri === "string" && isDiagnosticArray(record.diagnostics);
-};
+): value is { uri: string; diagnostics: Diagnostic[] } =>
+	isRecord(value) && typeof value.uri === "string" && isDiagnosticArray(value.diagnostics);

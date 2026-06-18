@@ -30,16 +30,12 @@ const idleSound = join(soundFolder, "idle.ogg");
  * blocks the agent loop; errors are ignored (e.g. non-macOS, missing file).
  */
 const playSound = (file: string): void => {
-	try {
-		const child = spawn("afplay", [file], {
-			stdio: "ignore",
-			detached: true,
-		});
-		child.on("error", () => {});
-		child.unref();
-	} catch {
-		// ignore — best effort
-	}
+	const child = spawn("afplay", [file], {
+		stdio: "ignore",
+		detached: true,
+	});
+	child.on("error", () => {});
+	child.unref();
 };
 
 export default function (pi: ExtensionAPI) {
