@@ -4,7 +4,7 @@
  * Rendered as a `belowEditor` widget so it sits directly below the editor.
  *
  * Single-line layout:
- *   model · thinking │ ~/dir (branch) ⇡#PR +ins/-del • session   45%  90k/200k
+ *   model · thinking │ ~/dir (branch) ⇡#PR • session   45%  90k/200k
  *
  * Pi data sources (vs ccstatusline widgets):
  *   - model           -> ctx.model.id
@@ -12,7 +12,6 @@
  *   - directory       -> ctx.sessionManager.getCwd() (home-shortened)
  *   - session name    -> ctx.sessionManager.getSessionName()
  *   - git-branch      -> git rev-parse (cached; widgets get no footerData)
- *   - git-changes     -> git diff --numstat (cached)
  *   - pr-link         -> gh pr view <branch> (cached; OSC 8 clickable link)
  *
  * The data layer (git + gh subprocesses, JSON decoding, state refresh) runs as
@@ -44,7 +43,7 @@ const THINKING_COLOR: Record<ThinkingLevel, ThemeColor> = {
 	xhigh: "thinkingXhigh",
 };
 
-type GitState = { branch: string; added: number; removed: number };
+type GitState = { branch: string };
 type LspClientState = { id: string; label: string };
 type LspState = { running: ReadonlyArray<LspClientState>; broken: ReadonlyArray<LspClientState> };
 type PrState = { number: number; url: string } | null;
@@ -83,18 +82,11 @@ const runExec = (pi: ExtensionAPI, cmd: string, args: ReadonlyArray<string>, tim
 		catch: (cause) => statusLineError(`${cmd} exec failed: ${unknownReason(cause, "unknown")}`),
 	});
 
-/** Branch + staged/unstaged line changes from git (non-zero exit → empty state). */
+/** Branch from git (non-zero exit → empty state). */
 const fetchGit = Effect.fn("fetchGit")(function* (pi: ExtensionAPI) {
-	const [branchRes, diffRes] = yield* Effect.all(
-		[
-			runExec(pi, "git", ["rev-parse", "--abbrev-ref", "HEAD"], 3000),
-			runExec(pi, "git", ["diff", "HEAD", "--numstat"], 3000),
-		],
-		{ concurrency: "unbounded" },
-	);
+	const branchRes = yield* runExec(pi, "git", ["rev-parse", "--abbrev-ref", "HEAD"], 3000);
 	const branch = branchRes.code === 0 ? branchRes.stdout.trim().replace(/^HEAD$/, "") : "";
-	const changes = diffRes.code === 0 ? parseNumstat(diffRes.stdout) : { added: 0, removed: 0 };
-	return { branch, ...changes } satisfies GitState;
+	return { branch } satisfies GitState;
 });
 
 /** The open PR for `branch` via `gh`, or null when there is none / gh is absent. */
@@ -106,19 +98,6 @@ const fetchPr = Effect.fn("fetchPr")(function* (pi: ExtensionAPI, branch: string
 		Effect.mapError(() => statusLineError("gh json parse failed")),
 	);
 });
-
-/** Sum staged + unstaged line changes from `git diff --numstat` output. */
-function parseNumstat(stdout: string): { added: number; removed: number } {
-	let added = 0;
-	let removed = 0;
-	for (const line of stdout.split("\n")) {
-		const [a, d] = line.split("\t");
-		if (a === undefined || d === undefined) continue;
-		if (a !== "-") added += Number(a) || 0;
-		if (d !== "-") removed += Number(d) || 0;
-	}
-	return { added, removed };
-}
 
 const ACRONYMS = new Set(["gpt", "ai", "llm", "vl", "oss"]);
 
@@ -207,7 +186,7 @@ function shortLspName(client: LspClientState): string {
 	}
 }
 
-/** Build the left side: model · thinking │ ~/dir (branch) +ins -del • session. */
+/** Build the left side: model · thinking │ ~/dir (branch) • session. */
 function buildLeft(theme: Theme, p: LeftParts): string {
 	const segs: string[] = [theme.fg("accent", p.model)];
 	if (p.thinking && p.thinking !== "off") {
@@ -222,12 +201,6 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 	if (p.pr) {
 		const label = theme.fg("mdLink", `⇡#${p.pr.number}`);
 		segs.push(getCapabilities().hyperlinks ? hyperlink(label, p.pr.url) : label);
-	}
-	if (p.git.added || p.git.removed) {
-		const parts: string[] = [];
-		if (p.git.added) parts.push(theme.fg("toolDiffAdded", `+${p.git.added}`));
-		if (p.git.removed) parts.push(theme.fg("toolDiffRemoved", `-${p.git.removed}`));
-		segs.push(parts.join(" "));
 	}
 	{
 		const running = p.lsp.running.map(shortLspName);
@@ -294,7 +267,7 @@ function renderLine(
 
 export default function (pi: ExtensionAPI) {
 	// Cached git state, refreshed off the render path.
-	let gitState: GitState = { branch: "", added: 0, removed: 0 };
+	let gitState: GitState = { branch: "" };
 	let lspState: LspState = { running: [], broken: [] };
 	let prState: PrState = null;
 	// Branch the cached PR was looked up for — avoids showing a stale PR after a switch.
@@ -316,7 +289,7 @@ export default function (pi: ExtensionAPI) {
 	}).pipe(
 		Effect.catchCause(() =>
 			Effect.sync(() => {
-				gitState = { branch: "", added: 0, removed: 0 };
+				gitState = { branch: "" };
 				prState = null;
 				prBranch = "";
 			}),
