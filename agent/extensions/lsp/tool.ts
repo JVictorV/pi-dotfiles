@@ -820,14 +820,15 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
-					const raw = await Promise.all(
-						clients.map(({ client }) =>
-							Effect.runPromise(
+					const raw = await Effect.runPromise(
+						Effect.forEach(
+							clients,
+							({ client }) =>
 								client.requestEffect("textDocument/hover", {
 									textDocument: { uri: file },
 									position: { line: line - 1, character: character - 1 },
 								}),
-							),
+							{ concurrency: "unbounded" },
 						),
 					);
 					const hovers = raw.map(hoverToText).filter(Boolean);
