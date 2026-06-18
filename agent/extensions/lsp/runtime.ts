@@ -43,6 +43,8 @@ interface RuntimeOptions {
 
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
 
+const isBrokenClient = (client: LspClient): boolean => client.status.status === "broken";
+
 export class LspRuntime {
 	readonly cwd: string;
 
@@ -71,7 +73,12 @@ export class LspRuntime {
 	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
 		const clients: LocatedClient[] = [];
 		for (const client of this.clients.values()) {
-			const definition = this.clientDefinitions.get(clientKey(client.root, client.serverId));
+			const key = clientKey(client.root, client.serverId);
+			const definition = this.clientDefinitions.get(key);
+			if (isBrokenClient(client)) {
+				this.broken.set(key, `${client.label} server is broken.`);
+				continue;
+			}
 			if (definition === undefined || !definition.capabilities[capability]) continue;
 			clients.push({ client, definition });
 		}
@@ -143,7 +150,20 @@ export class LspRuntime {
 			const key = clientKey(match.root, match.definition.id);
 			const existing = this.clients.get(key);
 			if (existing !== undefined) {
+				if (isBrokenClient(existing)) {
+					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
+					this.broken.set(key, reason);
+					unavailable.push({ serverId: match.definition.id, reason });
+					continue;
+				}
+
 				await existing.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
+				if (isBrokenClient(existing)) {
+					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
+					this.broken.set(key, reason);
+					unavailable.push({ serverId: match.definition.id, reason });
+					continue;
+				}
 				clients.push({ client: existing, definition: match.definition });
 				continue;
 			}
@@ -169,7 +189,9 @@ export class LspRuntime {
 
 			const client = await this.spawnClient(match.definition, match.root, file);
 			if (client === undefined) {
-				const reason = `No ${match.definition.label} server binary found. ${match.definition.installHint}`;
+				const reason =
+					this.broken.get(key) ??
+					`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
 				unavailable.push({ serverId: match.definition.id, reason });
 				continue;
 			}
@@ -185,9 +207,17 @@ export class LspRuntime {
 		const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 		await Promise.all(
 			[...this.clients.values()].map(async (client) => {
-				const definition = this.clientDefinitions.get(clientKey(client.root, client.serverId));
+				const key = clientKey(client.root, client.serverId);
+				const definition = this.clientDefinitions.get(key);
+				if (isBrokenClient(client)) {
+					this.broken.set(key, `${client.label} server is broken.`);
+					return;
+				}
 				if (definition === undefined || !matchesExtension(definition, file)) return;
 				await client.open(file, false).catch(() => undefined);
+				if (isBrokenClient(client)) {
+					this.broken.set(key, `${client.label} server is broken.`);
+				}
 			}),
 		);
 	}
@@ -237,14 +267,20 @@ export class LspRuntime {
 		file: string,
 	): Promise<LspClient | undefined> {
 		const key = clientKey(root, definition.id);
+		const handle = await spawnServer(definition, root, this.cwd).catch((error: unknown) => {
+			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
+			this.broken.set(key, `${reason} (${file})`);
+			return undefined;
+		});
+		if (handle === undefined) return undefined;
+
 		try {
-			const handle = await spawnServer(definition, root, this.cwd);
-			if (handle === undefined) return undefined;
 			const client = await LspClient.create(handle);
 			this.clients.set(key, client);
 			this.clientDefinitions.set(key, definition);
 			return client;
 		} catch (error) {
+			if (!handle.process.killed) handle.process.kill("SIGTERM");
 			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
 			this.broken.set(key, `${reason} (${file})`);
 			return undefined;

@@ -4,9 +4,11 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import {
 	createMessageConnection,
+	Emitter,
 	StreamMessageReader,
-	StreamMessageWriter,
+	type Message,
 	type MessageConnection,
+	type MessageWriter,
 } from "vscode-jsonrpc/node";
 import type { Diagnostic } from "vscode-languageserver-types";
 
@@ -20,6 +22,13 @@ const DIAGNOSTIC_SETTLE_MS = 250;
 interface ServerCapabilities {
 	textDocumentSync?: unknown;
 	diagnosticProvider?: unknown;
+	hoverProvider?: unknown;
+	definitionProvider?: unknown;
+	referencesProvider?: unknown;
+	documentSymbolProvider?: unknown;
+	workspaceSymbolProvider?: unknown;
+	implementationProvider?: unknown;
+	callHierarchyProvider?: unknown;
 }
 
 interface OpenDocument {
@@ -105,6 +114,122 @@ const languageIdForPath = (file: string): string => {
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+type WritableState = NodeJS.WritableStream & {
+	readonly closed?: boolean;
+	readonly destroyed?: boolean;
+	readonly writable?: boolean;
+	readonly writableEnded?: boolean;
+	readonly writableFinished?: boolean;
+};
+
+const streamCanAcceptWrites = (stream: NodeJS.WritableStream): boolean => {
+	const state = stream as WritableState;
+	return (
+		state.destroyed !== true &&
+		state.closed !== true &&
+		state.writableEnded !== true &&
+		state.writableFinished !== true &&
+		state.writable !== false
+	);
+};
+
+class SafeMessageWriter implements MessageWriter {
+	private readonly errorEmitter = new Emitter<[Error, Message | undefined, number | undefined]>();
+	private readonly closeEmitter = new Emitter<void>();
+	private errorCount = 0;
+	private disposed = false;
+	private writeQueue = Promise.resolve();
+
+	private readonly onStreamError = (error: Error) => this.fireError(error);
+	private readonly onStreamClose = () => this.closeEmitter.fire();
+
+	constructor(private readonly stream: NodeJS.WritableStream) {
+		stream.on("error", this.onStreamError);
+		stream.on("close", this.onStreamClose);
+	}
+
+	get onError(): MessageWriter["onError"] {
+		return this.errorEmitter.event;
+	}
+
+	get onClose(): MessageWriter["onClose"] {
+		return this.closeEmitter.event;
+	}
+
+	write(message: Message): Promise<void> {
+		this.writeQueue = this.writeQueue.then(
+			() => this.doWrite(message),
+			() => this.doWrite(message),
+		);
+		return this.writeQueue;
+	}
+
+	end(): void {
+		if (!streamCanAcceptWrites(this.stream)) return;
+		try {
+			this.stream.end();
+		} catch (error) {
+			this.fireError(error);
+		}
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		this.stream.off("error", this.onStreamError);
+		this.stream.off("close", this.onStreamClose);
+		this.errorEmitter.dispose();
+		this.closeEmitter.dispose();
+	}
+
+	private async doWrite(message: Message): Promise<void> {
+		if (this.disposed || !streamCanAcceptWrites(this.stream)) return;
+
+		let payload: Buffer;
+		try {
+			payload = Buffer.from(JSON.stringify(message), "utf8");
+		} catch (error) {
+			this.fireError(error, message);
+			return;
+		}
+
+		const headers = `Content-Length: ${payload.byteLength}\r\n\r\n`;
+		await this.writeChunk(headers, "ascii", message);
+		await this.writeChunk(payload, undefined, message);
+	}
+
+	private async writeChunk(
+		chunk: string | Buffer,
+		encoding: BufferEncoding | undefined,
+		message: Message,
+	): Promise<void> {
+		if (this.disposed || !streamCanAcceptWrites(this.stream)) return;
+
+		await new Promise<void>((resolve) => {
+			const callback = (error: Error | null | undefined) => {
+				if (error !== undefined && error !== null) this.fireError(error, message);
+				resolve();
+			};
+
+			try {
+				if (typeof chunk === "string") {
+					this.stream.write(chunk, encoding, callback);
+				} else {
+					this.stream.write(chunk, callback);
+				}
+			} catch (error) {
+				this.fireError(error, message);
+				resolve();
+			}
+		});
+	}
+
+	private fireError(error: unknown, message?: Message): void {
+		const normalized = error instanceof Error ? error : new Error(String(error));
+		this.errorCount += 1;
+		this.errorEmitter.fire([normalized, message, this.errorCount]);
+	}
+}
+
 export class LspClient {
 	readonly serverId: string;
 	readonly label: string;
@@ -112,9 +237,12 @@ export class LspClient {
 	readonly connection: MessageConnection;
 
 	private readonly handle: LspServerHandle;
+	private serverCapabilities: ServerCapabilities = {};
 	private readonly diagnosticsByFile = new Map<string, Diagnostic[]>();
 	private readonly openDocuments = new Map<string, OpenDocument>();
 	private broken = false;
+	private closing = false;
+	private disposed = false;
 
 	private constructor(handle: LspServerHandle, connection: MessageConnection) {
 		this.handle = handle;
@@ -127,13 +255,13 @@ export class LspClient {
 	static async create(handle: LspServerHandle): Promise<LspClient> {
 		const connection = createMessageConnection(
 			new StreamMessageReader(handle.process.stdout),
-			new StreamMessageWriter(handle.process.stdin),
+			new SafeMessageWriter(handle.process.stdin),
 		);
 		const client = new LspClient(handle, connection);
 		client.registerHandlers();
 		connection.listen();
 
-		await withTimeout(
+		const initializeResult = await withTimeout(
 			connection.sendRequest<{ capabilities?: ServerCapabilities }>("initialize", {
 				rootUri: pathToFileURL(handle.root).href,
 				processId: handle.process.pid,
@@ -162,10 +290,14 @@ export class LspClient {
 			INITIALIZE_TIMEOUT_MS,
 			`${handle.definition.id} initialize`,
 		);
+		client.serverCapabilities = initializeResult.capabilities ?? {};
 
 		await connection.sendNotification("initialized", {});
 		handle.process.stderr.resume();
 		handle.process.on("exit", () => {
+			client.broken = true;
+		});
+		handle.process.stdin.on("error", () => {
 			client.broken = true;
 		});
 
@@ -185,13 +317,43 @@ export class LspClient {
 		return this.diagnosticsByFile;
 	}
 
+	supportsOperation(operation: string): boolean {
+		switch (operation) {
+			case "definition":
+				return this.hasProvider(this.serverCapabilities.definitionProvider);
+			case "references":
+				return this.hasProvider(this.serverCapabilities.referencesProvider);
+			case "hover":
+				return this.hasProvider(this.serverCapabilities.hoverProvider);
+			case "documentSymbol":
+				return this.hasProvider(this.serverCapabilities.documentSymbolProvider);
+			case "workspaceSymbol":
+				return this.hasProvider(this.serverCapabilities.workspaceSymbolProvider);
+			case "implementation":
+				return this.hasProvider(this.serverCapabilities.implementationProvider);
+			case "prepareCallHierarchy":
+			case "incomingCalls":
+			case "outgoingCalls":
+				return this.hasProvider(this.serverCapabilities.callHierarchyProvider);
+			case "diagnostics":
+				return true;
+			default:
+				return false;
+		}
+	}
+
 	async open(file: string, waitForDiagnostics: boolean): Promise<void> {
 		const text = await readFile(file, "utf8");
+		if (!this.canSend()) {
+			this.broken = true;
+			return;
+		}
+
 		const uri = pathToFileURL(file).href;
 		const open = this.openDocuments.get(file);
 		if (open === undefined) {
 			this.openDocuments.set(file, { version: 1, text });
-			this.connection.sendNotification("textDocument/didOpen", {
+			await this.notify("textDocument/didOpen", {
 				textDocument: {
 					uri,
 					languageId: languageIdForPath(file),
@@ -202,7 +364,7 @@ export class LspClient {
 		} else if (open.text !== text) {
 			const version = open.version + 1;
 			this.openDocuments.set(file, { version, text });
-			this.connection.sendNotification("textDocument/didChange", {
+			await this.notify("textDocument/didChange", {
 				textDocument: { uri, version },
 				contentChanges: [{ text }],
 			});
@@ -214,28 +376,68 @@ export class LspClient {
 	}
 
 	async request<T>(method: string, params: unknown): Promise<T> {
-		return await withTimeout(
-			this.connection.sendRequest<T>(method, params),
-			REQUEST_TIMEOUT_MS,
-			`${this.serverId} ${method}`,
-		);
+		if (!this.canSend()) {
+			this.broken = true;
+			throw new Error(`${this.serverId} language server is not running`);
+		}
+
+		try {
+			return await withTimeout(
+				this.connection.sendRequest<T>(method, params),
+				REQUEST_TIMEOUT_MS,
+				`${this.serverId} ${method}`,
+			);
+		} catch (error) {
+			this.broken = true;
+			throw error;
+		}
 	}
 
 	async shutdown(): Promise<void> {
+		if (this.disposed || this.closing) return;
+		this.closing = true;
+
 		try {
-			await withTimeout(
-				this.connection.sendRequest("shutdown", null),
-				SHUTDOWN_TIMEOUT_MS,
-				`${this.serverId} shutdown`,
-			);
-			this.connection.sendNotification("exit");
+			if (!this.broken && streamCanAcceptWrites(this.handle.process.stdin)) {
+				await withTimeout(
+					this.connection.sendRequest("shutdown", null),
+					SHUTDOWN_TIMEOUT_MS,
+					`${this.serverId} shutdown`,
+				);
+				await this.connection.sendNotification("exit").catch(() => undefined);
+			}
 		} catch {
 			// Fall through to process termination.
+		} finally {
+			this.disposed = true;
+			this.broken = true;
+			this.connection.dispose();
+			if (!this.handle.process.killed) {
+				this.handle.process.kill("SIGTERM");
+			}
 		}
+	}
 
-		this.connection.dispose();
-		if (!this.handle.process.killed) {
-			this.handle.process.kill("SIGTERM");
+	private canSend(): boolean {
+		return (
+			!this.closing &&
+			!this.disposed &&
+			!this.broken &&
+			streamCanAcceptWrites(this.handle.process.stdin)
+		);
+	}
+
+	private hasProvider(provider: unknown): boolean {
+		return provider !== undefined && provider !== null && provider !== false;
+	}
+
+	private async notify(method: string, params: unknown): Promise<void> {
+		if (!this.canSend()) return;
+
+		try {
+			await this.connection.sendNotification(method, params);
+		} catch {
+			this.broken = true;
 		}
 	}
 

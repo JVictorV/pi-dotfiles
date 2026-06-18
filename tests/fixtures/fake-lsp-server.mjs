@@ -35,8 +35,12 @@ const publishDiagnostics = (uri) => {
 	});
 };
 
-connection.onRequest("initialize", () => ({
-	capabilities: {
+connection.onRequest("initialize", () => {
+	if (process.env.FAKE_LSP_INITIALIZE_ERROR === "1") {
+		throw new Error("fake initialize failed");
+	}
+
+	const capabilities = {
 		textDocumentSync: 1,
 		hoverProvider: true,
 		definitionProvider: true,
@@ -45,8 +49,10 @@ connection.onRequest("initialize", () => ({
 		workspaceSymbolProvider: true,
 		implementationProvider: true,
 		callHierarchyProvider: true,
-	},
-}));
+	};
+	if (process.env.FAKE_LSP_NO_DEFINITION === "1") delete capabilities.definitionProvider;
+	return { capabilities };
+});
 
 connection.onNotification("initialized", () => {});
 
@@ -63,13 +69,16 @@ connection.onNotification("textDocument/didChange", (params) => {
 connection.onRequest("textDocument/hover", (params) => ({
 	contents: {
 		kind: "markdown",
-		value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character}`,
+		value: `hover for ${params.textDocument.uri} at ${params.position.line}:${params.position.character} text=${documents.get(params.textDocument.uri) ?? ""}`,
 	},
 }));
 
-connection.onRequest("textDocument/definition", (params) => [
-	location(params.textDocument.uri, 1, 2),
-]);
+connection.onRequest("textDocument/definition", (params) => {
+	if (process.env.FAKE_LSP_MALFORMED_DEFINITION === "1") {
+		return [{ uri: params.textDocument.uri, range: { start: { line: "bad", character: 2 } } }];
+	}
+	return [location(params.textDocument.uri, 1, 2)];
+});
 connection.onRequest("textDocument/references", (params) => [
 	location(params.textDocument.uri, 0, 0),
 	location(params.textDocument.uri, 2, 4),

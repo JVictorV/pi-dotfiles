@@ -2,6 +2,19 @@
 
 We are building LSP support as a global pi extension under `agent/extensions/lsp/`, adapting the core architecture from `anomalyco/opencode` without importing from the `.repos/opencode` submodule at runtime.
 
+## Implementation status
+
+As of 2026-06-18, the read-only v1 extension is implemented under `agent/extensions/lsp/`:
+
+- One `lsp` tool exposes definition, references, hover, document symbols, workspace symbols, implementation, call hierarchy, diagnostics, and status.
+- Built-in server registry, lazy spawning, repository-scoped spawn permissions, global config overrides, root detection, binary resolution, status events, and slash commands are in place.
+- LSP clients are session-scoped and shut down on session shutdown/reload. Crashed clients are marked broken and skipped until `/lsp-restart`.
+- Tool output includes model-friendly text plus normalized `details.results` instead of raw LSP payloads for implemented result types.
+- Passive sync keeps already-running clients updated when touched files change.
+- Tests cover startup, permissions reuse, diagnostics, broken-client restart, malformed location responses, capability negotiation, passive sync, slash command registration/status, and the read-only navigation operations.
+
+Remaining work is Phase 2 mutating actions plus additional hardening/coverage around edge-case server response shapes and binary/root-resolution scenarios.
+
 ## Decisions
 
 - **Extension boundary**: Implement as a pi extension, not a pi core change.

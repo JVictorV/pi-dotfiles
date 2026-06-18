@@ -48,6 +48,23 @@ interface NormalizedLocation {
 	label?: string;
 }
 
+interface NormalizedDiagnostic {
+	file: string;
+	line: number;
+	character: number;
+	severity: string;
+	message: string;
+	source?: string;
+}
+
+interface NormalizedSymbol {
+	name: string;
+	file?: string;
+	line?: number;
+	character?: number;
+	children?: ReadonlyArray<NormalizedSymbol>;
+}
+
 interface LspDetails {
 	operation: LspOperation;
 	serverIds: ReadonlyArray<string>;
@@ -143,15 +160,24 @@ const locationFromRange = (
 	return location;
 };
 
-const normalizeLocations = (value: unknown): ReadonlyArray<NormalizedLocation> => {
-	const values = Array.isArray(value)
-		? value
-		: value === null || value === undefined
-			? []
-			: [value];
-	return values
+const responseItems = (value: unknown): ReadonlyArray<unknown> =>
+	Array.isArray(value) ? value : value === null || value === undefined ? [] : [value];
+
+const normalizeLocations = (value: unknown): ReadonlyArray<NormalizedLocation> =>
+	responseItems(value)
 		.map(normalizeLocation)
 		.filter((location): location is NormalizedLocation => location !== undefined);
+
+const requireNormalizedLocations = (
+	operation: LspOperation,
+	value: unknown,
+): ReadonlyArray<NormalizedLocation> => {
+	const values = responseItems(value);
+	const locations = normalizeLocations(values);
+	if (locations.length !== values.length) {
+		throw new Error(`${operation} returned malformed locations`);
+	}
+	return locations;
 };
 
 const formatPath = (cwd: string, file: string): string => {
@@ -199,6 +225,29 @@ const hoverPartToText = (value: unknown): string => {
 
 const symbolName = (value: unknown): string | undefined =>
 	isRecord(value) && typeof value.name === "string" ? value.name : undefined;
+
+const normalizeDocumentSymbols = (value: unknown, filePath: string): NormalizedSymbol[] => {
+	if (!Array.isArray(value)) return [];
+	const symbols: NormalizedSymbol[] = [];
+	for (const item of value) {
+		if (!isRecord(item)) continue;
+		const name = symbolName(item);
+		if (name === undefined) continue;
+		const loc = isRecord(item.selectionRange)
+			? locationFromRange(filePath, item.selectionRange)
+			: undefined;
+		const children = normalizeDocumentSymbols(item.children, filePath);
+		const symbol: NormalizedSymbol = { name };
+		if (loc !== undefined) {
+			symbol.file = loc.file;
+			symbol.line = loc.line;
+			symbol.character = loc.character;
+		}
+		if (children.length > 0) symbol.children = children;
+		symbols.push(symbol);
+	}
+	return symbols;
+};
 
 const flattenDocumentSymbols = (
 	value: unknown,
@@ -264,6 +313,29 @@ const diagnosticSeverity = (severity: unknown): string => {
 	}
 };
 
+const diagnosticMessageToText = (message: Diagnostic["message"]): string =>
+	typeof message === "string" ? message : message.value;
+
+const normalizeDiagnostics = (
+	diagnosticsByFile: ReadonlyMap<string, ReadonlyArray<Diagnostic>>,
+): NormalizedDiagnostic[] => {
+	const normalized: NormalizedDiagnostic[] = [];
+	for (const [file, diagnostics] of diagnosticsByFile.entries()) {
+		for (const diagnostic of diagnostics) {
+			const item: NormalizedDiagnostic = {
+				file,
+				line: diagnostic.range.start.line + 1,
+				character: diagnostic.range.start.character + 1,
+				severity: diagnosticSeverity(diagnostic.severity),
+				message: diagnosticMessageToText(diagnostic.message),
+			};
+			if (diagnostic.source !== undefined) item.source = diagnostic.source;
+			normalized.push(item);
+		}
+	}
+	return normalized;
+};
+
 const formatDiagnostics = (
 	cwd: string,
 	diagnosticsByFile: ReadonlyMap<string, ReadonlyArray<Diagnostic>>,
@@ -275,7 +347,7 @@ const formatDiagnostics = (
 			const line = diagnostic.range.start.line + 1;
 			const character = diagnostic.range.start.character + 1;
 			lines.push(
-				`- ${formatPath(cwd, file)}:${line}:${character} [${diagnosticSeverity(diagnostic.severity)}] ${diagnostic.message}`,
+				`- ${formatPath(cwd, file)}:${line}:${character} [${diagnosticSeverity(diagnostic.severity)}] ${diagnosticMessageToText(diagnostic.message)}`,
 			);
 		}
 	}
@@ -322,6 +394,17 @@ const ensureClients = async (
 	return resolution.clients;
 };
 
+const requireOperationSupport = (
+	operation: LspOperation,
+	clients: ReadonlyArray<LocatedClient>,
+): ReadonlyArray<LocatedClient> => {
+	const supported = clients.filter(({ client }) => client.supportsOperation(operation));
+	if (supported.length === 0) {
+		throw new Error(`${operation} is not supported by available LSP clients.`);
+	}
+	return supported;
+};
+
 const runAcrossClients = async <T>(
 	clients: ReadonlyArray<LocatedClient>,
 	fn: (client: LocatedClient) => Promise<T>,
@@ -366,7 +449,10 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 				case "implementation":
 				case "prepareCallHierarchy": {
 					const { filePath, line, character } = requirePosition(params);
-					const clients = await ensureClients(runtime, params, ctx, "navigation");
+					const clients = requireOperationSupport(
+						params.operation,
+						await ensureClients(runtime, params, ctx, "navigation"),
+					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const position = { line: line - 1, character: character - 1 };
@@ -377,15 +463,18 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							requestParamsForOperation(params.operation, file, position),
 						),
 					);
-					results = raw;
-					const locations = normalizeLocations(raw);
+					const locations = requireNormalizedLocations(params.operation, raw);
+					results = locations;
 					text = formatLocationList(ctx.cwd, params.operation, locations, limitFor(params, 100));
 					break;
 				}
 				case "incomingCalls":
 				case "outgoingCalls": {
 					const { filePath, line, character } = requirePosition(params);
-					const clients = await ensureClients(runtime, params, ctx, "navigation");
+					const clients = requireOperationSupport(
+						params.operation,
+						await ensureClients(runtime, params, ctx, "navigation"),
+					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const position = { line: line - 1, character: character - 1 };
@@ -398,18 +487,17 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						if (item === undefined) return [];
 						return await client.request<unknown[]>(methodForOperation(params.operation), { item });
 					});
-					results = raw;
-					text = formatLocationList(
-						ctx.cwd,
-						params.operation,
-						callHierarchyToLocations(params.operation, raw),
-						limitFor(params, 100),
-					);
+					const locations = callHierarchyToLocations(params.operation, raw);
+					results = locations;
+					text = formatLocationList(ctx.cwd, params.operation, locations, limitFor(params, 100));
 					break;
 				}
 				case "hover": {
 					const { filePath, line, character } = requirePosition(params);
-					const clients = await ensureClients(runtime, params, ctx, "navigation");
+					const clients = requireOperationSupport(
+						params.operation,
+						await ensureClients(runtime, params, ctx, "navigation"),
+					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const raw = await Promise.all(
@@ -420,14 +508,17 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							}),
 						),
 					);
-					results = raw;
-					text =
-						raw.map(hoverToText).filter(Boolean).join("\n\n---\n\n") || "No hover results found.";
+					const hovers = raw.map(hoverToText).filter(Boolean);
+					results = hovers;
+					text = hovers.join("\n\n---\n\n") || "No hover results found.";
 					break;
 				}
 				case "documentSymbol": {
 					const filePath = requireFile(params);
-					const clients = await ensureClients(runtime, params, ctx, "navigation");
+					const clients = requireOperationSupport(
+						params.operation,
+						await ensureClients(runtime, params, ctx, "navigation"),
+					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const absolute = absolutePath(ctx.cwd, filePath);
 					const raw = await runAcrossClients(clients, ({ client }) =>
@@ -435,7 +526,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							textDocument: { uri: pathToFileURL(absolute).href },
 						}),
 					);
-					results = raw;
+					results = normalizeDocumentSymbols(raw, absolute);
 					const lines = flattenDocumentSymbols(raw, ctx.cwd, absolute).slice(
 						0,
 						limitFor(params, 200),
@@ -447,22 +538,21 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					break;
 				}
 				case "workspaceSymbol": {
-					const clients = params.filePath
-						? await ensureClients(runtime, params, ctx, "navigation")
-						: runtime.runningClients("navigation");
+					const clients = requireOperationSupport(
+						params.operation,
+						params.filePath
+							? await ensureClients(runtime, params, ctx, "navigation")
+							: runtime.runningClients("navigation"),
+					);
 					if (clients.length === 0)
 						throw new Error("No running LSP clients. Pass filePath to start a matching server.");
 					serverIds = clients.map(({ client }) => client.serverId);
 					const raw = await runAcrossClients(clients, ({ client }) =>
 						client.request<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
 					);
-					results = raw;
-					text = formatLocationList(
-						ctx.cwd,
-						"Workspace symbols",
-						workspaceSymbolsToLocations(raw),
-						limitFor(params, 50),
-					);
+					const locations = workspaceSymbolsToLocations(raw);
+					results = locations;
+					text = formatLocationList(ctx.cwd, "Workspace symbols", locations, limitFor(params, 50));
 					break;
 				}
 				case "diagnostics": {
@@ -471,7 +561,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						serverIds = clients.map(({ client }) => client.serverId);
 					}
 					const diagnostics = runtime.diagnostics(params.filePath);
-					results = Object.fromEntries(diagnostics);
+					results = normalizeDiagnostics(diagnostics);
 					text = formatDiagnostics(ctx.cwd, diagnostics, limitFor(params, 200));
 					break;
 				}
