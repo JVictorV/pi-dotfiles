@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import lspExtension from "../agent/extensions/lsp";
+import { loadLspConfig } from "../agent/extensions/lsp/config";
 import { LspPermissionStore } from "../agent/extensions/lsp/permissions";
 import { LspRuntime } from "../agent/extensions/lsp/runtime";
 import { registerLspTool } from "../agent/extensions/lsp/tool";
@@ -225,6 +226,28 @@ describe("LSP Extension", () => {
 
 		const result = await tool.execute(
 			"tool-call-3",
+			{ operation: "diagnostics", filePath: "main.fake" },
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(result.content[0]?.text).toContain("Diagnostics:");
+		expect(result.content[0]?.text).toContain("main.fake:1:1 [error] fake diagnostic");
+	});
+
+	test("diagnostics operation waits for fresh pushed diagnostics", async () => {
+		const project = await createProject(
+			createConfig({
+				FAKE_LSP_NO_PULL_DIAGNOSTICS: "1",
+				FAKE_LSP_PUBLISH_DIAGNOSTICS_DELAY_MS: "400",
+			}),
+		);
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		const result = await tool.execute(
+			"tool-call-fresh-diagnostics",
 			{ operation: "diagnostics", filePath: "main.fake" },
 			undefined,
 			undefined,
@@ -558,7 +581,10 @@ describe("LSP Extension", () => {
 				undefined,
 				project.ctx,
 			),
-		).rejects.toThrow("fake hover failed");
+		).rejects.toMatchObject({
+			_tag: "LspRequestError",
+			reason: expect.stringContaining("fake hover failed"),
+		});
 		expect(project.runtime.status()).toMatchObject([{ serverId: "fake", status: "connected" }]);
 
 		const result = await tool.execute(
@@ -726,5 +752,16 @@ describe("LSP Extension", () => {
 			["eslint", "deny"],
 			["typescript", "allow"],
 		]);
+	});
+
+	test("invalid LSP config fails with typed config error", async () => {
+		const project = await createProject();
+		await mkdir(project.agentDir, { recursive: true });
+		await writeFile(join(project.agentDir, "lsp.json"), JSON.stringify({ servers: [] }), "utf8");
+
+		await expect(loadLspConfig()).rejects.toMatchObject({
+			_tag: "LspConfigError",
+			reason: "agent/lsp.json field servers must be an object",
+		});
 	});
 });

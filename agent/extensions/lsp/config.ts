@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { LspConfigError } from "./errors";
 import { configPath } from "./paths";
 import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
 
@@ -9,13 +10,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const optionalBoolean = (value: unknown, field: string): boolean | undefined => {
 	if (value === undefined) return undefined;
 	if (typeof value === "boolean") return value;
-	throw new Error(`agent/lsp.json field ${field} must be a boolean`);
+	throw LspConfigError.make({ reason: `agent/lsp.json field ${field} must be a boolean` });
 };
 
 const optionalStringArray = (value: unknown, field: string): ReadonlyArray<string> | undefined => {
 	if (value === undefined) return undefined;
 	if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
-	throw new Error(`agent/lsp.json field ${field} must be an array of strings`);
+	throw LspConfigError.make({
+		reason: `agent/lsp.json field ${field} must be an array of strings`,
+	});
 };
 
 const optionalStringRecord = (
@@ -24,13 +27,17 @@ const optionalStringRecord = (
 ): Readonly<Record<string, string>> | undefined => {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) {
-		throw new Error(`agent/lsp.json field ${field} must be an object of string values`);
+		throw LspConfigError.make({
+			reason: `agent/lsp.json field ${field} must be an object of string values`,
+		});
 	}
 
 	const result: Record<string, string> = {};
 	for (const [key, item] of Object.entries(value)) {
 		if (typeof item !== "string") {
-			throw new Error(`agent/lsp.json field ${field}.${key} must be a string`);
+			throw LspConfigError.make({
+				reason: `agent/lsp.json field ${field}.${key} must be a string`,
+			});
 		}
 		result[key] = item;
 	}
@@ -43,7 +50,7 @@ const optionalCapabilities = (
 ): Partial<ServerCapabilities> | undefined => {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) {
-		throw new Error(`agent/lsp.json field ${field} must be an object`);
+		throw LspConfigError.make({ reason: `agent/lsp.json field ${field} must be an object` });
 	}
 	return {
 		navigation: optionalBoolean(value.navigation, `${field}.navigation`),
@@ -53,7 +60,7 @@ const optionalCapabilities = (
 
 const parseServerConfig = (serverId: string, value: unknown): UserServerConfig => {
 	if (!isRecord(value)) {
-		throw new Error(`agent/lsp.json server ${serverId} must be an object`);
+		throw LspConfigError.make({ reason: `agent/lsp.json server ${serverId} must be an object` });
 	}
 
 	return {
@@ -69,7 +76,7 @@ const parseServerConfig = (serverId: string, value: unknown): UserServerConfig =
 
 const parseConfig = (value: unknown): LspConfig => {
 	if (!isRecord(value)) {
-		throw new Error("agent/lsp.json must contain a JSON object");
+		throw LspConfigError.make({ reason: "agent/lsp.json must contain a JSON object" });
 	}
 
 	if (value.servers === undefined) {
@@ -77,7 +84,7 @@ const parseConfig = (value: unknown): LspConfig => {
 	}
 
 	if (!isRecord(value.servers)) {
-		throw new Error("agent/lsp.json field servers must be an object");
+		throw LspConfigError.make({ reason: "agent/lsp.json field servers must be an object" });
 	}
 
 	const servers: Record<string, UserServerConfig> = {};
@@ -98,5 +105,11 @@ export const loadLspConfig = async (): Promise<LspConfig> => {
 		return { servers: {} };
 	}
 
-	return parseConfig(JSON.parse(text));
+	try {
+		return parseConfig(JSON.parse(text));
+	} catch (error) {
+		if (error instanceof LspConfigError) throw error;
+		const reason = error instanceof Error ? error.message : String(error);
+		throw LspConfigError.make({ reason });
+	}
 };

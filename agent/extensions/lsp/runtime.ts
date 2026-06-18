@@ -1,7 +1,7 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Context, Deferred, Effect, Layer, ManagedRuntime } from "effect";
+import { Context, Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
 
 import { LspClient, type LspClientStatus } from "./client";
 import { lspRuntimeShuttingDown } from "./errors";
@@ -44,9 +44,33 @@ interface RuntimeOptions {
 	onStatusChange?: () => void;
 }
 
+interface RuntimeState {
+	clients: Map<string, LspClient>;
+	clientDefinitions: Map<string, LspServerDefinition>;
+	broken: Map<string, string>;
+	spawning: Map<string, Deferred.Deferred<LspClient | undefined, Error>>;
+	shuttingDown: boolean;
+}
+
+const makeRuntimeState = (): RuntimeState => ({
+	clients: new Map(),
+	clientDefinitions: new Map(),
+	broken: new Map(),
+	spawning: new Map(),
+	shuttingDown: false,
+});
+
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
 
 const isBrokenClient = (client: LspClient): boolean => client.status.status === "broken";
+
+const errorReason = (error: unknown, fallback: string): string => {
+	if (typeof error === "object" && error !== null && "reason" in error) {
+		const reason = (error as { reason?: unknown }).reason;
+		if (typeof reason === "string") return reason;
+	}
+	return error instanceof Error && error.message ? error.message : fallback;
+};
 
 class LspRuntimeSession extends Context.Service<
 	LspRuntimeSession,
@@ -75,13 +99,9 @@ export class LspRuntime {
 	readonly cwd: string;
 
 	private readonly registry: ReadonlyMap<string, LspServerDefinition>;
-	private readonly clients = new Map<string, LspClient>();
-	private readonly clientDefinitions = new Map<string, LspServerDefinition>();
-	private readonly broken = new Map<string, string>();
-	private readonly spawning = new Map<string, Deferred.Deferred<LspClient | undefined, Error>>();
+	private readonly state = SynchronizedRef.makeUnsafe(makeRuntimeState());
 	private readonly onStatusChange?: () => void;
 	private readonly sessionRuntime: ManagedRuntime.ManagedRuntime<LspRuntimeSession, never>;
-	private shuttingDown = false;
 
 	constructor(options: RuntimeOptions) {
 		this.cwd = options.cwd;
@@ -107,6 +127,34 @@ export class LspRuntime {
 				}),
 			),
 		);
+	}
+
+	private stateUnsafe(): RuntimeState {
+		return SynchronizedRef.getUnsafe(this.state);
+	}
+
+	private get clients(): RuntimeState["clients"] {
+		return this.stateUnsafe().clients;
+	}
+
+	private get clientDefinitions(): RuntimeState["clientDefinitions"] {
+		return this.stateUnsafe().clientDefinitions;
+	}
+
+	private get broken(): RuntimeState["broken"] {
+		return this.stateUnsafe().broken;
+	}
+
+	private get spawning(): RuntimeState["spawning"] {
+		return this.stateUnsafe().spawning;
+	}
+
+	private get shuttingDown(): boolean {
+		return this.stateUnsafe().shuttingDown;
+	}
+
+	private set shuttingDown(value: boolean) {
+		this.stateUnsafe().shuttingDown = value;
 	}
 
 	serverIds(): ReadonlyArray<string> {
@@ -422,7 +470,7 @@ export class LspRuntime {
 	): Promise<LspClient | undefined> {
 		const key = clientKey(root, definition.id);
 		const handle = await spawnServer(definition, root, this.cwd).catch((error: unknown) => {
-			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
+			const reason = errorReason(error, `Failed to start ${definition.id}`);
 			this.markBroken(key, `${reason} (${file})`);
 			return undefined;
 		});
@@ -440,7 +488,7 @@ export class LspRuntime {
 			return client;
 		} catch (error) {
 			if (!handle.process.killed) handle.process.kill("SIGTERM");
-			const reason = error instanceof Error ? error.message : `Failed to start ${definition.id}`;
+			const reason = errorReason(error, `Failed to start ${definition.id}`);
 			this.markBroken(key, `${reason} (${file})`);
 			return undefined;
 		}

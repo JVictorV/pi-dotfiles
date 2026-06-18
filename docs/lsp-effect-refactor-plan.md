@@ -92,7 +92,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Convert config/permission/spawn/init/request/unsupported/malformed/no-client paths gradually.
 - Tool formatting catches typed errors at the boundary when needed.
 
-**Status:** Foundation done; incremental adoption remains.
+**Status:** Mostly done; only permission/spawn granularity remains.
 
 **Notes:**
 
@@ -111,7 +111,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
   - `LspShutdownError`
   - `LspRuntimeShuttingDown`
 - Converted the shutdown race path to throw `LspRuntimeShuttingDown` and updated the regression test to assert the typed `_tag` + `reason`.
-- Remaining conversion should happen near each behavior slice, so tests prove the public behavior of each error path.
+- Remaining conversion is limited to permission-denied subtyping and more granular spawn/init public boundary errors.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 4 — Do not mark clients broken for ordinary request errors
@@ -124,14 +124,14 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Test that a failed request is followed by a successful hover without `/lsp-restart`.
 - Mark broken only on process exit / transport unusable / initialization failure.
 
-**Status:** Done for request errors; timeout-specific coverage remains.
+**Status:** Done for request errors and timeout wrapping.
 
 **Notes:**
 
 - Added `FAKE_LSP_HOVER_ERROR_COUNT` to the fake LSP server.
 - Added regression coverage: `request errors do not mark language servers broken`.
 - Changed `LspClient.request()` so JSON-RPC request failures no longer mark the client broken. The preflight `canSend()` path still marks broken when the transport/process is already unusable.
-- Timeout-specific typed error conversion remains for a later slice.
+- Request timeouts now wrap as `LspRequestTimeout`; request failures wrap as `LspRequestError`.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 4.5 — Permission store concurrent writes
@@ -175,7 +175,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Added regression coverage: `runtime notifies when LSP client status changes`.
 - Added optional `onStatusChange` to `LspRuntime` and wired `lsp/index.ts` to emit `lsp:status` from runtime state changes.
 - Runtime now notifies on client spawn, restart removal, shutdown clearing, and broken-client transitions.
-- Kept the existing `tool_result` status emission for now as a harmless compatibility fallback; it can be removed after the service bridge centralizes eventing.
+- Removed the old `lsp` tool-result status fallback after the service bridge; passive file sync remains in `tool_result`.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 4.7 — Typed tool boundary errors
@@ -195,7 +195,9 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Converted unsupported operation failures to `LspUnsupportedOperation`.
 - Converted no-client failures to `LspNoClients`.
 - Updated regression tests to assert typed `_tag` + `reason`.
-- Remaining typed-error adoption: config parse, direct request timeout/error wrapping, spawn/init subtyping, and permission denial subtyping.
+- Remaining typed-error adoption: permission denial subtyping and more granular spawn/init propagation at the public boundary.
+- Added typed config parse errors (`LspConfigError`) and regression coverage: `invalid LSP config fails with typed config error`.
+- Added typed request error/timeout wrapping (`LspRequestError`, `LspRequestTimeout`) and updated request-error regression coverage.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 5 — Effect service bridge
@@ -215,8 +217,8 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 
 - Added `LspRuntimeSession` Effect service in `runtime.ts`.
 - Public `LspRuntime` methods now enter through a `ManagedRuntime` service layer and delegate to private unsafe implementations.
-- This creates the bridge needed for later moving maps behind `SynchronizedRef` without changing the public API.
-- State is not fully behind `SynchronizedRef` yet; that remains the next structural step.
+- This creates the bridge needed for later Effect-native internals without changing the public API.
+- Runtime state now lives behind a `SynchronizedRef` state object; current implementation still uses private unsafe helpers while preserving behavior.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 6 — Diagnostics parity with opencode
@@ -232,7 +234,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Merge/dedupe push + pull diagnostics.
 - Replace fixed settle sleep with wait helpers.
 
-**Status:** In progress; document pull, dynamic registration, and workspace diagnostic sub-slices done.
+**Status:** Done for planned v1 parity.
 
 **Notes:**
 
@@ -244,7 +246,9 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Added regression coverage: `diagnostics operation supports dynamic document diagnostic registration`.
 - Added workspace pull diagnostics through dynamic `workspaceDiagnostics` registrations.
 - Added regression coverage: `diagnostics operation supports workspace pull diagnostics`.
-- Still remaining for full parity: better wait-for-fresh diagnostics timing.
+- Added wait-for-fresh pushed diagnostics using publish-diagnostic listeners instead of relying only on fixed settle sleeps.
+- Added regression coverage: `diagnostics operation waits for fresh pushed diagnostics`.
+- Remaining diagnostic parity polish: richer registration timing/backoff like opencode, but v1 behavior is covered.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 7 — Document sync parity with opencode
@@ -281,12 +285,12 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Publish status after spawn, broken transition, restart, shutdown.
 - Remove special status emission from `tool_result` if no longer needed.
 
-**Status:** Mostly done by Slice 4.6.
+**Status:** Done.
 
 **Notes:**
 
 - Runtime-level status notifications are implemented and wired to `lsp:status`.
-- Remaining cleanup: remove the compatibility `tool_result` status emission after the service bridge centralizes eventing.
+- Removed the old `lsp` tool-result status fallback; passive file sync remains in `tool_result`.
 
 ## Decisions
 
@@ -295,8 +299,8 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 
 ## Next action
 
-Remaining prep before the large Slice 5 service bridge:
+Remaining follow-ups are now polish/backlog rather than crash/idempotency blockers:
 
-1. Finish dynamic/workspace diagnostics if needed now, or defer as post-bridge diagnostics parity.
-2. Finish incremental document sync if needed now, or defer as post-bridge document-sync parity.
-3. Then start Slice 5: move runtime state behind an Effect service/layer with `SynchronizedRef` and `ManagedRuntime`.
+1. Consider a fully Effect-native `LspRuntimeSession` implementation instead of private unsafe helper delegation.
+2. Add typed permission-denied/spawn/init errors at the public boundary if user-facing differentiation becomes important.
+3. Add lower-priority lifecycle features (`didSave`, `didClose`) and more built-in servers.

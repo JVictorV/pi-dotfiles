@@ -110,10 +110,6 @@ export default function lspExtension(pi: ExtensionAPI) {
 	registerLspTool(pi, () => runtime);
 
 	pi.on("tool_result", async (event) => {
-		if (event.toolName === "lsp") {
-			emitStatus(pi, runtime);
-			return;
-		}
 		if (event.isError || runtime === undefined) return;
 		if (event.toolName !== "read" && event.toolName !== "write" && event.toolName !== "edit")
 			return;

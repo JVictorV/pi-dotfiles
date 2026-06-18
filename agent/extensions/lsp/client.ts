@@ -12,12 +12,13 @@ import {
 } from "vscode-jsonrpc/node";
 import type { Diagnostic } from "vscode-languageserver-types";
 
+import { LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
 import type { LspServerHandle } from "./server";
 
 const INITIALIZE_TIMEOUT_MS = 45_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const SHUTDOWN_TIMEOUT_MS = 2_000;
-const DIAGNOSTIC_SETTLE_MS = 250;
+const DIAGNOSTIC_WAIT_TIMEOUT_MS = 1_000;
 const FILE_CHANGE_CREATED = 1;
 const FILE_CHANGE_CHANGED = 2;
 const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2;
@@ -315,6 +316,7 @@ export class LspClient {
 	private readonly diagnosticsByFile = new Map<string, Diagnostic[]>();
 	private readonly openDocuments = new Map<string, OpenDocument>();
 	private readonly diagnosticRegistrations = new Map<string, DiagnosticRegistration>();
+	private readonly diagnosticListeners = new Set<(file: string) => void>();
 	private broken = false;
 	private closing = false;
 	private disposed = false;
@@ -364,7 +366,10 @@ export class LspClient {
 			}),
 			INITIALIZE_TIMEOUT_MS,
 			`${handle.definition.id} initialize`,
-		);
+		).catch((error: unknown) => {
+			const reason = error instanceof Error ? error.message : String(error);
+			throw LspInitializeError.make({ serverId: handle.definition.id, reason });
+		});
 		client.serverCapabilities = initializeResult.capabilities ?? {};
 
 		await connection.sendNotification("initialized", {});
@@ -452,8 +457,8 @@ export class LspClient {
 
 		if (waitForDiagnostics) {
 			await Promise.all([
-				wait(DIAGNOSTIC_SETTLE_MS),
-				this.waitForDiagnosticRegistration(DIAGNOSTIC_SETTLE_MS).then(() =>
+				this.waitForPushDiagnostics(file, DIAGNOSTIC_WAIT_TIMEOUT_MS),
+				this.waitForDiagnosticRegistration(DIAGNOSTIC_WAIT_TIMEOUT_MS).then(() =>
 					Promise.all([this.pullDocumentDiagnostics(file), this.pullWorkspaceDiagnostics()]),
 				),
 			]);
@@ -466,11 +471,19 @@ export class LspClient {
 			throw new Error(`${this.serverId} language server is not running`);
 		}
 
-		return await withTimeout(
-			this.connection.sendRequest<T>(method, params),
-			REQUEST_TIMEOUT_MS,
-			`${this.serverId} ${method}`,
-		);
+		try {
+			return await withTimeout(
+				this.connection.sendRequest<T>(method, params),
+				REQUEST_TIMEOUT_MS,
+				`${this.serverId} ${method}`,
+			);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			if (reason.includes("timed out")) {
+				throw LspRequestTimeout.make({ serverId: this.serverId, method, reason });
+			}
+			throw LspRequestError.make({ serverId: this.serverId, method, reason });
+		}
 	}
 
 	async shutdown(): Promise<void> {
@@ -515,6 +528,26 @@ export class LspClient {
 		if (this.hasProvider(this.serverCapabilities.diagnosticProvider)) return;
 		if (this.diagnosticRegistrations.size > 0) return;
 		await wait(timeoutMs);
+	}
+
+	private async waitForPushDiagnostics(file: string, timeoutMs: number): Promise<void> {
+		if (this.diagnosticsByFile.has(file)) return;
+		await new Promise<void>((resolve) => {
+			let finished = false;
+			let timeout: NodeJS.Timeout | undefined;
+			const finish = () => {
+				if (finished) return;
+				finished = true;
+				if (timeout !== undefined) clearTimeout(timeout);
+				this.diagnosticListeners.delete(listener);
+				resolve();
+			};
+			const listener = (diagnosticFile: string) => {
+				if (diagnosticFile === file) finish();
+			};
+			this.diagnosticListeners.add(listener);
+			timeout = setTimeout(finish, timeoutMs);
+		});
 	}
 
 	private async pullDocumentDiagnostics(file: string): Promise<void> {
@@ -630,6 +663,7 @@ export class LspClient {
 			const file = getFilePath(params.uri);
 			if (file === undefined) return;
 			this.diagnosticsByFile.set(file, params.diagnostics);
+			for (const listener of this.diagnosticListeners) listener(file);
 		});
 
 		this.connection.onRequest("window/workDoneProgress/create", async () => null);

@@ -33,10 +33,13 @@ const fakeDiagnostic = (message = "fake diagnostic") => ({
 
 const publishDiagnostics = (uri) => {
 	if (process.env.FAKE_LSP_PULL_DIAGNOSTICS_ONLY === "1") return;
-	connection.sendNotification("textDocument/publishDiagnostics", {
-		uri,
-		diagnostics: [fakeDiagnostic()],
-	});
+	const delay = Number(process.env.FAKE_LSP_PUBLISH_DIAGNOSTICS_DELAY_MS ?? 0);
+	setTimeout(() => {
+		connection.sendNotification("textDocument/publishDiagnostics", {
+			uri,
+			diagnostics: [fakeDiagnostic()],
+		});
+	}, delay);
 };
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,7 +65,8 @@ connection.onRequest("initialize", async () => {
 	};
 	if (
 		process.env.FAKE_LSP_DYNAMIC_DOCUMENT_DIAGNOSTICS === "1" ||
-		process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1"
+		process.env.FAKE_LSP_WORKSPACE_DIAGNOSTICS === "1" ||
+		process.env.FAKE_LSP_NO_PULL_DIAGNOSTICS === "1"
 	) {
 		delete capabilities.diagnosticProvider;
 	}
