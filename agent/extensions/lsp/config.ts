@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 
+import { Effect } from "effect";
+
 import { LspConfigError } from "./errors";
 import { configPath } from "./paths";
 import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
@@ -94,22 +96,27 @@ const parseConfig = (value: unknown): LspConfig => {
 	return { servers };
 };
 
-export const loadLspConfig = async (): Promise<LspConfig> => {
-	const path = configPath();
-	const text = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-		if (error.code === "ENOENT") return undefined;
-		throw error;
+export const loadLspConfig = (): Effect.Effect<LspConfig, unknown> =>
+	Effect.gen(function* () {
+		const path = configPath();
+		const text = yield* Effect.tryPromise({
+			try: () => readFile(path, "utf8"),
+			catch: (error) => error as NodeJS.ErrnoException,
+		}).pipe(
+			Effect.catch((error) => {
+				if (error.code === "ENOENT") return Effect.succeed(undefined);
+				return Effect.fail(error);
+			}),
+		);
+
+		if (text === undefined) return { servers: {} };
+
+		return yield* Effect.try({
+			try: () => parseConfig(JSON.parse(text)),
+			catch: (error) => {
+				if (error instanceof LspConfigError) return error;
+				const reason = error instanceof Error ? error.message : String(error);
+				return LspConfigError.make({ reason });
+			},
+		});
 	});
-
-	if (text === undefined) {
-		return { servers: {} };
-	}
-
-	try {
-		return parseConfig(JSON.parse(text));
-	} catch (error) {
-		if (error instanceof LspConfigError) throw error;
-		const reason = error instanceof Error ? error.message : String(error);
-		throw LspConfigError.make({ reason });
-	}
-};

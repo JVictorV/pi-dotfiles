@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 
 import { loadLspConfig } from "./config";
 import { findRepositoryRoot, formatPermission } from "./paths";
@@ -20,44 +21,47 @@ const parseServerId = (args: string): string | undefined => {
 	return serverId.length > 0 ? serverId : undefined;
 };
 
-const permissionSummary = async (cwd: string): Promise<string> => {
-	const repoRoot = await findRepositoryRoot(cwd);
-	const store = await LspPermissionStore.load();
-	const entries = store.entries(repoRoot);
-	if (entries.length === 0) {
-		return `LSP permissions for ${repoRoot}:\n(no stored preferences)`;
-	}
+const permissionSummary = (cwd: string): Effect.Effect<string, unknown> =>
+	Effect.gen(function* () {
+		const repoRoot = yield* findRepositoryRoot(cwd);
+		const store = yield* LspPermissionStore.load();
+		const entries = store.entries(repoRoot);
+		if (entries.length === 0) {
+			return `LSP permissions for ${repoRoot}:\n(no stored preferences)`;
+		}
 
-	const lines = entries.map(
-		([serverId, permission]) => `- ${serverId}: ${formatPermission(permission)}`,
-	);
-	return `LSP permissions for ${repoRoot}:\n${lines.join("\n")}`;
-};
+		const lines = entries.map(
+			([serverId, permission]) => `- ${serverId}: ${formatPermission(permission)}`,
+		);
+		return `LSP permissions for ${repoRoot}:\n${lines.join("\n")}`;
+	});
 
-const setPermission = async (
+const setPermission = (
 	cwd: string,
 	serverId: string,
 	permission: LspPermission,
-): Promise<string> => {
-	const repoRoot = await findRepositoryRoot(cwd);
-	const store = await LspPermissionStore.load();
-	await store.set(repoRoot, serverId, permission);
-	return `Set ${serverId} to ${permission} for ${repoRoot}`;
-};
+): Effect.Effect<string, unknown> =>
+	Effect.gen(function* () {
+		const repoRoot = yield* findRepositoryRoot(cwd);
+		const store = yield* LspPermissionStore.load();
+		yield* store.set(repoRoot, serverId, permission);
+		return `Set ${serverId} to ${permission} for ${repoRoot}`;
+	});
 
-const resetPermission = async (cwd: string, args: string): Promise<string> => {
-	const repoRoot = await findRepositoryRoot(cwd);
-	const serverId = parseServerId(args);
-	const store = await LspPermissionStore.load();
+const resetPermission = (cwd: string, args: string): Effect.Effect<string, unknown> =>
+	Effect.gen(function* () {
+		const repoRoot = yield* findRepositoryRoot(cwd);
+		const serverId = parseServerId(args);
+		const store = yield* LspPermissionStore.load();
 
-	if (serverId === undefined || serverId === "all") {
-		await store.reset(repoRoot);
-		return `Reset all LSP permissions for ${repoRoot}`;
-	}
+		if (serverId === undefined || serverId === "all") {
+			yield* store.reset(repoRoot);
+			return `Reset all LSP permissions for ${repoRoot}`;
+		}
 
-	await store.reset(repoRoot, serverId);
-	return `Reset ${serverId} LSP permission for ${repoRoot}`;
-};
+		yield* store.reset(repoRoot, serverId);
+		return `Reset ${serverId} LSP permission for ${repoRoot}`;
+	});
 
 const emitStatus = (pi: ExtensionAPI, runtime: LspRuntime | undefined): void => {
 	const statuses = runtime?.status() ?? [];
@@ -94,7 +98,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		runtime = new LspRuntime({
 			cwd: ctx.cwd,
-			config: await loadLspConfig(),
+			config: await Effect.runPromise(loadLspConfig()),
 			onStatusChange: () => emitStatus(pi, runtime),
 		});
 		emitStatus(pi, runtime);
@@ -128,7 +132,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 	pi.registerCommand("lsp-permissions", {
 		description: "Show stored LSP spawn permissions for the current repository",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify(await permissionSummary(ctx.cwd), "info");
+			ctx.ui.notify(await Effect.runPromise(permissionSummary(ctx.cwd)), "info");
 		},
 	});
 
@@ -140,7 +144,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /lsp-allow <server>", "warning");
 				return;
 			}
-			ctx.ui.notify(await setPermission(ctx.cwd, serverId, "allow"), "info");
+			ctx.ui.notify(await Effect.runPromise(setPermission(ctx.cwd, serverId, "allow")), "info");
 		},
 	});
 
@@ -152,14 +156,14 @@ export default function lspExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /lsp-deny <server>", "warning");
 				return;
 			}
-			ctx.ui.notify(await setPermission(ctx.cwd, serverId, "deny"), "info");
+			ctx.ui.notify(await Effect.runPromise(setPermission(ctx.cwd, serverId, "deny")), "info");
 		},
 	});
 
 	pi.registerCommand("lsp-reset", {
 		description: "Reset LSP permission for this repository: /lsp-reset <server|all>",
 		handler: async (args, ctx) => {
-			ctx.ui.notify(await resetPermission(ctx.cwd, args), "info");
+			ctx.ui.notify(await Effect.runPromise(resetPermission(ctx.cwd, args)), "info");
 		},
 	});
 

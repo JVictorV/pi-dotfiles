@@ -3,6 +3,8 @@ import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } f
 import { constants } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
+import { Effect } from "effect";
+
 import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
 import { canonicalPath } from "./paths";
 
@@ -429,8 +431,8 @@ export const findServerRoot = async (
 	cwd: string,
 	definition: LspServerDefinition,
 ): Promise<string | undefined> => {
-	let current = dirname(await canonicalPath(file));
-	const stop = await canonicalPath(cwd);
+	let current = dirname(await Effect.runPromise(canonicalPath(file)));
+	const stop = await Effect.runPromise(canonicalPath(cwd));
 
 	while (isWithin(current, stop)) {
 		for (const marker of definition.rootMarkers) {

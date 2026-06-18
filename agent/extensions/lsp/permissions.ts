@@ -49,27 +49,37 @@ const parsePermissionFile = (value: unknown): LspPermissionFile => {
 const permissionWriteLock = Semaphore.makeUnsafe(1);
 let tempFileCounter = 0;
 
-const readPermissionFile = async (): Promise<LspPermissionFile> => {
-	const path = permissionPath();
-	const text = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-		if (error.code === "ENOENT") return undefined;
-		throw error;
+const readPermissionFile = (): Effect.Effect<LspPermissionFile, unknown> =>
+	Effect.gen(function* () {
+		const path = permissionPath();
+		const text = yield* Effect.tryPromise({
+			try: () => readFile(path, "utf8"),
+			catch: (error) => error as NodeJS.ErrnoException,
+		}).pipe(
+			Effect.catch((error) => {
+				if (error.code === "ENOENT") return Effect.succeed(undefined);
+				return Effect.fail(error);
+			}),
+		);
+
+		if (text === undefined) return emptyPermissionFile();
+
+		return yield* Effect.try({
+			try: () => parsePermissionFile(JSON.parse(text)),
+			catch: (error) => error,
+		});
 	});
 
-	if (text === undefined) {
-		return emptyPermissionFile();
-	}
-
-	return parsePermissionFile(JSON.parse(text));
-};
-
-const writePermissionFile = async (file: LspPermissionFile): Promise<void> => {
-	const path = permissionPath();
-	await mkdir(dirname(path), { recursive: true });
-	const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
-	await writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8");
-	await rename(tmpPath, path);
-};
+const writePermissionFile = (file: LspPermissionFile): Effect.Effect<void, unknown> =>
+	Effect.gen(function* () {
+		const path = permissionPath();
+		yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
+		const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
+		yield* Effect.tryPromise(() =>
+			writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
+		);
+		yield* Effect.tryPromise(() => rename(tmpPath, path));
+	});
 
 export class LspPermissionStore {
 	private file: LspPermissionFile;
@@ -78,8 +88,8 @@ export class LspPermissionStore {
 		this.file = file;
 	}
 
-	static async load(): Promise<LspPermissionStore> {
-		return new LspPermissionStore(await readPermissionFile());
+	static load(): Effect.Effect<LspPermissionStore, unknown> {
+		return readPermissionFile().pipe(Effect.map((file) => new LspPermissionStore(file)));
 	}
 
 	get(repoRoot: string, serverId: string): LspPermission | undefined {
@@ -92,44 +102,49 @@ export class LspPermissionStore {
 		);
 	}
 
-	async set(repoRoot: string, serverId: string, permission: LspPermission): Promise<void> {
-		await Effect.runPromise(
-			permissionWriteLock.withPermit(
-				Effect.promise(async () => {
-					this.file = await readPermissionFile();
-					this.file.repos[repoRoot] = {
-						...this.file.repos[repoRoot],
-						[serverId]: permission,
-					};
-					await writePermissionFile(this.file);
-				}),
-			),
+	set(repoRoot: string, serverId: string, permission: LspPermission): Effect.Effect<void, unknown> {
+		const updateFile = (file: LspPermissionFile): void => {
+			this.file = file;
+		};
+		return permissionWriteLock.withPermit(
+			Effect.gen(function* () {
+				const file = yield* readPermissionFile();
+				file.repos[repoRoot] = {
+					...file.repos[repoRoot],
+					[serverId]: permission,
+				};
+				yield* writePermissionFile(file);
+				updateFile(file);
+			}),
 		);
 	}
 
-	async reset(repoRoot: string, serverId?: string): Promise<void> {
-		await Effect.runPromise(
-			permissionWriteLock.withPermit(
-				Effect.promise(async () => {
-					this.file = await readPermissionFile();
+	reset(repoRoot: string, serverId?: string): Effect.Effect<void, unknown> {
+		const updateFile = (file: LspPermissionFile): void => {
+			this.file = file;
+		};
+		return permissionWriteLock.withPermit(
+			Effect.gen(function* () {
+				const file = yield* readPermissionFile();
 
-					if (serverId === undefined) {
-						delete this.file.repos[repoRoot];
-						await writePermissionFile(this.file);
-						return;
+				if (serverId === undefined) {
+					delete file.repos[repoRoot];
+					yield* writePermissionFile(file);
+					updateFile(file);
+					return;
+				}
+
+				const repo = file.repos[repoRoot];
+				if (repo !== undefined) {
+					delete repo[serverId];
+					if (Object.keys(repo).length === 0) {
+						delete file.repos[repoRoot];
 					}
+				}
 
-					const repo = this.file.repos[repoRoot];
-					if (repo !== undefined) {
-						delete repo[serverId];
-						if (Object.keys(repo).length === 0) {
-							delete this.file.repos[repoRoot];
-						}
-					}
-
-					await writePermissionFile(this.file);
-				}),
-			),
+				yield* writePermissionFile(file);
+				updateFile(file);
+			}),
 		);
 	}
 }

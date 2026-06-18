@@ -439,8 +439,8 @@ export class LspRuntime {
 		root: string,
 		ctx: ExtensionContext,
 	): Promise<LspPermission> {
-		const repoRoot = await findRepositoryRoot(root);
-		const store = await LspPermissionStore.load();
+		const repoRoot = await Effect.runPromise(findRepositoryRoot(root));
+		const store = await Effect.runPromise(LspPermissionStore.load());
 		const existing = store.get(repoRoot, definition.id);
 		if (existing !== undefined) return existing;
 
@@ -453,7 +453,7 @@ export class LspRuntime {
 			`Start ${definition.label} (${definition.id}) for ${repoRoot}? This preference will be stored globally for this repository path.`,
 		);
 		const permission: LspPermission = approved ? "allow" : "deny";
-		await store.set(repoRoot, definition.id, permission);
+		await Effect.runPromise(store.set(repoRoot, definition.id, permission));
 		return permission;
 	}
 

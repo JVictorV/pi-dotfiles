@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import lspExtension from "../agent/extensions/lsp";
@@ -915,15 +916,15 @@ describe("LSP Extension", () => {
 
 	test("permission store preserves concurrent writes", async () => {
 		const project = await createProject();
-		const left = await LspPermissionStore.load();
-		const right = await LspPermissionStore.load();
+		const left = await Effect.runPromise(LspPermissionStore.load());
+		const right = await Effect.runPromise(LspPermissionStore.load());
 
 		await Promise.all([
-			left.set(project.cwd, "typescript", "allow"),
-			right.set(project.cwd, "eslint", "deny"),
+			Effect.runPromise(left.set(project.cwd, "typescript", "allow")),
+			Effect.runPromise(right.set(project.cwd, "eslint", "deny")),
 		]);
 
-		const stored = await LspPermissionStore.load();
+		const stored = await Effect.runPromise(LspPermissionStore.load());
 		expect(stored.entries(project.cwd)).toEqual([
 			["eslint", "deny"],
 			["typescript", "allow"],
@@ -935,7 +936,7 @@ describe("LSP Extension", () => {
 		await mkdir(project.agentDir, { recursive: true });
 		await writeFile(join(project.agentDir, "lsp.json"), JSON.stringify({ servers: [] }), "utf8");
 
-		await expect(loadLspConfig()).rejects.toMatchObject({
+		await expect(Effect.runPromise(loadLspConfig())).rejects.toMatchObject({
 			_tag: "LspConfigError",
 			reason: "agent/lsp.json field servers must be an object",
 		});
