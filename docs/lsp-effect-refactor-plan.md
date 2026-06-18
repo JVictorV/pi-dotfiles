@@ -302,7 +302,19 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 
 Remaining follow-ups are now product backlog rather than runtime hardening blockers:
 
-1. Split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+No runtime-hardening blockers remain.
+
+## Runtime module split
+
+**Status:** Done.
+
+**Notes:**
+
+- Split shared runtime public types into `agent/extensions/lsp/runtime-types.ts`.
+- Split the Effect service tag into `agent/extensions/lsp/runtime-session.ts`.
+- Split mutable runtime state construction into `agent/extensions/lsp/runtime-state.ts`.
+- Kept `agent/extensions/lsp/runtime.ts` as the compatibility wrapper and orchestration layer.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ## Expanded built-in server registry
 

@@ -1,9 +1,9 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Context, Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
+import { Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
 
-import { LspClient, type LspClientStatus } from "./client";
+import { LspClient } from "./client";
 import { lspRuntimeShuttingDown } from "./errors";
 import { findRepositoryRoot } from "./paths";
 import { LspPermissionStore } from "./permissions";
@@ -15,56 +15,30 @@ import {
 	spawnServer,
 	type LspServerDefinition,
 } from "./server";
+import { LspRuntimeSession } from "./runtime-session";
+import { makeRuntimeState, type RuntimeState } from "./runtime-state";
+import type {
+	ClientResolution,
+	LocatedClient,
+	LspCapability,
+	LspRuntimeStatus,
+	LspUnavailable,
+} from "./runtime-types";
 import type { LspConfig, LspPermission } from "./types";
 
-export type LspCapability = "navigation" | "diagnostics";
-
-export interface LocatedClient {
-	client: LspClient;
-	definition: LspServerDefinition;
-}
-
-export interface LspRuntimeStatus extends LspClientStatus {
-	displayRoot: string;
-}
-
-export interface LspUnavailable {
-	serverId: string;
-	reason: string;
-}
-
-export interface ClientResolution {
-	clients: ReadonlyArray<LocatedClient>;
-	unavailable: ReadonlyArray<LspUnavailable>;
-}
+export type {
+	ClientResolution,
+	LocatedClient,
+	LspCapability,
+	LspRuntimeStatus,
+	LspUnavailable,
+} from "./runtime-types";
 
 interface RuntimeOptions {
 	cwd: string;
 	config: LspConfig;
 	onStatusChange?: () => void;
 }
-
-interface RuntimeState {
-	clients: Map<string, LspClient>;
-	clientDefinitions: Map<string, LspServerDefinition>;
-	broken: Map<string, string>;
-	spawning: Map<string, Deferred.Deferred<LspClient | undefined, Error>>;
-	shuttingDown: boolean;
-	activeOperations: number;
-	disposeRequested: boolean;
-	disposed: boolean;
-}
-
-const makeRuntimeState = (): RuntimeState => ({
-	clients: new Map(),
-	clientDefinitions: new Map(),
-	broken: new Map(),
-	spawning: new Map(),
-	shuttingDown: false,
-	activeOperations: 0,
-	disposeRequested: false,
-	disposed: false,
-});
 
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
 
@@ -77,29 +51,6 @@ const errorReason = (error: unknown, fallback: string): string => {
 	}
 	return error instanceof Error && error.message ? error.message : fallback;
 };
-
-class LspRuntimeSession extends Context.Service<
-	LspRuntimeSession,
-	{
-		serverIds: Effect.Effect<ReadonlyArray<string>>;
-		status: Effect.Effect<ReadonlyArray<LspRuntimeStatus>>;
-		runningClients(capability: LspCapability): Effect.Effect<ReadonlyArray<LocatedClient>>;
-		diagnostics(
-			file?: string,
-		): Effect.Effect<
-			ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>>
-		>;
-		restart(serverId?: string): Effect.Effect<void>;
-		shutdown: Effect.Effect<void>;
-		clientsForFile(
-			filePath: string,
-			capability: LspCapability,
-			ctx: ExtensionContext,
-			options: { prompt: boolean; waitForDiagnostics?: boolean },
-		): Effect.Effect<ClientResolution, unknown>;
-		touchRunningFile(filePath: string): Effect.Effect<void>;
-	}
->()("pi/lsp/LspRuntimeSession") {}
 
 export class LspRuntime {
 	readonly cwd: string;
