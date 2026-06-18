@@ -31,13 +31,13 @@ export interface LspRuntimeSessionShape {
 	status: Effect.Effect<ReadonlyArray<LspRuntimeStatus>>;
 	runningClients(capability: LspCapability): Effect.Effect<ReadonlyArray<LocatedClient>>;
 	diagnostics(file?: string): Effect.Effect<ReadonlyMap<string, ReadonlyArray<Diagnostic>>>;
-	restart(serverId?: string): Effect.Effect<void>;
-	shutdown: Effect.Effect<void>;
+	restart(serverId?: string): Effect.Effect<void, unknown>;
+	shutdown: Effect.Effect<void, unknown>;
 	clientsForFile(
 		filePath: string,
 		capability: LspCapability,
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Effect.Effect<ClientResolution, unknown>;
-	touchRunningFile(filePath: string): Effect.Effect<void>;
+	touchRunningFile(filePath: string): Effect.Effect<void, unknown>;
 }

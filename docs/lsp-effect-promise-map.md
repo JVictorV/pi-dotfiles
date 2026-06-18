@@ -72,6 +72,8 @@ Boundary functions allowed to consume promises:
   - `LspServerDefinition.spawn` is Effect-based.
   - Temporary `Effect.runPromise` adapters remain in `runtime.ts` until runtime workflows are converted.
 - [ ] Slice 3: client workflows
-- [ ] Slice 4: runtime workflows
+- [x] Slice 4: runtime workflows
+  - `runtime.ts` private orchestration now composes Effect workflows directly for restart, shutdown, client resolution, file touch, matching, permission, and spawn.
+  - Remaining Promise surface in `runtime.ts` is the public compatibility adapter (`restart`, `shutdown`, `clientsForFile`, `touchRunningFile`) plus temporary `Effect.tryPromise` bridges to `LspClient` until Slice 3 lands.
 - [ ] Slice 5: tool program
 - [ ] Slice 6: boundary cleanup

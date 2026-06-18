@@ -239,46 +239,56 @@ export class LspRuntime {
 		});
 	}
 
-	private restartEffect(serverId?: string): Effect.Effect<void> {
-		return Effect.promise(async () => {
+	private restartEffect(serverId?: string): Effect.Effect<void, unknown> {
+		return Effect.suspend(() => {
 			const keys = [...this.clients.entries()]
 				.filter(([, client]) => serverId === undefined || client.serverId === serverId)
 				.map(([key]) => key);
 
-			await Promise.all(
-				keys.map(async (key) => {
+			return Effect.forEach(
+				keys,
+				(key) => {
 					const client = this.clients.get(key);
 					this.clients.delete(key);
 					this.clientDefinitions.delete(key);
-					await client?.shutdown();
+					return client === undefined
+						? Effect.succeed(undefined)
+						: Effect.tryPromise(() => client.shutdown());
+				},
+				{ concurrency: "unbounded", discard: true },
+			).pipe(
+				Effect.map(() => {
+					if (keys.length > 0) this.notifyStatusChange();
+
+					for (const key of this.spawning.keys()) {
+						if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
+							this.spawning.delete(key);
+						}
+					}
+
+					for (const key of this.broken.keys()) {
+						if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
+							this.broken.delete(key);
+						}
+					}
 				}),
 			);
-			if (keys.length > 0) this.notifyStatusChange();
-
-			for (const key of this.spawning.keys()) {
-				if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
-					this.spawning.delete(key);
-				}
-			}
-
-			for (const key of this.broken.keys()) {
-				if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
-					this.broken.delete(key);
-				}
-			}
 		});
 	}
 
-	private shutdownEffect(): Effect.Effect<void> {
-		return Effect.promise(async () => {
-			if (this.shuttingDown) return;
+	private shutdownEffect(): Effect.Effect<void, unknown> {
+		return Effect.suspend(() => {
+			if (this.shuttingDown) return Effect.succeed(undefined);
 			this.shuttingDown = true;
 			const clients = [...this.clients.values()];
 			this.clients.clear();
 			this.clientDefinitions.clear();
 			this.spawning.clear();
 			this.notifyStatusChange();
-			await Promise.all(clients.map((client) => client.shutdown()));
+			return Effect.forEach(clients, (client) => Effect.tryPromise(() => client.shutdown()), {
+				concurrency: "unbounded",
+				discard: true,
+			});
 		});
 	}
 
@@ -288,173 +298,161 @@ export class LspRuntime {
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Effect.Effect<ClientResolution, unknown> {
-		return Effect.tryPromise({
-			try: () => this.clientsForFilePromise(filePath, capability, ctx, options),
-			catch: (cause) => cause,
-		});
-	}
+		// oxlint-disable-next-line typescript/no-this-alias
+		const runtime = this;
+		return Effect.gen(function* () {
+			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			const file = resolve(ctx.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
+			const matches = yield* runtime.matchingServersEffect(file, capability);
+			const clients: LocatedClient[] = [];
+			const unavailable: LspUnavailable[] = [];
 
-	private async clientsForFilePromise(
-		filePath: string,
-		capability: LspCapability,
-		ctx: ExtensionContext,
-		options: { prompt: boolean; waitForDiagnostics?: boolean },
-	): Promise<ClientResolution> {
-		if (this.shuttingDown) throw lspRuntimeShuttingDown();
-		const file = resolve(ctx.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
-		const matches = await this.matchingServers(file, capability);
-		const clients: LocatedClient[] = [];
-		const unavailable: LspUnavailable[] = [];
+			for (const match of matches) {
+				const key = clientKey(match.root, match.definition.id);
+				const existing = runtime.clients.get(key);
+				if (existing !== undefined) {
+					if (isBrokenClient(existing)) {
+						const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
+						runtime.markBroken(key, reason);
+						unavailable.push({ serverId: match.definition.id, reason });
+						continue;
+					}
 
-		for (const match of matches) {
-			const key = clientKey(match.root, match.definition.id);
-			const existing = this.clients.get(key);
-			if (existing !== undefined) {
-				if (isBrokenClient(existing)) {
-					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-					this.markBroken(key, reason);
-					unavailable.push({ serverId: match.definition.id, reason });
+					yield* runtime.openClientEffect(existing, file, options.waitForDiagnostics ?? false);
+					if (isBrokenClient(existing)) {
+						const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
+						runtime.markBroken(key, reason);
+						unavailable.push({ serverId: match.definition.id, reason });
+						continue;
+					}
+					clients.push({ client: existing, definition: match.definition });
 					continue;
 				}
 
-				await existing.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
-				if (isBrokenClient(existing)) {
-					const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-					this.markBroken(key, reason);
-					unavailable.push({ serverId: match.definition.id, reason });
+				const brokenReason = runtime.broken.get(key);
+				if (brokenReason !== undefined) {
+					unavailable.push({ serverId: match.definition.id, reason: brokenReason });
 					continue;
 				}
-				clients.push({ client: existing, definition: match.definition });
-				continue;
-			}
 
-			const brokenReason = this.broken.get(key);
-			if (brokenReason !== undefined) {
-				unavailable.push({ serverId: match.definition.id, reason: brokenReason });
-				continue;
-			}
+				const inflight = runtime.spawning.get(key);
+				if (inflight !== undefined) {
+					const client = yield* Deferred.await(inflight);
+					if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+					if (client === undefined) {
+						const reason =
+							runtime.broken.get(key) ??
+							`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
+						unavailable.push({ serverId: match.definition.id, reason });
+						continue;
+					}
+					yield* runtime.openClientEffect(client, file, options.waitForDiagnostics ?? false);
+					clients.push({ client, definition: match.definition });
+					continue;
+				}
 
-			const inflight = this.spawning.get(key);
-			if (inflight !== undefined) {
-				const client = await Effect.runPromise(Deferred.await(inflight));
-				if (this.shuttingDown) throw lspRuntimeShuttingDown();
-				if (client === undefined) {
+				if (!options.prompt) continue;
+
+				const deferred = Deferred.makeUnsafe<LspClient | undefined, Error>();
+				runtime.spawning.set(key, deferred);
+				const spawned = yield* runtime.spawnForMatchEffect(match, key, file, ctx, deferred).pipe(
+					Effect.ensuring(
+						Effect.sync(() => {
+							if (runtime.spawning.get(key) === deferred) runtime.spawning.delete(key);
+						}),
+					),
+				);
+				if (spawned === undefined) {
 					const reason =
-						this.broken.get(key) ??
+						runtime.broken.get(key) ??
 						`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
 					unavailable.push({ serverId: match.definition.id, reason });
 					continue;
 				}
-				await client.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
-				clients.push({ client, definition: match.definition });
-				continue;
-			}
-
-			if (!options.prompt) {
-				continue;
-			}
-
-			const deferred = Deferred.makeUnsafe<LspClient | undefined, Error>();
-			this.spawning.set(key, deferred);
-			try {
-				const permission = await this.permissionFor(match.definition, match.root, ctx);
-				if (this.shuttingDown) throw lspRuntimeShuttingDown();
-				if (permission !== "allow") {
-					await Effect.runPromise(Deferred.succeed(deferred, undefined));
+				if (spawned.permissionDenied !== undefined) {
 					unavailable.push({
 						serverId: match.definition.id,
-						reason: `Spawn permission is ${permission}.`,
+						reason: `Spawn permission is ${spawned.permissionDenied}.`,
 					});
 					continue;
 				}
-
-				const client = await this.spawnClient(match.definition, match.root, file);
-				if (this.shuttingDown) throw lspRuntimeShuttingDown();
-				await Effect.runPromise(Deferred.succeed(deferred, client));
-				if (client === undefined) {
-					const reason =
-						this.broken.get(key) ??
-						`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
-					unavailable.push({ serverId: match.definition.id, reason });
-					continue;
-				}
-
-				await client.open(file, options.waitForDiagnostics ?? false).catch(() => undefined);
-				clients.push({ client, definition: match.definition });
-			} catch (error) {
-				const normalized = error instanceof Error ? error : new Error(String(error));
-				await Effect.runPromise(Deferred.fail(deferred, normalized));
-				throw normalized;
-			} finally {
-				if (this.spawning.get(key) === deferred) {
-					this.spawning.delete(key);
-				}
+				yield* runtime.openClientEffect(spawned.client, file, options.waitForDiagnostics ?? false);
+				clients.push({ client: spawned.client, definition: match.definition });
 			}
-		}
 
-		return { clients, unavailable };
+			return { clients, unavailable };
+		});
 	}
 
-	private touchRunningFileEffect(filePath: string): Effect.Effect<void> {
-		return Effect.promise(() => this.touchRunningFilePromise(filePath));
+	private touchRunningFileEffect(filePath: string): Effect.Effect<void, unknown> {
+		return Effect.suspend(() => {
+			const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
+			return Effect.forEach(
+				[...this.clients.values()],
+				(client) => {
+					const key = clientKey(client.root, client.serverId);
+					const definition = this.clientDefinitions.get(key);
+					if (isBrokenClient(client)) {
+						this.markBroken(key, `${client.label} server is broken.`);
+						return Effect.succeed(undefined);
+					}
+					if (definition === undefined || !matchesExtension(definition, file)) {
+						return Effect.succeed(undefined);
+					}
+					return this.openClientEffect(client, file, false).pipe(
+						Effect.map(() => {
+							if (isBrokenClient(client)) this.markBroken(key, `${client.label} server is broken.`);
+						}),
+					);
+				},
+				{ concurrency: "unbounded", discard: true },
+			);
+		});
 	}
 
-	private async touchRunningFilePromise(filePath: string): Promise<void> {
-		const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
-		await Promise.all(
-			[...this.clients.values()].map(async (client) => {
-				const key = clientKey(client.root, client.serverId);
-				const definition = this.clientDefinitions.get(key);
-				if (isBrokenClient(client)) {
-					this.markBroken(key, `${client.label} server is broken.`);
-					return;
-				}
-				if (definition === undefined || !matchesExtension(definition, file)) return;
-				await client.open(file, false).catch(() => undefined);
-				if (isBrokenClient(client)) {
-					this.markBroken(key, `${client.label} server is broken.`);
-				}
-			}),
-		);
-	}
-
-	private async matchingServers(
+	private matchingServersEffect(
 		file: string,
 		capability: LspCapability,
-	): Promise<ReadonlyArray<{ definition: LspServerDefinition; root: string }>> {
-		if (extname(file) === "") return [];
-		const matches: Array<{ definition: LspServerDefinition; root: string }> = [];
-		for (const definition of this.registry.values()) {
-			if (!definition.capabilities[capability]) continue;
-			if (!matchesExtension(definition, file)) continue;
-			const root = await Effect.runPromise(findServerRoot(file, this.cwd, definition));
-			if (root === undefined) continue;
-			matches.push({ definition, root });
-		}
-		return matches;
+	): Effect.Effect<ReadonlyArray<{ definition: LspServerDefinition; root: string }>, unknown> {
+		// oxlint-disable-next-line typescript/no-this-alias
+		const runtime = this;
+		return Effect.gen(function* () {
+			if (extname(file) === "") return [];
+			const matches: Array<{ definition: LspServerDefinition; root: string }> = [];
+			for (const definition of runtime.registry.values()) {
+				if (!definition.capabilities[capability]) continue;
+				if (!matchesExtension(definition, file)) continue;
+				const root = yield* findServerRoot(file, runtime.cwd, definition);
+				if (root === undefined) continue;
+				matches.push({ definition, root });
+			}
+			return matches;
+		});
 	}
 
-	private async permissionFor(
+	private permissionForEffect(
 		definition: LspServerDefinition,
 		root: string,
 		ctx: ExtensionContext,
-	): Promise<LspPermission> {
-		const repoRoot = await Effect.runPromise(findRepositoryRoot(root));
-		const store = await Effect.runPromise(LspPermissionStore.load());
-		const existing = store.get(repoRoot, definition.id);
-		if (existing !== undefined) return existing;
+	): Effect.Effect<LspPermission, unknown> {
+		return Effect.gen(function* () {
+			const repoRoot = yield* findRepositoryRoot(root);
+			const store = yield* LspPermissionStore.load();
+			const existing = store.get(repoRoot, definition.id);
+			if (existing !== undefined) return existing;
 
-		if (!ctx.hasUI) {
-			return "deny";
-		}
+			if (!ctx.hasUI) return "deny";
 
-		const approved = await ctx.ui.confirm(
-			"Start LSP server?",
-			`Start ${definition.label} (${definition.id}) for ${repoRoot}? This preference will be stored globally for this repository path.`,
-		);
-		const permission: LspPermission = approved ? "allow" : "deny";
-		await Effect.runPromise(store.set(repoRoot, definition.id, permission));
-		return permission;
+			const approved = yield* Effect.tryPromise(() =>
+				ctx.ui.confirm(
+					"Start LSP server?",
+					`Start ${definition.label} (${definition.id}) for ${repoRoot}? This preference will be stored globally for this repository path.`,
+				),
+			);
+			const permission: LspPermission = approved ? "allow" : "deny";
+			yield* store.set(repoRoot, definition.id, permission);
+			return permission;
+		});
 	}
 
 	private markBroken(key: string, reason: string): void {
@@ -467,36 +465,92 @@ export class LspRuntime {
 		this.onStatusChange?.();
 	}
 
-	private async spawnClient(
+	private spawnForMatchEffect(
+		match: { definition: LspServerDefinition; root: string },
+		key: string,
+		file: string,
+		ctx: ExtensionContext,
+		deferred: Deferred.Deferred<LspClient | undefined, Error>,
+	): Effect.Effect<
+		| { readonly client: LspClient; readonly permissionDenied?: never }
+		| { readonly client?: never; readonly permissionDenied: LspPermission }
+		| undefined,
+		unknown
+	> {
+		// oxlint-disable-next-line typescript/no-this-alias
+		const runtime = this;
+		return Effect.gen(function* () {
+			const permission = yield* runtime.permissionForEffect(match.definition, match.root, ctx);
+			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			if (permission !== "allow") {
+				yield* Deferred.succeed(deferred, undefined);
+				return { permissionDenied: permission };
+			}
+
+			const client = yield* runtime.spawnClientEffect(match.definition, match.root, file);
+			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			yield* Deferred.succeed(deferred, client);
+			return client === undefined ? undefined : { client };
+		}).pipe(
+			Effect.catch((error) => {
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				return Deferred.fail(deferred, normalized).pipe(
+					Effect.flatMap(() => Effect.fail(normalized)),
+				);
+			}),
+		);
+	}
+
+	private openClientEffect(
+		client: LspClient,
+		file: string,
+		waitForDiagnostics: boolean,
+	): Effect.Effect<void, unknown> {
+		return Effect.tryPromise(() => client.open(file, waitForDiagnostics)).pipe(
+			Effect.catch(() => Effect.succeed(undefined)),
+		);
+	}
+
+	private spawnClientEffect(
 		definition: LspServerDefinition,
 		root: string,
 		file: string,
-	): Promise<LspClient | undefined> {
-		const key = clientKey(root, definition.id);
-		const handle = await Effect.runPromise(spawnServer(definition, root, this.cwd)).catch(
-			(error: unknown) => {
-				const reason = errorReason(error, `Failed to start ${definition.id}`);
-				this.markBroken(key, `${reason} (${file})`);
-				return undefined;
-			},
-		);
-		if (handle === undefined) return undefined;
+	): Effect.Effect<LspClient | undefined, unknown> {
+		// oxlint-disable-next-line typescript/no-this-alias
+		const runtime = this;
+		return Effect.gen(function* () {
+			const key = clientKey(root, definition.id);
+			const handle = yield* spawnServer(definition, root, runtime.cwd).pipe(
+				Effect.catch((error) => {
+					const reason = errorReason(error, `Failed to start ${definition.id}`);
+					runtime.markBroken(key, `${reason} (${file})`);
+					return Effect.succeed(undefined);
+				}),
+			);
+			if (handle === undefined) return undefined;
 
-		try {
-			const client = await LspClient.create(handle);
-			if (this.shuttingDown) {
-				await client.shutdown();
+			const client = yield* Effect.tryPromise({
+				try: () => LspClient.create(handle),
+				catch: (cause) => cause,
+			}).pipe(
+				Effect.catch((error) => {
+					if (!handle.process.killed) handle.process.kill("SIGTERM");
+					const reason = errorReason(error, `Failed to start ${definition.id}`);
+					runtime.markBroken(key, `${reason} (${file})`);
+					return Effect.succeed(undefined);
+				}),
+			);
+			if (client === undefined) return undefined;
+			if (runtime.shuttingDown) {
+				yield* Effect.tryPromise(() => client.shutdown()).pipe(
+					Effect.catch(() => Effect.succeed(undefined)),
+				);
 				return undefined;
 			}
-			this.clients.set(key, client);
-			this.clientDefinitions.set(key, definition);
-			this.notifyStatusChange();
+			runtime.clients.set(key, client);
+			runtime.clientDefinitions.set(key, definition);
+			runtime.notifyStatusChange();
 			return client;
-		} catch (error) {
-			if (!handle.process.killed) handle.process.kill("SIGTERM");
-			const reason = errorReason(error, `Failed to start ${definition.id}`);
-			this.markBroken(key, `${reason} (${file})`);
-			return undefined;
-		}
+		});
 	}
 }
