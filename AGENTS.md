@@ -45,9 +45,11 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 ## COMMANDS
 
 ```bash
-npm install   # restore extension deps (effect) after clone
+npm install   # restore extension/test deps after clone
 # bin tools (fd, rg) are pi-restored, not via npm
-npm run lint          # oxlint over agent/extensions (our only authored TS)
+npm run lint          # oxlint over agent/extensions (our authored TS)
+npm run typecheck     # TypeScript over extensions and tests
+npm test              # vitest integration tests (excludes .repos submodules)
 npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; format:check to verify
 ```
 

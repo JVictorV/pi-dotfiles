@@ -43,6 +43,8 @@ const THINKING_COLOR = {
 } as const;
 
 type GitState = { branch: string; added: number; removed: number };
+type LspClientState = { id: string; label: string };
+type LspState = { running: ReadonlyArray<LspClientState>; broken: ReadonlyArray<LspClientState> };
 type PrState = { number: number; url: string } | null;
 
 /** Shape of `gh pr view --json number,url` output. */
@@ -154,7 +156,52 @@ type LeftParts = {
 	session: string | undefined;
 	git: GitState;
 	pr: PrState;
+	lsp: LspState;
 };
+
+function isLspClientState(value: unknown): value is LspClientState {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return typeof record.id === "string" && typeof record.label === "string";
+}
+
+function isLspState(value: unknown): value is LspState {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		Array.isArray(record.running) &&
+		record.running.every(isLspClientState) &&
+		Array.isArray(record.broken) &&
+		record.broken.every(isLspClientState)
+	);
+}
+
+function shortLspName(client: LspClientState): string {
+	switch (client.id) {
+		case "typescript":
+			return "TS";
+		case "rust-analyzer":
+			return "Rust";
+		case "pyright":
+			return "Python";
+		case "gopls":
+			return "Go";
+		case "bash-language-server":
+			return "Shell";
+		case "json":
+			return "JSON";
+		case "css":
+			return "CSS";
+		case "html":
+			return "HTML";
+		case "eslint":
+			return "ESLint";
+		case "yaml":
+			return "YAML";
+		default:
+			return client.label || client.id;
+	}
+}
 
 /** Build the left side: model · thinking │ ~/dir (branch) +ins -del • session. */
 function buildLeft(theme: Theme, p: LeftParts): string {
@@ -177,6 +224,15 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 		if (p.git.added) parts.push(theme.fg("toolDiffAdded", `+${p.git.added}`));
 		if (p.git.removed) parts.push(theme.fg("toolDiffRemoved", `-${p.git.removed}`));
 		segs.push(parts.join(" "));
+	}
+	{
+		const running = p.lsp.running.map(shortLspName);
+		const broken = p.lsp.broken.map(shortLspName);
+		const color: ThemeColor =
+			broken.length > 0 ? "warning" : running.length > 0 ? "success" : "dim";
+		const label = running.length > 0 ? `LSP (${running.join(", ")})` : "LSP (Not running)";
+		const brokenLabel = broken.length > 0 ? ` !(${broken.join(", ")})` : "";
+		segs.push(theme.fg(color, `${label}${brokenLabel}`));
 	}
 	if (p.session) {
 		segs.push(theme.fg("dim", `• ${p.session}`));
@@ -214,6 +270,7 @@ function renderLine(
 	theme: Theme,
 	git: GitState,
 	pr: PrState,
+	lsp: LspState,
 	width: number,
 ): string[] {
 	const usage = ctx.getContextUsage();
@@ -225,6 +282,7 @@ function renderLine(
 		session: ctx.sessionManager.getSessionName(),
 		git,
 		pr,
+		lsp,
 	});
 	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
 	return [layout(theme, left, right, width)];
@@ -233,6 +291,7 @@ function renderLine(
 export default function (pi: ExtensionAPI) {
 	// Cached git state, refreshed off the render path.
 	let gitState: GitState = { branch: "", added: 0, removed: 0 };
+	let lspState: LspState = { running: [], broken: [] };
 	let prState: PrState = null;
 	// Branch the cached PR was looked up for — avoids showing a stale PR after a switch.
 	let prBranch = "";
@@ -265,6 +324,12 @@ export default function (pi: ExtensionAPI) {
 		Effect.runFork(refresh);
 	};
 
+	pi.events.on("lsp:status", (data) => {
+		if (!isLspState(data)) return;
+		lspState = data;
+		requestRender?.();
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		runRefresh();
 
@@ -281,7 +346,7 @@ export default function (pi: ExtensionAPI) {
 					},
 					invalidate() {},
 					render(width: number): string[] {
-						return renderLine(pi, ctx, theme, gitState, prState, width);
+						return renderLine(pi, ctx, theme, gitState, prState, lspState, width);
 					},
 				};
 			},
