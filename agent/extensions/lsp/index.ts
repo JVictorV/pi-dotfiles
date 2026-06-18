@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadLspConfig } from "./config";
 import { findRepositoryRoot, formatPermission } from "./paths";
 import { LspPermissionStore } from "./permissions";
+import { LspRuntime } from "./runtime";
 import type { LspPermission } from "./types";
 
 const parseServerId = (args: string): string | undefined => {
@@ -49,18 +50,40 @@ const resetPermission = async (cwd: string, args: string): Promise<string> => {
 	return `Reset ${serverId} LSP permission for ${repoRoot}`;
 };
 
+const formatStatus = (runtime: LspRuntime | undefined): string => {
+	if (runtime === undefined) return "LSP runtime is not initialized.";
+	const statuses = runtime.status();
+	const servers = runtime.serverIds();
+	const serverLine =
+		servers.length === 0 ? "No servers available." : `Available servers: ${servers.join(", ")}`;
+	if (statuses.length === 0) {
+		return `No LSP clients running.\n${serverLine}`;
+	}
+
+	const lines = statuses.map(
+		(status) =>
+			`- ${status.serverId} (${status.status}) root=${status.displayRoot} label=${status.label}`,
+	);
+	return `LSP clients:\n${lines.join("\n")}\n${serverLine}`;
+};
+
 export default function lspExtension(pi: ExtensionAPI) {
+	let runtime: LspRuntime | undefined;
+
+	pi.on("session_start", async (_event, ctx) => {
+		runtime = new LspRuntime({ cwd: ctx.cwd, config: await loadLspConfig() });
+	});
+
+	pi.on("session_shutdown", async () => {
+		const current = runtime;
+		runtime = undefined;
+		await current?.shutdown();
+	});
+
 	pi.registerCommand("lsp-status", {
 		description: "Show LSP extension status for the current project",
 		handler: async (_args, ctx) => {
-			const repoRoot = await findRepositoryRoot(ctx.cwd);
-			const config = await loadLspConfig();
-			const configuredServers = Object.keys(config.servers).sort();
-			const configLine =
-				configuredServers.length === 0
-					? "No custom servers configured in agent/lsp.json."
-					: `Configured custom/override servers: ${configuredServers.join(", ")}`;
-			ctx.ui.notify(`LSP status for ${repoRoot}:\nRuntime not started yet.\n${configLine}`, "info");
+			ctx.ui.notify(formatStatus(runtime), "info");
 		},
 	});
 
@@ -104,9 +127,17 @@ export default function lspExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("lsp-restart", {
 		description: "Restart LSP clients: /lsp-restart <server|all>",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
+			if (runtime === undefined) {
+				ctx.ui.notify("LSP runtime is not initialized.", "warning");
+				return;
+			}
+			const serverId = parseServerId(args);
+			await runtime.restart(serverId === "all" ? undefined : serverId);
 			ctx.ui.notify(
-				"LSP runtime restart will be available after the runtime implementation lands.",
+				serverId === undefined || serverId === "all"
+					? "Restarted all LSP clients."
+					: `Restarted ${serverId}.`,
 				"info",
 			);
 		},
