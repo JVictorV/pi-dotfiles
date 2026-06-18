@@ -85,12 +85,12 @@ Boundary functions allowed to consume promises:
 - [x] Slice 4: runtime workflows
   - `runtime.ts` private orchestration now composes Effect workflows directly for restart, shutdown, client resolution, file touch, matching, permission, and spawn.
   - Remaining Promise surface in `runtime.ts` is the public compatibility adapter (`restart`, `shutdown`, `clientsForFile`, `touchRunningFile`) plus temporary `Effect.tryPromise` bridges to `LspClient` until Slice 3 lands.
-- [ ] Slice 5: tool program
+- [x] Slice 5: tool program
   - Tool LSP requests now call `client.requestEffect` at the registered `execute` boundary instead of using `client.request` directly.
   - `ensureClients` now returns an Effect; the registered `execute` boundary is the only place that runs it as a Promise.
   - `runAcrossClients` now composes an Effect across clients instead of owning `Promise.all`.
   - Workspace edit application, mutation approval, changed-file sync, code action params, and hover fan-out now return/compose Effects.
-  - Remaining: run a single top-level Effect program from `execute` instead of multiple boundary `Effect.runPromise` calls.
+  - `execute` now runs a single top-level Effect program; internal LSP requests, edits, approvals, and changed-file sync compose through Effects.
 - [ ] Slice 6: boundary cleanup
   - Added Effect-returning public runtime APIs (`restartProgram`, `shutdownProgram`, `clientsForFileProgram`, `touchRunningFileProgram`).
   - `index.ts` and `tool.ts` now call those runtime programs at plugin boundaries instead of Promise runtime methods.

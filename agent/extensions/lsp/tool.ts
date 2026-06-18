@@ -722,311 +722,312 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 		async execute(_toolCallId, params: LspParams, _signal, _onUpdate, ctx) {
 			const runtime = getRuntime();
 			if (runtime === undefined) throw new Error("LSP runtime is not initialized.");
-			const ensureClientsBoundary = (
-				capability: "navigation" | "diagnostics",
-			): Promise<ReadonlyArray<LocatedClient>> =>
-				Effect.runPromise(ensureClients(runtime, params, ctx, capability));
 
-			let text: string;
-			let results: unknown;
-			let serverIds: ReadonlyArray<string> = [];
+			return await Effect.runPromise(
+				Effect.gen(function* () {
+					const ensureClientsFor = (capability: "navigation" | "diagnostics") =>
+						ensureClients(runtime, params, ctx, capability);
 
-			switch (params.operation) {
-				case "status": {
-					const statuses = runtime.status();
-					results = statuses;
-					text =
-						statuses.length === 0
-							? `No LSP clients running. Available servers: ${runtime.serverIds().join(", ")}`
-							: `LSP clients:\n${statuses.map((status) => `- ${status.serverId} ${status.status} root=${status.displayRoot}`).join("\n")}`;
-					break;
-				}
-				case "definition":
-				case "references":
-				case "implementation":
-				case "prepareCallHierarchy": {
-					const { filePath, line, character } = requirePosition(params);
-					const clients = requireOperationSupport(
-						params.operation,
-						await ensureClientsBoundary("navigation"),
-					);
-					serverIds = clients.map(({ client }) => client.serverId);
-					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
-					const position = { line: line - 1, character: character - 1 };
-					const method = methodForOperation(params.operation);
-					const raw = await Effect.runPromise(
-						runAcrossClients(clients, ({ client }) =>
-							client.requestEffect<unknown[]>(
-								method,
-								requestParamsForOperation(params.operation, file, position),
-							),
-						),
-					);
-					const locations = requireNormalizedLocations(params.operation, raw);
-					results = locations;
-					text = formatLocationList(ctx.cwd, params.operation, locations, limitFor(params, 100));
-					break;
-				}
-				case "incomingCalls":
-				case "outgoingCalls": {
-					const { filePath, line, character } = requirePosition(params);
-					const clients = requireOperationSupport(
-						params.operation,
-						await ensureClientsBoundary("navigation"),
-					);
-					serverIds = clients.map(({ client }) => client.serverId);
-					const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
-					const position = { line: line - 1, character: character - 1 };
-					const raw = await Effect.runPromise(
-						runAcrossClients(clients, ({ client }) =>
-							Effect.gen(function* () {
-								const items = yield* client.requestEffect<unknown[]>(
-									"textDocument/prepareCallHierarchy",
-									{
-										textDocument: { uri },
-										position,
-									},
-								);
-								const item = items[0];
-								if (item === undefined) return [];
-								return yield* client.requestEffect<unknown[]>(
-									methodForOperation(params.operation),
-									{
-										item,
-									},
-								);
-							}),
-						),
-					);
-					const locations = callHierarchyToLocations(params.operation, raw);
-					results = locations;
-					text = formatLocationList(ctx.cwd, params.operation, locations, limitFor(params, 100));
-					break;
-				}
-				case "hover": {
-					const { filePath, line, character } = requirePosition(params);
-					const clients = requireOperationSupport(
-						params.operation,
-						await ensureClientsBoundary("navigation"),
-					);
-					serverIds = clients.map(({ client }) => client.serverId);
-					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
-					const raw = await Effect.runPromise(
-						Effect.forEach(
-							clients,
-							({ client }) =>
-								client.requestEffect("textDocument/hover", {
-									textDocument: { uri: file },
-									position: { line: line - 1, character: character - 1 },
+					let text: string;
+					let results: unknown;
+					let serverIds: ReadonlyArray<string> = [];
+
+					switch (params.operation) {
+						case "status": {
+							const statuses = runtime.status();
+							results = statuses;
+							text =
+								statuses.length === 0
+									? `No LSP clients running. Available servers: ${runtime.serverIds().join(", ")}`
+									: `LSP clients:\n${statuses.map((status) => `- ${status.serverId} ${status.status} root=${status.displayRoot}`).join("\n")}`;
+							break;
+						}
+						case "definition":
+						case "references":
+						case "implementation":
+						case "prepareCallHierarchy": {
+							const { filePath, line, character } = requirePosition(params);
+							const clients = requireOperationSupport(
+								params.operation,
+								yield* ensureClientsFor("navigation"),
+							);
+							serverIds = clients.map(({ client }) => client.serverId);
+							const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
+							const position = { line: line - 1, character: character - 1 };
+							const method = methodForOperation(params.operation);
+							const raw = yield* runAcrossClients(clients, ({ client }) =>
+								client.requestEffect<unknown[]>(
+									method,
+									requestParamsForOperation(params.operation, file, position),
+								),
+							);
+							const locations = requireNormalizedLocations(params.operation, raw);
+							results = locations;
+							text = formatLocationList(
+								ctx.cwd,
+								params.operation,
+								locations,
+								limitFor(params, 100),
+							);
+							break;
+						}
+						case "incomingCalls":
+						case "outgoingCalls": {
+							const { filePath, line, character } = requirePosition(params);
+							const clients = requireOperationSupport(
+								params.operation,
+								yield* ensureClientsFor("navigation"),
+							);
+							serverIds = clients.map(({ client }) => client.serverId);
+							const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
+							const position = { line: line - 1, character: character - 1 };
+							const raw = yield* runAcrossClients(clients, ({ client }) =>
+								Effect.gen(function* () {
+									const items = yield* client.requestEffect<unknown[]>(
+										"textDocument/prepareCallHierarchy",
+										{ textDocument: { uri }, position },
+									);
+									const item = items[0];
+									if (item === undefined) return [];
+									return yield* client.requestEffect<unknown[]>(
+										methodForOperation(params.operation),
+										{
+											item,
+										},
+									);
 								}),
-							{ concurrency: "unbounded" },
-						),
-					);
-					const hovers = raw.map(hoverToText).filter(Boolean);
-					results = hovers;
-					text = hovers.join("\n\n---\n\n") || "No hover results found.";
-					break;
-				}
-				case "documentSymbol": {
-					const filePath = requireFile(params);
-					const clients = requireOperationSupport(
-						params.operation,
-						await ensureClientsBoundary("navigation"),
-					);
-					serverIds = clients.map(({ client }) => client.serverId);
-					const absolute = absolutePath(ctx.cwd, filePath);
-					const raw = await Effect.runPromise(
-						runAcrossClients(clients, ({ client }) =>
-							client.requestEffect<unknown[]>("textDocument/documentSymbol", {
-								textDocument: { uri: pathToFileURL(absolute).href },
-							}),
-						),
-					);
-					results = normalizeDocumentSymbols(raw, absolute);
-					const lines = flattenDocumentSymbols(raw, ctx.cwd, absolute).slice(
-						0,
-						limitFor(params, 200),
-					);
-					text =
-						lines.length === 0
-							? "No document symbols found."
-							: `Document symbols:\n${lines.join("\n")}`;
-					break;
-				}
-				case "workspaceSymbol": {
-					const clients = requireOperationSupport(
-						params.operation,
-						params.filePath
-							? await ensureClientsBoundary("navigation")
-							: runtime.runningClients("navigation"),
-					);
-					if (clients.length === 0)
-						throw new Error("No running LSP clients. Pass filePath to start a matching server.");
-					serverIds = clients.map(({ client }) => client.serverId);
-					const raw = await Effect.runPromise(
-						runAcrossClients(clients, ({ client }) =>
-							client.requestEffect<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
-						),
-					);
-					const locations = workspaceSymbolsToLocations(raw);
-					results = locations;
-					text = formatLocationList(ctx.cwd, "Workspace symbols", locations, limitFor(params, 50));
-					break;
-				}
-				case "diagnostics": {
-					if (params.filePath) {
-						const clients = await ensureClientsBoundary("diagnostics");
-						serverIds = clients.map(({ client }) => client.serverId);
-					}
-					const diagnostics = runtime.diagnostics(params.filePath);
-					results = normalizeDiagnostics(diagnostics);
-					text = formatDiagnostics(ctx.cwd, diagnostics, limitFor(params, 200));
-					break;
-				}
-				case "rename": {
-					const { filePath, line, character } = requirePosition(params);
-					if (!params.newName) throw new Error("rename requires newName");
-					const { client } = firstMutationClient(
-						"rename",
-						requireOperationSupport("rename", await ensureClientsBoundary("navigation")),
-					);
-					serverIds = [client.serverId];
-					const file = absolutePath(ctx.cwd, filePath);
-					const edit = await Effect.runPromise(
-						client.requestEffect("textDocument/rename", {
-							textDocument: { uri: pathToFileURL(file).href },
-							position: { line: line - 1, character: character - 1 },
-							newName: params.newName,
-						}),
-					);
-					await Effect.runPromise(
-						mutationApproval(ctx, "Apply LSP rename?", `Apply rename to ${params.newName}?`),
-					);
-					const files = await Effect.runPromise(applyWorkspaceEdit("rename", ctx.cwd, edit));
-					await Effect.runPromise(touchChangedFiles(runtime, files));
-					results = { files };
-					text = formatApplied("Applied rename", files);
-					break;
-				}
-				case "formatting": {
-					const filePath = requireFile(params);
-					const { client } = firstMutationClient(
-						"formatting",
-						requireOperationSupport("formatting", await ensureClientsBoundary("navigation")),
-					);
-					serverIds = [client.serverId];
-					const file = absolutePath(ctx.cwd, filePath);
-					const uri = pathToFileURL(file).href;
-					const edits = await Effect.runPromise(
-						client.requestEffect("textDocument/formatting", {
-							textDocument: { uri },
-							options: { tabSize: 2, insertSpaces: false },
-						}),
-					);
-					await Effect.runPromise(
-						mutationApproval(ctx, "Apply LSP formatting?", `Apply formatting to ${filePath}?`),
-					);
-					const files = await Effect.runPromise(
-						applyWorkspaceEdit("formatting", ctx.cwd, {
-							changes: { [uri]: edits },
-						}),
-					);
-					await Effect.runPromise(touchChangedFiles(runtime, files));
-					results = { files };
-					text = formatApplied("Applied formatting", files);
-					break;
-				}
-				case "codeAction": {
-					const filePath = requireFile(params);
-					const { client } = firstMutationClient(
-						"codeAction",
-						requireOperationSupport("codeAction", await ensureClientsBoundary("navigation")),
-					);
-					serverIds = [client.serverId];
-					const file = absolutePath(ctx.cwd, filePath);
-					const actions = (
-						await Effect.runPromise(
-							client.requestEffect<unknown[]>(
+							);
+							const locations = callHierarchyToLocations(params.operation, raw);
+							results = locations;
+							text = formatLocationList(
+								ctx.cwd,
+								params.operation,
+								locations,
+								limitFor(params, 100),
+							);
+							break;
+						}
+						case "hover": {
+							const { filePath, line, character } = requirePosition(params);
+							const clients = requireOperationSupport(
+								params.operation,
+								yield* ensureClientsFor("navigation"),
+							);
+							serverIds = clients.map(({ client }) => client.serverId);
+							const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
+							const raw = yield* Effect.forEach(
+								clients,
+								({ client }) =>
+									client.requestEffect("textDocument/hover", {
+										textDocument: { uri: file },
+										position: { line: line - 1, character: character - 1 },
+									}),
+								{ concurrency: "unbounded" },
+							);
+							const hovers = raw.map(hoverToText).filter(Boolean);
+							results = hovers;
+							text = hovers.join("\n\n---\n\n") || "No hover results found.";
+							break;
+						}
+						case "documentSymbol": {
+							const filePath = requireFile(params);
+							const clients = requireOperationSupport(
+								params.operation,
+								yield* ensureClientsFor("navigation"),
+							);
+							serverIds = clients.map(({ client }) => client.serverId);
+							const absolute = absolutePath(ctx.cwd, filePath);
+							const raw = yield* runAcrossClients(clients, ({ client }) =>
+								client.requestEffect<unknown[]>("textDocument/documentSymbol", {
+									textDocument: { uri: pathToFileURL(absolute).href },
+								}),
+							);
+							results = normalizeDocumentSymbols(raw, absolute);
+							const lines = flattenDocumentSymbols(raw, ctx.cwd, absolute).slice(
+								0,
+								limitFor(params, 200),
+							);
+							text =
+								lines.length === 0
+									? "No document symbols found."
+									: `Document symbols:\n${lines.join("\n")}`;
+							break;
+						}
+						case "workspaceSymbol": {
+							const clients = requireOperationSupport(
+								params.operation,
+								params.filePath
+									? yield* ensureClientsFor("navigation")
+									: runtime.runningClients("navigation"),
+							);
+							if (clients.length === 0) {
+								return yield* Effect.fail(
+									new Error("No running LSP clients. Pass filePath to start a matching server."),
+								);
+							}
+							serverIds = clients.map(({ client }) => client.serverId);
+							const raw = yield* runAcrossClients(clients, ({ client }) =>
+								client.requestEffect<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
+							);
+							const locations = workspaceSymbolsToLocations(raw);
+							results = locations;
+							text = formatLocationList(
+								ctx.cwd,
+								"Workspace symbols",
+								locations,
+								limitFor(params, 50),
+							);
+							break;
+						}
+						case "diagnostics": {
+							if (params.filePath) {
+								const clients = yield* ensureClientsFor("diagnostics");
+								serverIds = clients.map(({ client }) => client.serverId);
+							}
+							const diagnostics = runtime.diagnostics(params.filePath);
+							results = normalizeDiagnostics(diagnostics);
+							text = formatDiagnostics(ctx.cwd, diagnostics, limitFor(params, 200));
+							break;
+						}
+						case "rename": {
+							const { filePath, line, character } = requirePosition(params);
+							if (!params.newName) return yield* Effect.fail(new Error("rename requires newName"));
+							const { client } = firstMutationClient(
+								"rename",
+								requireOperationSupport("rename", yield* ensureClientsFor("navigation")),
+							);
+							serverIds = [client.serverId];
+							const file = absolutePath(ctx.cwd, filePath);
+							const edit = yield* client.requestEffect("textDocument/rename", {
+								textDocument: { uri: pathToFileURL(file).href },
+								position: { line: line - 1, character: character - 1 },
+								newName: params.newName,
+							});
+							yield* mutationApproval(
+								ctx,
+								"Apply LSP rename?",
+								`Apply rename to ${params.newName}?`,
+							);
+							const files = yield* applyWorkspaceEdit("rename", ctx.cwd, edit);
+							yield* touchChangedFiles(runtime, files);
+							results = { files };
+							text = formatApplied("Applied rename", files);
+							break;
+						}
+						case "formatting": {
+							const filePath = requireFile(params);
+							const { client } = firstMutationClient(
+								"formatting",
+								requireOperationSupport("formatting", yield* ensureClientsFor("navigation")),
+							);
+							serverIds = [client.serverId];
+							const file = absolutePath(ctx.cwd, filePath);
+							const uri = pathToFileURL(file).href;
+							const edits = yield* client.requestEffect("textDocument/formatting", {
+								textDocument: { uri },
+								options: { tabSize: 2, insertSpaces: false },
+							});
+							yield* mutationApproval(
+								ctx,
+								"Apply LSP formatting?",
+								`Apply formatting to ${filePath}?`,
+							);
+							const files = yield* applyWorkspaceEdit("formatting", ctx.cwd, {
+								changes: { [uri]: edits },
+							});
+							yield* touchChangedFiles(runtime, files);
+							results = { files };
+							text = formatApplied("Applied formatting", files);
+							break;
+						}
+						case "codeAction": {
+							const filePath = requireFile(params);
+							const { client } = firstMutationClient(
+								"codeAction",
+								requireOperationSupport("codeAction", yield* ensureClientsFor("navigation")),
+							);
+							serverIds = [client.serverId];
+							const file = absolutePath(ctx.cwd, filePath);
+							const actionParams = yield* codeActionRequestParams(file, params.codeActionKind);
+							const actions = (yield* client.requestEffect<unknown[]>(
 								"textDocument/codeAction",
-								await Effect.runPromise(codeActionRequestParams(file, params.codeActionKind)),
-							),
-						)
-					).filter(isCodeAction);
-					if (!params.actionTitle) {
-						results = actions.map((action) => ({ title: action.title, kind: action.kind }));
-						text =
-							actions.length === 0
-								? "No code actions found."
-								: `Code actions:\n${actions.map((action) => `- ${action.title}${action.kind ? ` [${action.kind}]` : ""}`).join("\n")}`;
-						break;
-					}
-					const action = actions.find((item) => item.title === params.actionTitle);
-					if (action === undefined) throw new Error(`No code action titled ${params.actionTitle}`);
-					if (action.edit === undefined) {
-						throw LspUnsupportedOperation.make({
-							operation: "codeAction",
-							reason: "Code actions without workspace edits are not supported.",
-						});
-					}
-					await Effect.runPromise(
-						mutationApproval(ctx, "Apply LSP code action?", `Apply code action ${action.title}?`),
-					);
-					const files = await Effect.runPromise(
-						applyWorkspaceEdit("codeAction", ctx.cwd, action.edit),
-					);
-					await Effect.runPromise(touchChangedFiles(runtime, files));
-					results = { action: action.title, files };
-					text = formatApplied("Applied code action", files);
-					break;
-				}
-				case "organizeImports": {
-					const filePath = requireFile(params);
-					const { client } = firstMutationClient(
-						"organizeImports",
-						requireOperationSupport("organizeImports", await ensureClientsBoundary("navigation")),
-					);
-					serverIds = [client.serverId];
-					const file = absolutePath(ctx.cwd, filePath);
-					const actions = (
-						await Effect.runPromise(
-							client.requestEffect<unknown[]>(
+								actionParams,
+							)).filter(isCodeAction);
+							if (!params.actionTitle) {
+								results = actions.map((action) => ({ title: action.title, kind: action.kind }));
+								text =
+									actions.length === 0
+										? "No code actions found."
+										: `Code actions:\n${actions.map((action) => `- ${action.title}${action.kind ? ` [${action.kind}]` : ""}`).join("\n")}`;
+								break;
+							}
+							const action = actions.find((item) => item.title === params.actionTitle);
+							if (action === undefined)
+								return yield* Effect.fail(new Error(`No code action titled ${params.actionTitle}`));
+							if (action.edit === undefined) {
+								return yield* Effect.fail(
+									LspUnsupportedOperation.make({
+										operation: "codeAction",
+										reason: "Code actions without workspace edits are not supported.",
+									}),
+								);
+							}
+							yield* mutationApproval(
+								ctx,
+								"Apply LSP code action?",
+								`Apply code action ${action.title}?`,
+							);
+							const files = yield* applyWorkspaceEdit("codeAction", ctx.cwd, action.edit);
+							yield* touchChangedFiles(runtime, files);
+							results = { action: action.title, files };
+							text = formatApplied("Applied code action", files);
+							break;
+						}
+						case "organizeImports": {
+							const filePath = requireFile(params);
+							const { client } = firstMutationClient(
+								"organizeImports",
+								requireOperationSupport("organizeImports", yield* ensureClientsFor("navigation")),
+							);
+							serverIds = [client.serverId];
+							const file = absolutePath(ctx.cwd, filePath);
+							const actionParams = yield* codeActionRequestParams(file, "source.organizeImports");
+							const actions = (yield* client.requestEffect<unknown[]>(
 								"textDocument/codeAction",
-								await Effect.runPromise(codeActionRequestParams(file, "source.organizeImports")),
-							),
-						)
-					).filter(isCodeAction);
-					const action = actions.find((item) => item.edit !== undefined);
-					if (action === undefined || action.edit === undefined) {
-						throw LspUnsupportedOperation.make({
-							operation: "organizeImports",
-							reason: "No organize imports edit was returned.",
-						});
+								actionParams,
+							)).filter(isCodeAction);
+							const action = actions.find((item) => item.edit !== undefined);
+							if (action === undefined || action.edit === undefined) {
+								return yield* Effect.fail(
+									LspUnsupportedOperation.make({
+										operation: "organizeImports",
+										reason: "No organize imports edit was returned.",
+									}),
+								);
+							}
+							yield* mutationApproval(
+								ctx,
+								"Apply LSP organize imports?",
+								`Apply organize imports to ${filePath}?`,
+							);
+							const files = yield* applyWorkspaceEdit("organizeImports", ctx.cwd, action.edit);
+							yield* touchChangedFiles(runtime, files);
+							results = { action: action.title, files };
+							text = formatApplied("Applied organize imports", files);
+							break;
+						}
 					}
-					await Effect.runPromise(
-						mutationApproval(
-							ctx,
-							"Apply LSP organize imports?",
-							`Apply organize imports to ${filePath}?`,
-						),
-					);
-					const files = await Effect.runPromise(
-						applyWorkspaceEdit("organizeImports", ctx.cwd, action.edit),
-					);
-					await Effect.runPromise(touchChangedFiles(runtime, files));
-					results = { action: action.title, files };
-					text = formatApplied("Applied organize imports", files);
-					break;
-				}
-			}
 
-			const truncated = truncateText(text);
-			const details: LspDetails = {
-				operation: params.operation,
-				serverIds,
-				results,
-				truncated: truncated.truncated,
-			};
-			return { content: [textContent(truncated.text)], details };
+					const truncated = truncateText(text);
+					const details: LspDetails = {
+						operation: params.operation,
+						serverIds,
+						results,
+						truncated: truncated.truncated,
+					};
+					return { content: [textContent(truncated.text)], details };
+				}),
+			);
 		},
 	});
 };
