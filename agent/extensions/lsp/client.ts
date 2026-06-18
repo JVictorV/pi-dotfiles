@@ -10,7 +10,7 @@ import {
 	type MessageConnection,
 	type MessageWriter,
 } from "vscode-jsonrpc/node";
-import { Effect } from "effect";
+import { Duration, Effect } from "effect";
 import type { Diagnostic } from "vscode-languageserver-types";
 
 import { LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
@@ -501,31 +501,35 @@ export class LspClient {
 	}
 
 	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
+		if (!this.canSend()) {
+			this.broken = true;
+			return Effect.fail(new Error(`${this.serverId} language server is not running`));
+		}
+
 		return Effect.tryPromise({
-			try: () => this.request<T>(method, params),
+			try: () => this.connection.sendRequest<T>(method, params),
 			catch: (cause) => cause,
-		});
+		}).pipe(
+			Effect.timeout(Duration.millis(REQUEST_TIMEOUT_MS)),
+			Effect.catch((error) => {
+				const timedOut =
+					isRecord(error) && typeof error._tag === "string" && error._tag.includes("Timeout");
+				const reason = timedOut
+					? `${this.serverId} ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`
+					: error instanceof Error
+						? error.message
+						: String(error);
+				return Effect.fail(
+					timedOut
+						? LspRequestTimeout.make({ serverId: this.serverId, method, reason })
+						: LspRequestError.make({ serverId: this.serverId, method, reason }),
+				);
+			}),
+		);
 	}
 
 	async request<T>(method: string, params: unknown): Promise<T> {
-		if (!this.canSend()) {
-			this.broken = true;
-			throw new Error(`${this.serverId} language server is not running`);
-		}
-
-		try {
-			return await withTimeout(
-				this.connection.sendRequest<T>(method, params),
-				REQUEST_TIMEOUT_MS,
-				`${this.serverId} ${method}`,
-			);
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			if (reason.includes("timed out")) {
-				throw LspRequestTimeout.make({ serverId: this.serverId, method, reason });
-			}
-			throw LspRequestError.make({ serverId: this.serverId, method, reason });
-		}
+		return await Effect.runPromise(this.requestEffect<T>(method, params));
 	}
 
 	shutdownEffect(): Effect.Effect<void, unknown> {
