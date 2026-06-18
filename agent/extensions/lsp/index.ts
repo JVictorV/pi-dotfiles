@@ -108,7 +108,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 		const current = runtime;
 		runtime = undefined;
 		emitStatus(pi, runtime);
-		await current?.shutdown();
+		if (current !== undefined) await Effect.runPromise(current.shutdownProgram());
 	});
 
 	registerLspTool(pi, () => runtime);
@@ -119,7 +119,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 			return;
 		const path = pathFromToolInput(event.input);
 		if (path === undefined) return;
-		await runtime.touchRunningFile(path);
+		await Effect.runPromise(runtime.touchRunningFileProgram(path));
 	});
 
 	pi.registerCommand("lsp-status", {
@@ -175,7 +175,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const serverId = parseServerId(args);
-			await runtime.restart(serverId === "all" ? undefined : serverId);
+			await Effect.runPromise(runtime.restartProgram(serverId === "all" ? undefined : serverId));
 			emitStatus(pi, runtime);
 			ctx.ui.notify(
 				serverId === undefined || serverId === "all"

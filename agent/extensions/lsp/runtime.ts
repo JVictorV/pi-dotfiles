@@ -136,15 +136,37 @@ export class LspRuntime {
 		);
 	}
 
+	restartProgram(serverId?: string): Effect.Effect<void, unknown> {
+		return this.runOperationEffect(this.restartEffect(serverId));
+	}
+
 	async restart(serverId?: string): Promise<void> {
-		await this.runOperation(LspRuntimeSession.use((session) => session.restart(serverId)));
+		await Effect.runPromise(this.restartProgram(serverId));
+	}
+
+	shutdownProgram(): Effect.Effect<void, unknown> {
+		if (this.shuttingDown) return Effect.succeed(undefined);
+		return this.shutdownEffect().pipe(
+			Effect.flatMap(() =>
+				Effect.sync(() => {
+					this.currentState().disposeRequested = true;
+				}),
+			),
+			Effect.flatMap(() => this.disposeIfIdleEffect()),
+		);
 	}
 
 	async shutdown(): Promise<void> {
-		if (this.shuttingDown) return;
-		await this.sessionRuntime.runPromise(LspRuntimeSession.use((session) => session.shutdown));
-		this.currentState().disposeRequested = true;
-		await this.disposeIfIdle();
+		await Effect.runPromise(this.shutdownProgram());
+	}
+
+	clientsForFileProgram(
+		filePath: string,
+		capability: LspCapability,
+		ctx: ExtensionContext,
+		options: { prompt: boolean; waitForDiagnostics?: boolean },
+	): Effect.Effect<ClientResolution, unknown> {
+		return this.runOperationEffect(this.clientsForFileEffect(filePath, capability, ctx, options));
 	}
 
 	async clientsForFile(
@@ -153,34 +175,45 @@ export class LspRuntime {
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Promise<ClientResolution> {
-		return await this.runOperation(
-			LspRuntimeSession.use((session) =>
-				session.clientsForFile(filePath, capability, ctx, options),
-			),
-		);
+		return await Effect.runPromise(this.clientsForFileProgram(filePath, capability, ctx, options));
+	}
+
+	touchRunningFileProgram(filePath: string): Effect.Effect<void, unknown> {
+		return this.runOperationEffect(this.touchRunningFileEffect(filePath));
 	}
 
 	async touchRunningFile(filePath: string): Promise<void> {
-		await this.runOperation(LspRuntimeSession.use((session) => session.touchRunningFile(filePath)));
+		await Effect.runPromise(this.touchRunningFileProgram(filePath));
 	}
 
-	private async runOperation<A, E>(effect: Effect.Effect<A, E, LspRuntimeSession>): Promise<A> {
-		const state = this.currentState();
-		if (state.disposed) throw lspRuntimeShuttingDown();
-		state.activeOperations += 1;
-		try {
-			return await this.sessionRuntime.runPromise(effect);
-		} finally {
-			state.activeOperations -= 1;
-			await this.disposeIfIdle();
-		}
+	private runOperationEffect<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E | unknown> {
+		return Effect.suspend((): Effect.Effect<A, E | unknown> => {
+			const state = this.currentState();
+			if (state.disposed) return Effect.fail(lspRuntimeShuttingDown());
+			state.activeOperations += 1;
+			return effect.pipe(
+				Effect.ensuring(
+					Effect.suspend(() => {
+						state.activeOperations -= 1;
+						return this.disposeIfIdleEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
+					}),
+				),
+			);
+		});
 	}
 
-	private async disposeIfIdle(): Promise<void> {
-		const state = this.currentState();
-		if (!state.disposeRequested || state.disposed || state.activeOperations > 0) return;
-		state.disposed = true;
-		await this.sessionRuntime.dispose();
+	private disposeIfIdleEffect(): Effect.Effect<void, unknown> {
+		return Effect.suspend(() => {
+			const state = this.currentState();
+			if (!state.disposeRequested || state.disposed || state.activeOperations > 0) {
+				return Effect.succeed(undefined);
+			}
+			state.disposed = true;
+			return Effect.tryPromise({
+				try: () => this.sessionRuntime.dispose(),
+				catch: (cause) => cause,
+			});
+		});
 	}
 
 	private serverIdsEffect(): Effect.Effect<ReadonlyArray<string>> {

@@ -404,13 +404,9 @@ const ensureClients = (
 ): Effect.Effect<ReadonlyArray<LocatedClient>, unknown> =>
 	Effect.gen(function* () {
 		const filePath = requireFile(params);
-		const resolution = yield* Effect.tryPromise({
-			try: () =>
-				runtime.clientsForFile(filePath, capability, ctx, {
-					prompt: true,
-					waitForDiagnostics: capability === "diagnostics",
-				}),
-			catch: (cause) => cause,
+		const resolution = yield* runtime.clientsForFileProgram(filePath, capability, ctx, {
+			prompt: true,
+			waitForDiagnostics: capability === "diagnostics",
 		});
 		if (resolution.clients.length === 0) {
 			if (resolution.unavailable.length === 1) {
@@ -668,15 +664,10 @@ const touchChangedFiles = (
 	runtime: LspRuntime,
 	files: ReadonlyArray<string>,
 ): Effect.Effect<void, unknown> =>
-	Effect.forEach(
-		files,
-		(file) =>
-			Effect.tryPromise({
-				try: () => runtime.touchRunningFile(file),
-				catch: (cause) => cause,
-			}),
-		{ concurrency: "unbounded", discard: true },
-	);
+	Effect.forEach(files, (file) => runtime.touchRunningFileProgram(file), {
+		concurrency: "unbounded",
+		discard: true,
+	});
 
 const fullDocumentRange = (file: string): Effect.Effect<LspRange, unknown> =>
 	Effect.tryPromise({

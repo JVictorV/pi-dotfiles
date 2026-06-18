@@ -92,3 +92,6 @@ Boundary functions allowed to consume promises:
   - Workspace edit application, mutation approval, changed-file sync, code action params, and hover fan-out now return/compose Effects.
   - Remaining: run a single top-level Effect program from `execute` instead of multiple boundary `Effect.runPromise` calls.
 - [ ] Slice 6: boundary cleanup
+  - Added Effect-returning public runtime APIs (`restartProgram`, `shutdownProgram`, `clientsForFileProgram`, `touchRunningFileProgram`).
+  - `index.ts` and `tool.ts` now call those runtime programs at plugin boundaries instead of Promise runtime methods.
+  - Remaining: remove or quarantine compatibility Promise adapters from `runtime.ts` / `client.ts`, and finish reducing `execute` to one top-level Effect program.
