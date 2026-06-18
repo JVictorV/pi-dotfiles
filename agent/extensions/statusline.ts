@@ -1,9 +1,7 @@
 /**
  * Status line — ported from the user's Claude Code `ccstatusline` config.
  *
- * Rendered as a `belowEditor` widget so it sits directly above the pi-lens
- * diagnostics bar (widgets render in registration order; registering at
- * session_start places this on top of pi-lens, which inserts its bar later).
+ * Rendered as a `belowEditor` widget so it sits directly below the editor.
  *
  * Single-line layout:
  *   model · thinking │ ~/dir (branch) ⇡#PR +ins/-del • session   45%  90k/200k
@@ -270,7 +268,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		runRefresh();
 
-		// belowEditor widget → renders directly above the pi-lens diagnostics bar.
+		// belowEditor widget → renders directly below the editor.
 		ctx.ui.setWidget(
 			"statusline",
 			(tui, theme) => {
@@ -291,7 +289,6 @@ export default function (pi: ExtensionAPI) {
 		);
 
 		// Suppress the built-in footer so nothing renders below the status line.
-		// (The pi-lens diagnostics bar is hidden separately via ~/.pi-lens/config.json.)
 		ctx.ui.setFooter(() => ({
 			invalidate() {},
 			render(): string[] {

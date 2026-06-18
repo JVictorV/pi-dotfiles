@@ -39,6 +39,6 @@ Preferred patterns:
 
 - **Spawning interactive subprocesses** — they hang the agent. `git-interceptor` already forces `GIT_EDITOR=true`; don't undo it.
 - **Allowing `--no-verify`** — `git-interceptor` blocks it deliberately; never add an escape hatch.
-- **Widget registration order matters** — `statusline` registers at `session_start` so it sits above the pi-lens bar (later registrant renders lower). Don't move its registration.
+- **Widget placement matters** — `statusline` registers as a `belowEditor` widget at `session_start`. Don't move it unless you want it in another UI region.
 - **OSC notifications** — `notify.ts` uses OSC 777; unsupported on Kitty/Terminal.app/Alacritty. Don't assume delivery.
 - **`any`, unsafe `as` casts, or thrown exceptions in new Effect code** — use typed errors and `Effect.fail`; model failures in the error channel instead.

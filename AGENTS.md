@@ -15,7 +15,6 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 │   ├── settings.json # models, theme, skill/package config
 │   ├── auth.json     # API keys — GITIGNORED, never commit
 │   ├── bin/ npm/ sessions/  # all gitignored, pi-restored
-├── pi-lens/          # pi-lens config; symlinked to ~/.pi-lens/config.json
 ├── .repos/           # reference submodules (effect, dotfiles) — NOT project code
 └── package.json      # shared deps for extensions (effect)
 ```
@@ -29,7 +28,6 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 | Add a skill                      | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
 | Sync Pocock skills from upstream | invoke `sync-pocock-skills` skill ("sync skills")                         |
 | Extension type defs              | `tsconfig.json` resolves `@earendil-works/pi-*`                           |
-| pi-lens diagnostics config       | `pi-lens/config.json` (read from `~/.pi-lens/`, not here)                 |
 
 ## CONVENTIONS
 
@@ -48,8 +46,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 
 ```bash
 npm install   # restore extension deps (effect) after clone
-# settings packages (pi-lens) + bin tools (fd, rg) are pi-restored, not via npm
-ln -sf ~/.pi/pi-lens/config.json ~/.pi-lens/config.json   # link pi-lens config post-clone
+# bin tools (fd, rg) are pi-restored, not via npm
 npm run lint          # oxlint over agent/extensions (our only authored TS)
 npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; format:check to verify
 ```
