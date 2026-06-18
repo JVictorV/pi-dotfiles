@@ -7,3 +7,6 @@
 [submodule ".repos/edusantosbrito-pi-dotfiles"]
 	path = .repos/edusantosbrito-pi-dotfiles
 	url = https://github.com/EduSantosBrito/pi-dotfiles.git
+[submodule ".repos/opencode"]
+	path = .repos/opencode
+	url = https://github.com/anomalyco/opencode

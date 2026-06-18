@@ -15,7 +15,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 │   ├── settings.json # models, theme, skill/package config
 │   ├── auth.json     # API keys — GITIGNORED, never commit
 │   ├── bin/ npm/ sessions/  # all gitignored, pi-restored
-├── .repos/           # reference submodules (effect, dotfiles) — NOT project code
+├── .repos/           # reference submodules (effect, dotfiles, opencode) — NOT project code
 └── package.json      # shared deps for extensions (effect)
 ```
 
@@ -59,3 +59,4 @@ npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; 
   - `.repos/effect` tracks `Effect-TS/effect-smol` (folder renamed to `effect`).
   - `.repos/dmmulroy-dotfiles` tracks `dmmulroy/.dotfiles` (credited inspiration).
   - `.repos/edusantosbrito-pi-dotfiles` tracks `EduSantosBrito/pi-dotfiles` (credited inspiration).
+  - `.repos/opencode` tracks `anomalyco/opencode` (reference for ported behavior).
