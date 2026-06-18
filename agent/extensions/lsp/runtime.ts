@@ -68,6 +68,36 @@ export class LspRuntime {
 		}));
 	}
 
+	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
+		const clients: LocatedClient[] = [];
+		for (const client of this.clients.values()) {
+			const definition = this.clientDefinitions.get(clientKey(client.root, client.serverId));
+			if (definition === undefined || !definition.capabilities[capability]) continue;
+			clients.push({ client, definition });
+		}
+		return clients;
+	}
+
+	diagnostics(
+		file?: string,
+	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
+		const result = new Map<
+			string,
+			ReadonlyArray<import("vscode-languageserver-types").Diagnostic>
+		>();
+		const resolvedFile =
+			file === undefined
+				? undefined
+				: resolve(this.cwd, file.startsWith("@") ? file.slice(1) : file);
+		for (const client of this.clients.values()) {
+			for (const [diagnosticFile, diagnostics] of client.diagnostics.entries()) {
+				if (resolvedFile !== undefined && diagnosticFile !== resolvedFile) continue;
+				result.set(diagnosticFile, [...(result.get(diagnosticFile) ?? []), ...diagnostics]);
+			}
+		}
+		return result;
+	}
+
 	async restart(serverId?: string): Promise<void> {
 		const keys = [...this.clients.entries()]
 			.filter(([, client]) => serverId === undefined || client.serverId === serverId)

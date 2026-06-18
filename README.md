@@ -84,6 +84,7 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 | `notify.ts`          | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
 | `sound.ts`           | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
 | `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed.                                                    |
+| `lsp/`               | LSP Extension: read-only language-server-backed code navigation, hover/type info, symbols, call hierarchy, diagnostics, persisted per-repo spawn permissions, and passive sync for files touched by tools.                                                           |
 | `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                                             |
 
 ## Skills

@@ -4,7 +4,16 @@ import { loadLspConfig } from "./config";
 import { findRepositoryRoot, formatPermission } from "./paths";
 import { LspPermissionStore } from "./permissions";
 import { LspRuntime } from "./runtime";
+import { registerLspTool } from "./tool";
 import type { LspPermission } from "./types";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const pathFromToolInput = (input: unknown): string | undefined => {
+	if (!isRecord(input)) return undefined;
+	return typeof input.path === "string" ? input.path : undefined;
+};
 
 const parseServerId = (args: string): string | undefined => {
 	const serverId = args.trim();
@@ -78,6 +87,17 @@ export default function lspExtension(pi: ExtensionAPI) {
 		const current = runtime;
 		runtime = undefined;
 		await current?.shutdown();
+	});
+
+	registerLspTool(pi, () => runtime);
+
+	pi.on("tool_result", async (event) => {
+		if (event.isError || runtime === undefined) return;
+		if (event.toolName !== "read" && event.toolName !== "write" && event.toolName !== "edit")
+			return;
+		const path = pathFromToolInput(event.input);
+		if (path === undefined) return;
+		await runtime.touchRunningFile(path);
 	});
 
 	pi.registerCommand("lsp-status", {
