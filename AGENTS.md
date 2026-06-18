@@ -40,6 +40,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 - **Committing `agent/auth.json`** — contains provider API keys. Gitignored; keep it that way.
 - **Editing `.gitmodules` / `.repos/` state by hand** — use `git submodule` commands.
 - **Adding extension deps to a nested `package.json`** — there is only the root one; nesting breaks resolution.
+- **Using `unknown` or generic `Error` on an Effect error channel** — model expected failures with domain-specific custom errors. When integrating with an external system whose error type is unknown, wrap it in a custom error instead of leaking `unknown`/`Error`.
 - **Documenting vendored skills here** — `diagnose`, `tdd`, `triage`, etc. are synced/patched by `sync-pocock-skills`; edits get overwritten on sync.
 
 ## COMMANDS
