@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 
 import { Effect, Option, Schema, Semaphore } from "effect";
 
-import { LspPermissionFileError } from "./errors";
+import { LspPermissionFileError, lspErrorReason } from "./errors";
 import { permissionPath } from "./paths";
 import type { LspPermission, LspPermissionFile } from "./types";
 
@@ -70,16 +70,22 @@ const parseJson = (text: string): Effect.Effect<unknown, LspPermissionFileError>
 		),
 	);
 
+const missingPermissionFileReason = "agent/lsp-permissions.json not found";
+
 const readPermissionFile = Effect.fn("readPermissionFile")(function* () {
 	const path = permissionPath();
 	const text = yield* Effect.tryPromise({
 		try: () => readFile(path, "utf8"),
-		catch: (error) => error,
+		catch: (error) =>
+			LspPermissionFileError.make({
+				reason: isNotFoundError(error)
+					? missingPermissionFileReason
+					: lspErrorReason(error, "failed to read agent/lsp-permissions.json"),
+			}),
 	}).pipe(
-		Effect.catch((error) => {
-			if (isNotFoundError(error)) return Effect.succeed(undefined);
-			return Effect.fail(error);
-		}),
+		Effect.catchTag("LspPermissionFileError", (error) =>
+			error.reason === missingPermissionFileReason ? Effect.succeed(undefined) : Effect.fail(error),
+		),
 	);
 
 	if (text === undefined) return emptyPermissionFile();
@@ -90,12 +96,28 @@ const readPermissionFile = Effect.fn("readPermissionFile")(function* () {
 
 const writePermissionFile = Effect.fn("writePermissionFile")(function* (file: LspPermissionFile) {
 	const path = permissionPath();
-	yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
+	yield* Effect.tryPromise({
+		try: () => mkdir(dirname(path), { recursive: true }),
+		catch: (error) =>
+			LspPermissionFileError.make({
+				reason: lspErrorReason(error, "failed to create agent directory"),
+			}),
+	});
 	const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
-	yield* Effect.tryPromise(() =>
-		writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
-	);
-	yield* Effect.tryPromise(() => rename(tmpPath, path));
+	yield* Effect.tryPromise({
+		try: () => writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
+		catch: (error) =>
+			LspPermissionFileError.make({
+				reason: lspErrorReason(error, "failed to write agent/lsp-permissions.json"),
+			}),
+	});
+	yield* Effect.tryPromise({
+		try: () => rename(tmpPath, path),
+		catch: (error) =>
+			LspPermissionFileError.make({
+				reason: lspErrorReason(error, "failed to replace agent/lsp-permissions.json"),
+			}),
+	});
 });
 
 export class LspPermissionStore {
@@ -105,7 +127,7 @@ export class LspPermissionStore {
 		this.file = file;
 	}
 
-	static load(): Effect.Effect<LspPermissionStore, unknown> {
+	static load(): Effect.Effect<LspPermissionStore, LspPermissionFileError> {
 		return readPermissionFile().pipe(Effect.map((file) => new LspPermissionStore(file)));
 	}
 
@@ -119,7 +141,11 @@ export class LspPermissionStore {
 		);
 	}
 
-	set(repoRoot: string, serverId: string, permission: LspPermission): Effect.Effect<void, unknown> {
+	set(
+		repoRoot: string,
+		serverId: string,
+		permission: LspPermission,
+	): Effect.Effect<void, LspPermissionFileError> {
 		const updateFile = (file: LspPermissionFile): void => {
 			this.file = file;
 		};
@@ -136,7 +162,7 @@ export class LspPermissionStore {
 		);
 	}
 
-	reset(repoRoot: string, serverId?: string): Effect.Effect<void, unknown> {
+	reset(repoRoot: string, serverId?: string): Effect.Effect<void, LspPermissionFileError> {
 		const updateFile = (file: LspPermissionFile): void => {
 			this.file = file;
 		};

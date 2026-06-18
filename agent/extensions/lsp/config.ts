@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { Effect, Option, Schema } from "effect";
 
-import { LspConfigError } from "./errors";
+import { LspConfigError, lspErrorReason } from "./errors";
 import { configPath } from "./paths";
 import type { UserServerConfig } from "./types";
 const failConfig = (reason: string): Effect.Effect<never, LspConfigError> =>
@@ -119,16 +119,22 @@ const parseJson = (text: string): Effect.Effect<unknown, LspConfigError> =>
 		),
 	);
 
+const missingConfigReason = "agent/lsp.json not found";
+
 export const loadLspConfig = Effect.fn("loadLspConfig")(function* () {
 	const path = configPath();
 	const text = yield* Effect.tryPromise({
 		try: () => readFile(path, "utf8"),
-		catch: (error) => error,
+		catch: (error) =>
+			LspConfigError.make({
+				reason: isNotFoundError(error)
+					? missingConfigReason
+					: lspErrorReason(error, "failed to read agent/lsp.json"),
+			}),
 	}).pipe(
-		Effect.catch((error) => {
-			if (isNotFoundError(error)) return Effect.succeed(undefined);
-			return Effect.fail(error);
-		}),
+		Effect.catchTag("LspConfigError", (error) =>
+			error.reason === missingConfigReason ? Effect.succeed(undefined) : Effect.fail(error),
+		),
 	);
 
 	if (text === undefined) return { servers: {} };

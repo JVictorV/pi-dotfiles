@@ -13,7 +13,15 @@ import {
 import { Duration, Effect, Option, Result, Schema } from "effect";
 import type { Diagnostic } from "vscode-languageserver-types";
 
-import { LspClientBroken, LspInitializeError, LspRequestError, LspRequestTimeout } from "./errors";
+import {
+	LspClientBroken,
+	LspFilesystemError,
+	LspInitializeError,
+	LspRequestError,
+	LspRequestTimeout,
+	lspErrorReason,
+	type LspError,
+} from "./errors";
 import type { LspServerHandle } from "./server";
 
 const INITIALIZE_TIMEOUT_MS = 45_000;
@@ -179,17 +187,8 @@ type WritableState = NodeJS.WritableStream & {
 	readonly writableFinished?: boolean;
 };
 
-const ErrorMessage = Schema.Struct({ message: Schema.String });
 const TimeoutTag = Schema.Struct({ _tag: Schema.String });
-const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
 const decodeTimeoutTagOption = Schema.decodeUnknownOption(TimeoutTag);
-
-const unknownReason = (error: unknown, fallback: string): string => {
-	if (typeof error === "string" && error.length > 0) return error;
-	const decoded = decodeErrorMessageOption(error);
-	if (Option.isSome(decoded) && decoded.value.message.length > 0) return decoded.value.message;
-	return fallback;
-};
 
 const isTimeoutError = (error: unknown): boolean => {
 	const decoded = decodeTimeoutTagOption(error);
@@ -347,7 +346,7 @@ export class LspClient {
 		this.root = handle.root;
 	}
 
-	static createEffect(handle: LspServerHandle): Effect.Effect<LspClient, unknown> {
+	static createEffect(handle: LspServerHandle): Effect.Effect<LspClient, LspError> {
 		return Effect.gen(function* () {
 			const connection = createMessageConnection(
 				new StreamMessageReader(handle.process.stdout),
@@ -404,14 +403,18 @@ export class LspClient {
 							},
 						},
 					}),
-				catch: (cause) => cause,
+				catch: (error) =>
+					LspInitializeError.make({
+						serverId: handle.definition.id,
+						reason: lspErrorReason(error, `${handle.definition.id} initialize failed`),
+					}),
 			}).pipe(
 				Effect.timeout(Duration.millis(INITIALIZE_TIMEOUT_MS)),
 				Effect.catch((error) => {
 					const timedOut = isTimeoutError(error);
 					const reason = timedOut
 						? `${handle.definition.id} initialize timed out after ${INITIALIZE_TIMEOUT_MS}ms`
-						: unknownReason(error, `${handle.definition.id} initialize failed`);
+						: lspErrorReason(error, `${handle.definition.id} initialize failed`);
 					return Effect.fail(LspInitializeError.make({ serverId: handle.definition.id, reason }));
 				}),
 			);
@@ -419,7 +422,14 @@ export class LspClient {
 
 			yield* Effect.tryPromise({
 				try: () => connection.sendNotification("initialized", {}),
-				catch: (cause) => cause,
+				catch: (error) =>
+					LspInitializeError.make({
+						serverId: handle.definition.id,
+						reason: lspErrorReason(
+							error,
+							`${handle.definition.id} initialized notification failed`,
+						),
+					}),
 			});
 			handle.process.stderr.resume();
 			handle.process.on("exit", () => {
@@ -478,13 +488,18 @@ export class LspClient {
 		}
 	}
 
-	openEffect(file: string, waitForDiagnostics: boolean): Effect.Effect<void, unknown> {
+	openEffect(file: string, waitForDiagnostics: boolean): Effect.Effect<void, LspError> {
 		// oxlint-disable-next-line typescript/no-this-alias
 		const client = this;
 		return Effect.gen(function* () {
 			const text = yield* Effect.tryPromise({
 				try: () => readFile(file, "utf8"),
-				catch: (cause) => cause,
+				catch: (error) =>
+					LspFilesystemError.make({
+						operation: "read",
+						path: file,
+						reason: lspErrorReason(error, `failed to read ${file}`),
+					}),
 			});
 			if (!client.canSend()) {
 				client.broken = true;
@@ -545,7 +560,7 @@ export class LspClient {
 		});
 	}
 
-	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, unknown> {
+	requestEffect<T>(method: string, params: unknown): Effect.Effect<T, LspError> {
 		if (!this.canSend()) {
 			this.broken = true;
 			return Effect.fail(
@@ -558,14 +573,19 @@ export class LspClient {
 
 		return Effect.tryPromise({
 			try: () => this.connection.sendRequest<T>(method, params),
-			catch: (cause) => cause,
+			catch: (error) =>
+				LspRequestError.make({
+					serverId: this.serverId,
+					method,
+					reason: lspErrorReason(error, `${this.serverId} ${method} failed`),
+				}),
 		}).pipe(
 			Effect.timeout(Duration.millis(REQUEST_TIMEOUT_MS)),
 			Effect.catch((error) => {
 				const timedOut = isTimeoutError(error);
 				const reason = timedOut
 					? `${this.serverId} ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`
-					: unknownReason(error, `${this.serverId} ${method} failed`);
+					: lspErrorReason(error, `${this.serverId} ${method} failed`);
 				return Effect.fail(
 					timedOut
 						? LspRequestTimeout.make({ serverId: this.serverId, method, reason })
@@ -575,7 +595,7 @@ export class LspClient {
 		);
 	}
 
-	shutdownEffect(): Effect.Effect<void, unknown> {
+	shutdownEffect(): Effect.Effect<void, LspError> {
 		if (this.disposed || this.closing) return Effect.succeed(undefined);
 		// oxlint-disable-next-line typescript/no-this-alias
 		const client = this;
@@ -586,7 +606,12 @@ export class LspClient {
 			if (!client.broken && streamCanAcceptWrites(client.handle.process.stdin)) {
 				yield* Effect.tryPromise({
 					try: () => client.connection.sendRequest("shutdown", null),
-					catch: (cause) => cause,
+					catch: (error) =>
+						LspRequestError.make({
+							serverId: client.serverId,
+							method: "shutdown",
+							reason: lspErrorReason(error, `${client.serverId} shutdown failed`),
+						}),
 				}).pipe(
 					Effect.timeout(Duration.millis(SHUTDOWN_TIMEOUT_MS)),
 					Effect.catch(() => Effect.succeed(undefined)),
@@ -637,7 +662,7 @@ export class LspClient {
 		return waitForPush.pipe(Effect.race(Effect.sleep(Duration.millis(timeoutMs))));
 	}
 
-	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void, unknown> {
+	private pullDocumentDiagnosticsEffect(file: string): Effect.Effect<void> {
 		const documentIdentifiers = [...this.diagnosticRegistrations.values()]
 			.filter((registration) => registration.registerOptions?.workspaceDiagnostics !== true)
 			.map((registration) => registration.registerOptions?.identifier)
@@ -676,7 +701,7 @@ export class LspClient {
 		);
 	}
 
-	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void, unknown> {
+	private pullWorkspaceDiagnosticsEffect(): Effect.Effect<void> {
 		const workspaceIdentifiers = [...this.diagnosticRegistrations.values()]
 			.filter((registration) => registration.registerOptions?.workspaceDiagnostics === true)
 			.map((registration) => registration.registerOptions?.identifier)
@@ -746,20 +771,20 @@ export class LspClient {
 		});
 	}
 
-	private notifyWatchedFileEffect(file: string, type: number): Effect.Effect<void, unknown> {
+	private notifyWatchedFileEffect(file: string, type: number): Effect.Effect<void> {
 		return this.notifyEffect("workspace/didChangeWatchedFiles", {
 			changes: [{ uri: pathToFileURL(file).href, type }],
 		});
 	}
 
-	private notifySaveEffect(file: string, text: string): Effect.Effect<void, unknown> {
+	private notifySaveEffect(file: string, text: string): Effect.Effect<void> {
 		return this.notifyEffect("textDocument/didSave", {
 			textDocument: { uri: pathToFileURL(file).href },
 			text,
 		});
 	}
 
-	private closeOpenDocumentsEffect(): Effect.Effect<void, unknown> {
+	private closeOpenDocumentsEffect(): Effect.Effect<void> {
 		return Effect.forEach(
 			[...this.openDocuments.keys()],
 			(file) =>
@@ -770,12 +795,17 @@ export class LspClient {
 		).pipe(Effect.map(() => this.openDocuments.clear()));
 	}
 
-	private notifyEffect(method: string, params: unknown): Effect.Effect<void, unknown> {
+	private notifyEffect(method: string, params: unknown): Effect.Effect<void> {
 		if (!this.canSend()) return Effect.succeed(undefined);
 
 		return Effect.tryPromise({
 			try: () => this.connection.sendNotification(method, params),
-			catch: (cause) => cause,
+			catch: (error) =>
+				LspRequestError.make({
+					serverId: this.serverId,
+					method,
+					reason: lspErrorReason(error, `${this.serverId} ${method} notification failed`),
+				}),
 		}).pipe(
 			Effect.catch(() =>
 				Effect.sync(() => {

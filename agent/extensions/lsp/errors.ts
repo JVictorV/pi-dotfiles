@@ -1,4 +1,18 @@
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
+
+const ErrorReason = Schema.Struct({ reason: Schema.String });
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const decodeErrorReasonOption = Schema.decodeUnknownOption(ErrorReason);
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
+
+export const lspErrorReason = (error: unknown, fallback: string): string => {
+	if (typeof error === "string" && error.length > 0) return error;
+	const reason = decodeErrorReasonOption(error);
+	if (Option.isSome(reason) && reason.value.reason.length > 0) return reason.value.reason;
+	const message = decodeErrorMessageOption(error);
+	if (Option.isSome(message) && message.value.message.length > 0) return message.value.message;
+	return fallback;
+};
 
 export class LspConfigError extends Schema.TaggedErrorClass<LspConfigError>()("LspConfigError", {
 	reason: Schema.String,
@@ -100,6 +114,38 @@ export class LspRuntimeShuttingDown extends Schema.TaggedErrorClass<LspRuntimeSh
 		reason: Schema.String,
 	},
 ) {}
+
+export class LspFilesystemError extends Schema.TaggedErrorClass<LspFilesystemError>()(
+	"LspFilesystemError",
+	{
+		operation: Schema.String,
+		path: Schema.String,
+		reason: Schema.String,
+	},
+) {}
+
+export class LspRuntimeError extends Schema.TaggedErrorClass<LspRuntimeError>()("LspRuntimeError", {
+	reason: Schema.String,
+}) {}
+
+export type LspError =
+	| LspConfigError
+	| LspPermissionFileError
+	| LspPermissionDenied
+	| LspBinaryMissing
+	| LspSpawnError
+	| LspInitializeError
+	| LspRequestTimeout
+	| LspRequestError
+	| LspClientBroken
+	| LspNoClients
+	| LspToolInputError
+	| LspUnsupportedOperation
+	| LspMalformedResponse
+	| LspShutdownError
+	| LspRuntimeShuttingDown
+	| LspFilesystemError
+	| LspRuntimeError;
 
 export const lspRuntimeShuttingDown = (): LspRuntimeShuttingDown =>
 	LspRuntimeShuttingDown.make({ reason: "LSP runtime is shutting down." });

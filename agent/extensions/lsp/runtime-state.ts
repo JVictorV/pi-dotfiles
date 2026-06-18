@@ -1,13 +1,14 @@
 import { Deferred } from "effect";
 
 import type { LspClient } from "./client";
+import type { LspError } from "./errors";
 import type { LspServerDefinition } from "./server";
 
 export interface RuntimeState {
 	clients: Map<string, LspClient>;
 	clientDefinitions: Map<string, LspServerDefinition>;
 	broken: Map<string, string>;
-	spawning: Map<string, Deferred.Deferred<LspClient | undefined, unknown>>;
+	spawning: Map<string, Deferred.Deferred<LspClient | undefined, LspError>>;
 	shuttingDown: boolean;
 	activeOperations: number;
 	disposeRequested: boolean;

@@ -16,13 +16,17 @@ import type { Diagnostic } from "vscode-languageserver-types";
 
 import {
 	LspBinaryMissing,
+	LspFilesystemError,
 	LspInitializeError,
 	LspMalformedResponse,
 	LspNoClients,
 	LspPermissionDenied,
+	LspRuntimeError,
 	LspSpawnError,
 	LspToolInputError,
 	LspUnsupportedOperation,
+	lspErrorReason,
+	type LspError,
 } from "./errors";
 import type { LspRuntime, LocatedClient } from "./runtime";
 
@@ -498,8 +502,8 @@ const requireOperationSupport = (
 
 const runAcrossClients = <T>(
 	clients: ReadonlyArray<LocatedClient>,
-	fn: (client: LocatedClient) => Effect.Effect<ReadonlyArray<T>, unknown>,
-): Effect.Effect<T[], unknown> =>
+	fn: (client: LocatedClient) => Effect.Effect<ReadonlyArray<T>, LspError>,
+): Effect.Effect<T[], LspError> =>
 	Effect.forEach(clients, fn, { concurrency: "unbounded" }).pipe(
 		Effect.map((results) => results.flat()),
 	);
@@ -658,13 +662,23 @@ const applyWorkspaceEdit = Effect.fn("applyWorkspaceEdit")(function* (
 		}
 		const text = yield* Effect.tryPromise({
 			try: () => readFile(file, "utf8"),
-			catch: (cause) => cause,
+			catch: (error) =>
+				LspFilesystemError.make({
+					operation: "read",
+					path: file,
+					reason: lspErrorReason(error, `failed to read ${file}`),
+				}),
 		});
 		const next = yield* applyTextEdits(operation, text, edits);
 		if (next !== text) {
 			yield* Effect.tryPromise({
 				try: () => writeFile(file, next, "utf8"),
-				catch: (cause) => cause,
+				catch: (error) =>
+					LspFilesystemError.make({
+						operation: "write",
+						path: file,
+						reason: lspErrorReason(error, `failed to write ${file}`),
+					}),
 			});
 			changedFiles.push(formatPath(cwd, file));
 		}
@@ -684,7 +698,10 @@ const mutationApproval = Effect.fn("mutationApproval")(function* (
 	}
 	const approved = yield* Effect.tryPromise({
 		try: () => ctx.ui.confirm(title, body),
-		catch: (cause) => cause,
+		catch: (error) =>
+			LspRuntimeError.make({
+				reason: lspErrorReason(error, `${title} confirmation failed`),
+			}),
 	});
 	if (!approved) {
 		return yield* Effect.fail(LspToolInputError.make({ reason: `${title} was declined.` }));
@@ -699,16 +716,21 @@ const formatApplied = (label: string, files: ReadonlyArray<string>): string =>
 const touchChangedFiles = (
 	runtime: LspRuntime,
 	files: ReadonlyArray<string>,
-): Effect.Effect<void, unknown> =>
+): Effect.Effect<void, LspError> =>
 	Effect.forEach(files, (file) => runtime.touchRunningFileProgram(file), {
 		concurrency: "unbounded",
 		discard: true,
 	});
 
-const fullDocumentRange = (file: string): Effect.Effect<LspRange, unknown> =>
+const fullDocumentRange = (file: string): Effect.Effect<LspRange, LspError> =>
 	Effect.tryPromise({
 		try: () => readFile(file, "utf8"),
-		catch: (cause) => cause,
+		catch: (error) =>
+			LspFilesystemError.make({
+				operation: "read",
+				path: file,
+				reason: lspErrorReason(error, `failed to read ${file}`),
+			}),
 	}).pipe(
 		Effect.map((text) => ({
 			start: { line: 0, character: 0 },
@@ -719,7 +741,7 @@ const fullDocumentRange = (file: string): Effect.Effect<LspRange, unknown> =>
 const codeActionRequestParams = (
 	file: string,
 	kind?: string,
-): Effect.Effect<Record<string, unknown>, unknown> =>
+): Effect.Effect<Record<string, unknown>, LspError> =>
 	fullDocumentRange(file).pipe(
 		Effect.map((range) => ({
 			textDocument: { uri: pathToFileURL(file).href },

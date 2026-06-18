@@ -1,10 +1,10 @@
 import { extname, resolve } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect, Layer, ManagedRuntime, Option, Schema, SynchronizedRef } from "effect";
+import { Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
 
 import { LspClient } from "./client";
-import { lspRuntimeShuttingDown } from "./errors";
+import { LspRuntimeError, lspErrorReason, lspRuntimeShuttingDown, type LspError } from "./errors";
 import { findRepositoryRoot } from "./paths";
 import { LspPermissionStore } from "./permissions";
 import {
@@ -43,19 +43,6 @@ interface RuntimeOptions {
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
 
 const isBrokenClient = (client: LspClient): boolean => client.status.status === "broken";
-
-const ErrorReason = Schema.Struct({ reason: Schema.String });
-const ErrorMessage = Schema.Struct({ message: Schema.String });
-const decodeErrorReasonOption = Schema.decodeUnknownOption(ErrorReason);
-const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
-
-const errorReason = (error: unknown, fallback: string): string => {
-	const reason = decodeErrorReasonOption(error);
-	if (Option.isSome(reason) && reason.value.reason.length > 0) return reason.value.reason;
-	const message = decodeErrorMessageOption(error);
-	if (Option.isSome(message) && message.value.message.length > 0) return message.value.message;
-	return fallback;
-};
 
 export class LspRuntime {
 	readonly cwd: string;
@@ -141,11 +128,11 @@ export class LspRuntime {
 		);
 	}
 
-	restartProgram(serverId?: string): Effect.Effect<void, unknown> {
+	restartProgram(serverId?: string): Effect.Effect<void, LspError> {
 		return this.runOperationEffect(this.restartEffect(serverId));
 	}
 
-	shutdownProgram(): Effect.Effect<void, unknown> {
+	shutdownProgram(): Effect.Effect<void, LspError> {
 		if (this.shuttingDown) return Effect.succeed(undefined);
 		return this.shutdownEffect().pipe(
 			Effect.flatMap(() =>
@@ -162,16 +149,16 @@ export class LspRuntime {
 		capability: LspCapability,
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
-	): Effect.Effect<ClientResolution, unknown> {
+	): Effect.Effect<ClientResolution, LspError> {
 		return this.runOperationEffect(this.clientsForFileEffect(filePath, capability, ctx, options));
 	}
 
-	touchRunningFileProgram(filePath: string): Effect.Effect<void, unknown> {
+	touchRunningFileProgram(filePath: string): Effect.Effect<void, LspError> {
 		return this.runOperationEffect(this.touchRunningFileEffect(filePath));
 	}
 
-	private runOperationEffect<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E | unknown> {
-		return Effect.suspend((): Effect.Effect<A, E | unknown> => {
+	private runOperationEffect<A>(effect: Effect.Effect<A, LspError>): Effect.Effect<A, LspError> {
+		return Effect.suspend((): Effect.Effect<A, LspError> => {
 			const state = this.currentState();
 			if (state.disposed) return Effect.fail(lspRuntimeShuttingDown());
 			state.activeOperations += 1;
@@ -186,7 +173,7 @@ export class LspRuntime {
 		});
 	}
 
-	private disposeIfIdleEffect(): Effect.Effect<void, unknown> {
+	private disposeIfIdleEffect(): Effect.Effect<void, LspError> {
 		return Effect.suspend(() => {
 			const state = this.currentState();
 			if (!state.disposeRequested || state.disposed || state.activeOperations > 0) {
@@ -195,7 +182,10 @@ export class LspRuntime {
 			state.disposed = true;
 			return Effect.tryPromise({
 				try: () => this.sessionRuntime.dispose(),
-				catch: (cause) => cause,
+				catch: (error) =>
+					LspRuntimeError.make({
+						reason: lspErrorReason(error, "failed to dispose LSP runtime"),
+					}),
 			});
 		});
 	}
@@ -256,7 +246,7 @@ export class LspRuntime {
 		});
 	}
 
-	private restartEffect(serverId?: string): Effect.Effect<void, unknown> {
+	private restartEffect(serverId?: string): Effect.Effect<void, LspError> {
 		return Effect.suspend(() => {
 			const keys = [...this.clients.entries()]
 				.filter(([, client]) => serverId === undefined || client.serverId === serverId)
@@ -291,7 +281,7 @@ export class LspRuntime {
 		});
 	}
 
-	private shutdownEffect(): Effect.Effect<void, unknown> {
+	private shutdownEffect(): Effect.Effect<void, LspError> {
 		return Effect.suspend(() => {
 			if (this.shuttingDown) return Effect.succeed(undefined);
 			this.shuttingDown = true;
@@ -312,7 +302,7 @@ export class LspRuntime {
 		capability: LspCapability,
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
-	): Effect.Effect<ClientResolution, unknown> {
+	): Effect.Effect<ClientResolution, LspError> {
 		// oxlint-disable-next-line typescript/no-this-alias
 		const runtime = this;
 		return Effect.gen(function* () {
@@ -368,7 +358,7 @@ export class LspRuntime {
 
 				if (!options.prompt) continue;
 
-				const deferred = Deferred.makeUnsafe<LspClient | undefined, unknown>();
+				const deferred = Deferred.makeUnsafe<LspClient | undefined, LspError>();
 				runtime.spawning.set(key, deferred);
 				const spawned = yield* runtime.spawnForMatchEffect(match, key, file, ctx, deferred).pipe(
 					Effect.ensuring(
@@ -399,7 +389,7 @@ export class LspRuntime {
 		});
 	}
 
-	private touchRunningFileEffect(filePath: string): Effect.Effect<void, unknown> {
+	private touchRunningFileEffect(filePath: string): Effect.Effect<void, LspError> {
 		return Effect.suspend(() => {
 			const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 			return Effect.forEach(
@@ -428,7 +418,7 @@ export class LspRuntime {
 	private matchingServersEffect(
 		file: string,
 		capability: LspCapability,
-	): Effect.Effect<ReadonlyArray<{ definition: LspServerDefinition; root: string }>, unknown> {
+	): Effect.Effect<ReadonlyArray<{ definition: LspServerDefinition; root: string }>, LspError> {
 		// oxlint-disable-next-line typescript/no-this-alias
 		const runtime = this;
 		return Effect.gen(function* () {
@@ -449,7 +439,7 @@ export class LspRuntime {
 		definition: LspServerDefinition,
 		root: string,
 		ctx: ExtensionContext,
-	): Effect.Effect<LspPermission, unknown> {
+	): Effect.Effect<LspPermission, LspError> {
 		return Effect.gen(function* () {
 			const repoRoot = yield* findRepositoryRoot(root);
 			const store = yield* LspPermissionStore.load();
@@ -458,12 +448,17 @@ export class LspRuntime {
 
 			if (!ctx.hasUI) return "deny";
 
-			const approved = yield* Effect.tryPromise(() =>
-				ctx.ui.confirm(
-					"Start LSP server?",
-					`Start ${definition.label} (${definition.id}) for ${repoRoot}? This preference will be stored globally for this repository path.`,
-				),
-			);
+			const approved = yield* Effect.tryPromise({
+				try: () =>
+					ctx.ui.confirm(
+						"Start LSP server?",
+						`Start ${definition.label} (${definition.id}) for ${repoRoot}? This preference will be stored globally for this repository path.`,
+					),
+				catch: (error) =>
+					LspRuntimeError.make({
+						reason: lspErrorReason(error, `failed to confirm ${definition.id} spawn`),
+					}),
+			});
 			const permission: LspPermission = approved ? "allow" : "deny";
 			yield* store.set(repoRoot, definition.id, permission);
 			return permission;
@@ -485,12 +480,12 @@ export class LspRuntime {
 		key: string,
 		file: string,
 		ctx: ExtensionContext,
-		deferred: Deferred.Deferred<LspClient | undefined, unknown>,
+		deferred: Deferred.Deferred<LspClient | undefined, LspError>,
 	): Effect.Effect<
 		| { readonly client: LspClient; readonly permissionDenied?: never }
 		| { readonly client?: never; readonly permissionDenied: LspPermission }
 		| undefined,
-		unknown
+		LspError
 	> {
 		// oxlint-disable-next-line typescript/no-this-alias
 		const runtime = this;
@@ -517,7 +512,7 @@ export class LspRuntime {
 		client: LspClient,
 		file: string,
 		waitForDiagnostics: boolean,
-	): Effect.Effect<void, unknown> {
+	): Effect.Effect<void, LspError> {
 		return client
 			.openEffect(file, waitForDiagnostics)
 			.pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -527,14 +522,14 @@ export class LspRuntime {
 		definition: LspServerDefinition,
 		root: string,
 		file: string,
-	): Effect.Effect<LspClient | undefined, unknown> {
+	): Effect.Effect<LspClient | undefined, LspError> {
 		// oxlint-disable-next-line typescript/no-this-alias
 		const runtime = this;
 		return Effect.gen(function* () {
 			const key = clientKey(root, definition.id);
 			const handle = yield* spawnServer(definition, root, runtime.cwd).pipe(
 				Effect.catch((error) => {
-					const reason = errorReason(error, `Failed to start ${definition.id}`);
+					const reason = lspErrorReason(error, `Failed to start ${definition.id}`);
 					runtime.markBroken(key, `${reason} (${file})`);
 					return Effect.succeed(undefined);
 				}),
@@ -544,7 +539,7 @@ export class LspRuntime {
 			const client = yield* LspClient.createEffect(handle).pipe(
 				Effect.catch((error) => {
 					if (!handle.process.killed) handle.process.kill("SIGTERM");
-					const reason = errorReason(error, `Failed to start ${definition.id}`);
+					const reason = lspErrorReason(error, `Failed to start ${definition.id}`);
 					runtime.markBroken(key, `${reason} (${file})`);
 					return Effect.succeed(undefined);
 				}),

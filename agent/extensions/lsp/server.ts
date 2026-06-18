@@ -6,6 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { Effect } from "effect";
 
+import { LspSpawnError, lspErrorReason, type LspError } from "./errors";
 import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
 import { canonicalPath } from "./paths";
 
@@ -24,7 +25,7 @@ export interface LspServerDefinition {
 	strictRoot: boolean;
 	capabilities: ServerCapabilities;
 	installHint: string;
-	spawn: (input: ServerSpawnInput) => Effect.Effect<LspSpawnSpec | undefined, unknown>;
+	spawn: (input: ServerSpawnInput) => Effect.Effect<LspSpawnSpec | undefined, LspError>;
 }
 
 export interface ServerSpawnInput {
@@ -136,7 +137,7 @@ const commandServer = (input: {
 	installHint: string;
 	initializationOptions?: (
 		input: ServerSpawnInput,
-	) => Effect.Effect<Readonly<Record<string, unknown>> | undefined, unknown>;
+	) => Effect.Effect<Readonly<Record<string, unknown>> | undefined, LspError>;
 }): LspServerDefinition => ({
 	id: input.id,
 	label: input.label,
@@ -471,16 +472,23 @@ export const spawnServer = Effect.fn("spawnServer")(function* (
 	const spec = yield* definition.spawn({ root, cwd, definition });
 	if (spec === undefined) return undefined;
 
-	return yield* Effect.sync(() => ({
-		definition,
-		root,
-		process: spawn(spec.command, [...spec.args], {
-			cwd: root,
-			env: { ...env, ...spec.env },
-			stdio: ["pipe", "pipe", "pipe"],
+	return yield* Effect.try({
+		try: () => ({
+			definition,
+			root,
+			process: spawn(spec.command, [...spec.args], {
+				cwd: root,
+				env: { ...env, ...spec.env },
+				stdio: ["pipe", "pipe", "pipe"],
+			}),
+			initializationOptions: spec.initializationOptions,
 		}),
-		initializationOptions: spec.initializationOptions,
-	}));
+		catch: (error) =>
+			LspSpawnError.make({
+				serverId: definition.id,
+				reason: lspErrorReason(error, `Failed to spawn ${definition.id}`),
+			}),
+	});
 });
 
 export const displayRoot = (root: string, cwd: string): string => {
