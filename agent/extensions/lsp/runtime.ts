@@ -427,7 +427,7 @@ export class LspRuntime {
 		for (const definition of this.registry.values()) {
 			if (!definition.capabilities[capability]) continue;
 			if (!matchesExtension(definition, file)) continue;
-			const root = await findServerRoot(file, this.cwd, definition);
+			const root = await Effect.runPromise(findServerRoot(file, this.cwd, definition));
 			if (root === undefined) continue;
 			matches.push({ definition, root });
 		}
@@ -473,11 +473,13 @@ export class LspRuntime {
 		file: string,
 	): Promise<LspClient | undefined> {
 		const key = clientKey(root, definition.id);
-		const handle = await spawnServer(definition, root, this.cwd).catch((error: unknown) => {
-			const reason = errorReason(error, `Failed to start ${definition.id}`);
-			this.markBroken(key, `${reason} (${file})`);
-			return undefined;
-		});
+		const handle = await Effect.runPromise(spawnServer(definition, root, this.cwd)).catch(
+			(error: unknown) => {
+				const reason = errorReason(error, `Failed to start ${definition.id}`);
+				this.markBroken(key, `${reason} (${file})`);
+				return undefined;
+			},
+		);
 		if (handle === undefined) return undefined;
 
 		try {

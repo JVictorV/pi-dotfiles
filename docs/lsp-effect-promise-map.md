@@ -67,7 +67,10 @@ Boundary functions allowed to consume promises:
   - `paths.ts`, `config.ts`, and `permissions.ts` now expose Effect workflows.
   - `index.ts` consumes those workflows only at pi command/session boundaries via `Effect.runPromise`.
   - Temporary adapters remain in `runtime.ts` and `server.ts` until their slices are converted.
-- [ ] Slice 2: server discovery/spawn
+- [x] Slice 2: server discovery/spawn
+  - `server.ts` executable lookup, node module resolution, root detection, and spawn construction now return Effects.
+  - `LspServerDefinition.spawn` is Effect-based.
+  - Temporary `Effect.runPromise` adapters remain in `runtime.ts` until runtime workflows are converted.
 - [ ] Slice 3: client workflows
 - [ ] Slice 4: runtime workflows
 - [ ] Slice 5: tool program

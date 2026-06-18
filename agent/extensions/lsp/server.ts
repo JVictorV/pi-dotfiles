@@ -23,7 +23,7 @@ export interface LspServerDefinition {
 	strictRoot: boolean;
 	capabilities: ServerCapabilities;
 	installHint: string;
-	spawn: (input: ServerSpawnInput) => Promise<LspSpawnSpec | undefined>;
+	spawn: (input: ServerSpawnInput) => Effect.Effect<LspSpawnSpec | undefined, unknown>;
 }
 
 export interface ServerSpawnInput {
@@ -41,10 +41,11 @@ export interface LspServerHandle {
 
 const executableExtensions = process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
 
-const canExecute = async (path: string): Promise<boolean> =>
-	access(path, constants.X_OK)
-		.then(() => true)
-		.catch(() => false);
+const canExecute = (path: string): Effect.Effect<boolean> =>
+	Effect.tryPromise(() => access(path, constants.X_OK)).pipe(
+		Effect.as(true),
+		Effect.catch(() => Effect.succeed(false)),
+	);
 
 const isWithin = (child: string, parent: string): boolean => {
 	const rel = relative(parent, child);
@@ -56,73 +57,75 @@ const pathCandidates = (bin: string, dir: string): ReadonlyArray<string> => {
 	return executableExtensions.map((extension) => join(dir, `${bin}${extension}`));
 };
 
-const findInNodeModules = async (
+const findInNodeModules = (
 	bin: string,
 	start: string,
 	stop: string,
-): Promise<string | undefined> => {
-	let current = start;
-	while (isWithin(current, stop)) {
-		for (const candidate of pathCandidates(bin, join(current, "node_modules", ".bin"))) {
-			if (await canExecute(candidate)) return candidate;
+): Effect.Effect<string | undefined> =>
+	Effect.gen(function* () {
+		let current = start;
+		while (isWithin(current, stop)) {
+			for (const candidate of pathCandidates(bin, join(current, "node_modules", ".bin"))) {
+				if (yield* canExecute(candidate)) return candidate;
+			}
+			if (current === stop) break;
+			const next = dirname(current);
+			if (next === current) break;
+			current = next;
 		}
-		if (current === stop) break;
-		const next = dirname(current);
-		if (next === current) break;
-		current = next;
-	}
-	return undefined;
-};
+		return undefined;
+	});
 
-const findOnPath = async (bin: string): Promise<string | undefined> => {
-	for (const pathEntry of (process.env.PATH ?? "").split(delimiter)) {
-		if (!pathEntry) continue;
-		for (const candidate of pathCandidates(bin, pathEntry)) {
-			if (await canExecute(candidate)) return candidate;
+const findOnPath = (bin: string): Effect.Effect<string | undefined> =>
+	Effect.gen(function* () {
+		for (const pathEntry of (process.env.PATH ?? "").split(delimiter)) {
+			if (!pathEntry) continue;
+			for (const candidate of pathCandidates(bin, pathEntry)) {
+				if (yield* canExecute(candidate)) return candidate;
+			}
 		}
-	}
-	return undefined;
-};
+		return undefined;
+	});
 
-export const findExecutable = async (
+export const findExecutable = (
 	bin: string,
 	root: string,
 	cwd: string,
-): Promise<string | undefined> => {
-	if (bin.includes("/") || bin.includes("\\") || isAbsolute(bin)) {
-		const resolved = isAbsolute(bin) ? bin : resolve(root, bin);
-		return (await canExecute(resolved)) ? resolved : undefined;
-	}
+): Effect.Effect<string | undefined> =>
+	Effect.gen(function* () {
+		if (bin.includes("/") || bin.includes("\\") || isAbsolute(bin)) {
+			const resolved = isAbsolute(bin) ? bin : resolve(root, bin);
+			return (yield* canExecute(resolved)) ? resolved : undefined;
+		}
 
-	return (
-		(await findInNodeModules(bin, root, cwd)) ??
-		(await findInNodeModules(bin, cwd, cwd)) ??
-		(await findOnPath(bin))
-	);
-};
+		return (
+			(yield* findInNodeModules(bin, root, cwd)) ??
+			(yield* findInNodeModules(bin, cwd, cwd)) ??
+			(yield* findOnPath(bin))
+		);
+	});
 
-export const resolveNodeModuleFile = async (
+export const resolveNodeModuleFile = (
 	modulePath: string,
 	root: string,
 	cwd: string,
-): Promise<string | undefined> => {
-	let current = root;
-	while (isWithin(current, cwd)) {
-		const candidate = join(current, "node_modules", ...modulePath.split("/"));
-		if (
-			await access(candidate, constants.F_OK)
-				.then(() => true)
-				.catch(() => false)
-		) {
-			return candidate;
+): Effect.Effect<string | undefined> =>
+	Effect.gen(function* () {
+		let current = root;
+		while (isWithin(current, cwd)) {
+			const candidate = join(current, "node_modules", ...modulePath.split("/"));
+			const exists = yield* Effect.tryPromise(() => access(candidate, constants.F_OK)).pipe(
+				Effect.as(true),
+				Effect.catch(() => Effect.succeed(false)),
+			);
+			if (exists) return candidate;
+			if (current === cwd) break;
+			const next = dirname(current);
+			if (next === current) break;
+			current = next;
 		}
-		if (current === cwd) break;
-		const next = dirname(current);
-		if (next === current) break;
-		current = next;
-	}
-	return undefined;
-};
+		return undefined;
+	});
 
 const commandServer = (input: {
 	id: string;
@@ -136,7 +139,7 @@ const commandServer = (input: {
 	installHint: string;
 	initializationOptions?: (
 		input: ServerSpawnInput,
-	) => Promise<Readonly<Record<string, unknown>> | undefined>;
+	) => Effect.Effect<Readonly<Record<string, unknown>> | undefined, unknown>;
 }): LspServerDefinition => ({
 	id: input.id,
 	label: input.label,
@@ -148,15 +151,18 @@ const commandServer = (input: {
 		diagnostics: input.capabilities?.diagnostics ?? true,
 	},
 	installHint: input.installHint,
-	spawn: async (spawnInput) => {
-		const command = await findExecutable(input.bin, spawnInput.root, spawnInput.cwd);
-		if (command === undefined) return undefined;
-		return {
-			command,
-			args: input.args,
-			initializationOptions: await input.initializationOptions?.(spawnInput),
-		};
-	},
+	spawn: (spawnInput) =>
+		Effect.gen(function* () {
+			const command = yield* findExecutable(input.bin, spawnInput.root, spawnInput.cwd);
+			if (command === undefined) return undefined;
+			return {
+				command,
+				args: input.args,
+				initializationOptions: yield* (
+					input.initializationOptions?.(spawnInput) ?? Effect.succeed(undefined)
+				),
+			};
+		}),
 });
 
 const nodeMarkers = [
@@ -179,10 +185,11 @@ const builtinServers: ReadonlyArray<LspServerDefinition> = [
 		bin: "typescript-language-server",
 		args: ["--stdio"],
 		installHint: "Install with: npm install -D typescript typescript-language-server",
-		initializationOptions: async ({ root, cwd }) => {
-			const tsserver = await resolveNodeModuleFile("typescript/lib/tsserver.js", root, cwd);
-			return tsserver ? { tsserver: { path: dirname(tsserver) } } : undefined;
-		},
+		initializationOptions: ({ root, cwd }) =>
+			Effect.gen(function* () {
+				const tsserver = yield* resolveNodeModuleFile("typescript/lib/tsserver.js", root, cwd);
+				return tsserver ? { tsserver: { path: dirname(tsserver) } } : undefined;
+			}),
 	}),
 	commandServer({
 		id: "eslint",
@@ -383,7 +390,7 @@ const mergeServerConfig = (
 		strictRoot: false,
 		capabilities: { navigation: true, diagnostics: true },
 		installHint: `Configure agent/lsp.json server ${serverId}.command`,
-		spawn: async () => undefined,
+		spawn: () => Effect.succeed(undefined),
 	};
 
 	return {
@@ -395,14 +402,15 @@ const mergeServerConfig = (
 			navigation: config.capabilities?.navigation ?? base.capabilities.navigation,
 			diagnostics: config.capabilities?.diagnostics ?? base.capabilities.diagnostics,
 		},
-		spawn: async (input: ServerSpawnInput) => {
-			if (config.command === undefined) return base.spawn(input);
-			const [bin, ...args] = config.command;
-			if (bin === undefined) return undefined;
-			const command = await findExecutable(bin, input.root, input.cwd);
-			if (command === undefined) return undefined;
-			return { command, args, env: config.env };
-		},
+		spawn: (input: ServerSpawnInput) =>
+			Effect.gen(function* () {
+				if (config.command === undefined) return yield* base.spawn(input);
+				const [bin, ...args] = config.command;
+				if (bin === undefined) return undefined;
+				const command = yield* findExecutable(bin, input.root, input.cwd);
+				if (command === undefined) return undefined;
+				return { command, args, env: config.env };
+			}),
 	} satisfies LspServerDefinition;
 };
 
@@ -426,58 +434,59 @@ export const buildServerRegistry = (
 	return registry;
 };
 
-export const findServerRoot = async (
+export const findServerRoot = (
 	file: string,
 	cwd: string,
 	definition: LspServerDefinition,
-): Promise<string | undefined> => {
-	let current = dirname(await Effect.runPromise(canonicalPath(file)));
-	const stop = await Effect.runPromise(canonicalPath(cwd));
+): Effect.Effect<string | undefined, unknown> =>
+	Effect.gen(function* () {
+		let current = dirname(yield* canonicalPath(file));
+		const stop = yield* canonicalPath(cwd);
 
-	while (isWithin(current, stop)) {
-		for (const marker of definition.rootMarkers) {
-			const markerPath = join(current, marker);
-			try {
-				await access(markerPath, constants.F_OK);
-				return current;
-			} catch {
-				// Try next marker.
+		while (isWithin(current, stop)) {
+			for (const marker of definition.rootMarkers) {
+				const markerPath = join(current, marker);
+				const exists = yield* Effect.tryPromise(() => access(markerPath, constants.F_OK)).pipe(
+					Effect.as(true),
+					Effect.catch(() => Effect.succeed(false)),
+				);
+				if (exists) return current;
 			}
+
+			if (current === stop) break;
+			const next = dirname(current);
+			if (next === current) break;
+			current = next;
 		}
 
-		if (current === stop) break;
-		const next = dirname(current);
-		if (next === current) break;
-		current = next;
-	}
-
-	return definition.strictRoot ? undefined : stop;
-};
+		return definition.strictRoot ? undefined : stop;
+	});
 
 export const matchesExtension = (definition: LspServerDefinition, file: string): boolean => {
 	const lowerFile = file.toLowerCase();
 	return definition.extensions.some((extension) => lowerFile.endsWith(extension.toLowerCase()));
 };
 
-export const spawnServer = async (
+export const spawnServer = (
 	definition: LspServerDefinition,
 	root: string,
 	cwd: string,
-): Promise<LspServerHandle | undefined> => {
-	const spec = await definition.spawn({ root, cwd, definition });
-	if (spec === undefined) return undefined;
+): Effect.Effect<LspServerHandle | undefined, unknown> =>
+	Effect.gen(function* () {
+		const spec = yield* definition.spawn({ root, cwd, definition });
+		if (spec === undefined) return undefined;
 
-	return {
-		definition,
-		root,
-		process: spawn(spec.command, [...spec.args], {
-			cwd: root,
-			env: { ...process.env, ...spec.env },
-			stdio: ["pipe", "pipe", "pipe"],
-		}) as ChildProcessWithoutNullStreams,
-		initializationOptions: spec.initializationOptions,
-	};
-};
+		return yield* Effect.sync(() => ({
+			definition,
+			root,
+			process: spawn(spec.command, [...spec.args], {
+				cwd: root,
+				env: { ...process.env, ...spec.env },
+				stdio: ["pipe", "pipe", "pipe"],
+			}) as ChildProcessWithoutNullStreams,
+			initializationOptions: spec.initializationOptions,
+		}));
+	});
 
 export const displayRoot = (root: string, cwd: string): string => {
 	const rel = relative(cwd, root);
