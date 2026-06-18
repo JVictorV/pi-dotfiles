@@ -62,9 +62,12 @@ const resetPermission = async (cwd: string, args: string): Promise<string> => {
 const emitStatus = (pi: ExtensionAPI, runtime: LspRuntime | undefined): void => {
 	const statuses = runtime?.status() ?? [];
 	pi.events.emit("lsp:status", {
-		running: statuses.filter((status) => status.status === "connected").length,
-		broken: statuses.filter((status) => status.status === "broken").length,
-		servers: runtime?.serverIds().length ?? 0,
+		running: statuses
+			.filter((status) => status.status === "connected")
+			.map((status) => ({ id: status.serverId, label: status.label })),
+		broken: statuses
+			.filter((status) => status.status === "broken")
+			.map((status) => ({ id: status.serverId, label: status.label })),
 	});
 };
 

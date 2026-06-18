@@ -63,10 +63,12 @@ For diagnostics:
 The extension emits `lsp:status` events consumed by `statusline.ts`. The bar shows compact LSP state as:
 
 ```txt
-LSP <running>/<available> [!broken]
+LSP (Not running)
+LSP (TS)
+LSP (TS, Rust, Python)
 ```
 
-Examples: `LSP 1/10`, `LSP 2/10 !1`.
+Broken clients are appended as `!(Name)`, for example `LSP (TS) !(Python)`.
 
 ### Slash commands
 
