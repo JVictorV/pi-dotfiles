@@ -533,36 +533,35 @@ export class LspClient {
 	}
 
 	shutdownEffect(): Effect.Effect<void, unknown> {
-		return Effect.tryPromise({
-			try: () => this.shutdown(),
-			catch: (cause) => cause,
+		if (this.disposed || this.closing) return Effect.succeed(undefined);
+		// oxlint-disable-next-line typescript/no-this-alias
+		const client = this;
+		return Effect.gen(function* () {
+			yield* client.closeOpenDocumentsEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
+			client.closing = true;
+
+			if (!client.broken && streamCanAcceptWrites(client.handle.process.stdin)) {
+				yield* Effect.tryPromise({
+					try: () => client.connection.sendRequest("shutdown", null),
+					catch: (cause) => cause,
+				}).pipe(
+					Effect.timeout(Duration.millis(SHUTDOWN_TIMEOUT_MS)),
+					Effect.catch(() => Effect.succeed(undefined)),
+				);
+				yield* client.notifyEffect("exit", undefined);
+			}
+
+			client.disposed = true;
+			client.broken = true;
+			client.connection.dispose();
+			if (!client.handle.process.killed) {
+				client.handle.process.kill("SIGTERM");
+			}
 		});
 	}
 
 	async shutdown(): Promise<void> {
-		if (this.disposed || this.closing) return;
-		await this.closeOpenDocuments().catch(() => undefined);
-		this.closing = true;
-
-		try {
-			if (!this.broken && streamCanAcceptWrites(this.handle.process.stdin)) {
-				await withTimeout(
-					this.connection.sendRequest("shutdown", null),
-					SHUTDOWN_TIMEOUT_MS,
-					`${this.serverId} shutdown`,
-				);
-				await this.connection.sendNotification("exit").catch(() => undefined);
-			}
-		} catch {
-			// Fall through to process termination.
-		} finally {
-			this.disposed = true;
-			this.broken = true;
-			this.connection.dispose();
-			if (!this.handle.process.killed) {
-				this.handle.process.kill("SIGTERM");
-			}
-		}
+		await Effect.runPromise(this.shutdownEffect());
 	}
 
 	private canSend(): boolean {
@@ -695,38 +694,59 @@ export class LspClient {
 		});
 	}
 
-	private async notifyWatchedFile(file: string, type: number): Promise<void> {
-		await this.notify("workspace/didChangeWatchedFiles", {
+	private notifyWatchedFileEffect(file: string, type: number): Effect.Effect<void, unknown> {
+		return this.notifyEffect("workspace/didChangeWatchedFiles", {
 			changes: [{ uri: pathToFileURL(file).href, type }],
 		});
 	}
 
-	private async notifySave(file: string, text: string): Promise<void> {
-		await this.notify("textDocument/didSave", {
+	private async notifyWatchedFile(file: string, type: number): Promise<void> {
+		await Effect.runPromise(this.notifyWatchedFileEffect(file, type));
+	}
+
+	private notifySaveEffect(file: string, text: string): Effect.Effect<void, unknown> {
+		return this.notifyEffect("textDocument/didSave", {
 			textDocument: { uri: pathToFileURL(file).href },
 			text,
 		});
 	}
 
-	private async closeOpenDocuments(): Promise<void> {
-		await Promise.all(
-			[...this.openDocuments.keys()].map(async (file) => {
-				await this.notify("textDocument/didClose", {
+	private async notifySave(file: string, text: string): Promise<void> {
+		await Effect.runPromise(this.notifySaveEffect(file, text));
+	}
+
+	private closeOpenDocumentsEffect(): Effect.Effect<void, unknown> {
+		return Effect.forEach(
+			[...this.openDocuments.keys()],
+			(file) =>
+				this.notifyEffect("textDocument/didClose", {
 					textDocument: { uri: pathToFileURL(file).href },
-				});
-			}),
+				}),
+			{ concurrency: "unbounded", discard: true },
+		).pipe(Effect.map(() => this.openDocuments.clear()));
+	}
+
+	private async closeOpenDocuments(): Promise<void> {
+		await Effect.runPromise(this.closeOpenDocumentsEffect());
+	}
+
+	private notifyEffect(method: string, params: unknown): Effect.Effect<void, unknown> {
+		if (!this.canSend()) return Effect.succeed(undefined);
+
+		return Effect.tryPromise({
+			try: () => this.connection.sendNotification(method, params),
+			catch: (cause) => cause,
+		}).pipe(
+			Effect.catch(() =>
+				Effect.sync(() => {
+					this.broken = true;
+				}),
+			),
 		);
-		this.openDocuments.clear();
 	}
 
 	private async notify(method: string, params: unknown): Promise<void> {
-		if (!this.canSend()) return;
-
-		try {
-			await this.connection.sendNotification(method, params);
-		} catch {
-			this.broken = true;
-		}
+		await Effect.runPromise(this.notifyEffect(method, params));
 	}
 
 	private registerHandlers(): void {

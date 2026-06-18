@@ -75,7 +75,9 @@ Boundary functions allowed to consume promises:
   - Added Effect-returning client API adapters (`createEffect`, `openEffect`, `requestEffect`, `shutdownEffect`).
   - Runtime now consumes client lifecycle through the Effect adapters instead of direct Promise bridges.
   - `requestEffect` now owns request timeout/error mapping directly; `request()` is only a compatibility Promise adapter.
-  - Remaining: rewrite `createEffect`, `openEffect`, and `shutdownEffect` internals so those adapters no longer wrap Promise-native implementations.
+  - `shutdownEffect` now owns shutdown sequencing directly, including close notifications, shutdown timeout, exit notification, and process cleanup.
+  - Notification/close-document helpers now have Effect-native implementations; Promise helpers are compatibility wrappers.
+  - Remaining: rewrite `createEffect` and `openEffect` internals so those adapters no longer wrap Promise-native implementations.
 - [x] Slice 4: runtime workflows
   - `runtime.ts` private orchestration now composes Effect workflows directly for restart, shutdown, client resolution, file touch, matching, permission, and spawn.
   - Remaining Promise surface in `runtime.ts` is the public compatibility adapter (`restart`, `shutdown`, `clientsForFile`, `touchRunningFile`) plus temporary `Effect.tryPromise` bridges to `LspClient` until Slice 3 lands.
