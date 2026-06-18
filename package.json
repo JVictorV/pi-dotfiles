@@ -2,6 +2,7 @@
 	"name": "pi-config",
 	"private": true,
 	"description": "Shared dependencies for ~/.pi extensions",
+	"type": "module",
 	"scripts": {
 		"typecheck": "tsc --noEmit -p tsconfig.json",
 		"lint": "oxlint agent/extensions",
@@ -19,6 +20,7 @@
 		"@earendil-works/pi-ai": "^0.79.6",
 		"@earendil-works/pi-coding-agent": "^0.79.6",
 		"@earendil-works/pi-tui": "^0.79.6",
+		"effect-rules": "^0.3.6",
 		"oxfmt": "^0.55.0",
 		"oxlint": "^1.70.0",
 		"typescript": "^6.0.3",
