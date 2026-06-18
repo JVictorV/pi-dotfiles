@@ -102,20 +102,26 @@ Both `allow` and `deny` are persisted so pi does not keep asking.
 
 The v1 registry includes:
 
-| Server ID              | File types                                                   | Binary                                  |
-| ---------------------- | ------------------------------------------------------------ | --------------------------------------- |
-| `typescript`           | `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts` | `typescript-language-server --stdio`    |
-| `eslint`               | JS/TS/Vue diagnostics                                        | `vscode-eslint-language-server --stdio` |
-| `json`                 | `.json`, `.jsonc`                                            | `vscode-json-language-server --stdio`   |
-| `css`                  | `.css`, `.scss`, `.less`                                     | `vscode-css-language-server --stdio`    |
-| `html`                 | `.html`, `.htm`                                              | `vscode-html-language-server --stdio`   |
-| `pyright`              | `.py`, `.pyi`                                                | `pyright-langserver --stdio`            |
-| `rust-analyzer`        | `.rs`                                                        | `rust-analyzer`                         |
-| `gopls`                | `.go`                                                        | `gopls`                                 |
-| `bash-language-server` | `.sh`, `.bash`, `.zsh`                                       | `bash-language-server start`            |
-| `yaml`                 | `.yaml`, `.yml`                                              | `yaml-language-server --stdio`          |
-
-Lua is intentionally not included yet.
+| Server ID                    | File types                                                   | Binary                                  |
+| ---------------------------- | ------------------------------------------------------------ | --------------------------------------- |
+| `typescript`                 | `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts` | `typescript-language-server --stdio`    |
+| `eslint`                     | JS/TS/Vue diagnostics                                        | `vscode-eslint-language-server --stdio` |
+| `json`                       | `.json`, `.jsonc`                                            | `vscode-json-language-server --stdio`   |
+| `css`                        | `.css`, `.scss`, `.less`                                     | `vscode-css-language-server --stdio`    |
+| `html`                       | `.html`, `.htm`                                              | `vscode-html-language-server --stdio`   |
+| `pyright`                    | `.py`, `.pyi`                                                | `pyright-langserver --stdio`            |
+| `rust-analyzer`              | `.rs`                                                        | `rust-analyzer`                         |
+| `gopls`                      | `.go`                                                        | `gopls`                                 |
+| `bash-language-server`       | `.sh`, `.bash`, `.zsh`                                       | `bash-language-server start`            |
+| `vue`                        | `.vue`                                                       | `vue-language-server --stdio`           |
+| `svelte`                     | `.svelte`                                                    | `svelteserver --stdio`                  |
+| `astro`                      | `.astro`                                                     | `astro-ls --stdio`                      |
+| `tailwindcss`                | Tailwind project HTML/CSS/JS/TS/Vue/Svelte/Astro files       | `tailwindcss-language-server --stdio`   |
+| `clangd`                     | C/C++ headers and sources                                    | `clangd`                                |
+| `lua-language-server`        | `.lua`                                                       | `lua-language-server`                   |
+| `terraform-ls`               | `.tf`, `.tfvars`                                             | `terraform-ls serve`                    |
+| `dockerfile-language-server` | `Dockerfile`, `.dockerfile`                                  | `docker-langserver --stdio`             |
+| `yaml`                       | `.yaml`, `.yml`                                              | `yaml-language-server --stdio`          |
 
 The extension does **not** download or install LSP servers. Install them in the project or globally yourself.
 
@@ -126,6 +132,8 @@ npm install -D typescript typescript-language-server
 npm install -D vscode-langservers-extracted eslint
 npm install -D pyright
 npm install -D bash-language-server yaml-language-server
+npm install -D @vue/language-server svelte-language-server @astrojs/language-server
+npm install -D @tailwindcss/language-server dockerfile-language-server-nodejs
 
 go install golang.org/x/tools/gopls@latest
 # install rust-analyzer via rustup or your package manager
@@ -146,7 +154,7 @@ Absolute or relative command paths in config are resolved directly.
 Each server declares root markers. The extension searches from the target file upward, bounded by the pi session `cwd`.
 
 - Non-strict servers fall back to `cwd` if no marker is found.
-- Strict servers require a marker. Currently `rust-analyzer` requires `Cargo.toml`.
+- Strict servers require a marker. Currently `rust-analyzer` requires `Cargo.toml`, and `tailwindcss` requires a Tailwind config marker.
 
 ## Configuration
 

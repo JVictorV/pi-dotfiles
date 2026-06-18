@@ -131,6 +131,24 @@ describe("LSP Extension", () => {
 		}
 	});
 
+	test("runtime includes expanded built-in language servers", async () => {
+		const runtime = new LspRuntime({ cwd: process.cwd(), config: { servers: {} } });
+		runtimes.push(runtime);
+
+		expect(runtime.serverIds()).toEqual(
+			expect.arrayContaining([
+				"astro",
+				"clangd",
+				"dockerfile-language-server",
+				"lua-language-server",
+				"svelte",
+				"tailwindcss",
+				"terraform-ls",
+				"vue",
+			]),
+		);
+	});
+
 	test("lsp tool returns hover information from a language server", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);

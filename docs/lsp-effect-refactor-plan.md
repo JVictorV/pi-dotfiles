@@ -302,8 +302,19 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 
 Remaining follow-ups are now product backlog rather than runtime hardening blockers:
 
-1. Add more built-in servers.
-2. Split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+1. Split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+
+## Expanded built-in server registry
+
+**Status:** Done.
+
+**Notes:**
+
+- Added built-in server definitions for Vue, Svelte, Astro, Tailwind CSS, clangd, Lua, Terraform, and Dockerfile projects.
+- Tailwind is strict-rooted to Tailwind config markers to avoid prompting in every JS/TS project.
+- Updated LSP README built-in server table and install examples.
+- Added registry coverage for the expanded server IDs.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ## Mutating LSP operations
 
