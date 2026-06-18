@@ -597,7 +597,7 @@ describe("LSP Extension", () => {
 		expect(result.content[0]?.text).toContain("hover for file://");
 	});
 
-	test("initialization failures are reported instead of mislabeled as missing binaries", async () => {
+	test("initialization failures are reported as typed initialize errors", async () => {
 		const project = await createProject(createConfig({ FAKE_LSP_INITIALIZE_ERROR: "1" }));
 		runtimes.push(project.runtime);
 		const tool = registerTool(project.runtime);
@@ -611,8 +611,59 @@ describe("LSP Extension", () => {
 				project.ctx,
 			),
 		).rejects.toMatchObject({
-			_tag: "LspNoClients",
+			_tag: "LspInitializeError",
+			serverId: "fake",
 			reason: expect.stringContaining("fake initialize failed"),
+		});
+	});
+
+	test("missing LSP binaries are reported as typed binary errors", async () => {
+		const project = await createProject(createConfig(undefined, [".fake"]));
+		const missingConfig: LspConfig = {
+			servers: {
+				fake: {
+					command: ["definitely-missing-fake-lsp-binary"],
+					extensions: [".fake"],
+					rootMarkers: ["project.marker"],
+					capabilities: { navigation: true, diagnostics: true },
+				},
+			},
+		};
+		const runtime = new LspRuntime({ cwd: project.cwd, config: missingConfig });
+		runtimes.push(runtime);
+		const tool = registerTool(runtime);
+
+		await expect(
+			tool.execute(
+				"tool-call-missing-binary",
+				{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				project.ctx,
+			),
+		).rejects.toMatchObject({
+			_tag: "LspBinaryMissing",
+			serverId: "fake",
+		});
+	});
+
+	test("denied LSP spawn permissions are reported as typed permission errors", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+		const noUiCtx = { ...project.ctx, hasUI: false } as unknown as ExtensionContext;
+
+		await expect(
+			tool.execute(
+				"tool-call-permission-denied",
+				{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				noUiCtx,
+			),
+		).rejects.toMatchObject({
+			_tag: "LspPermissionDenied",
+			serverId: "fake",
 		});
 	});
 

@@ -12,7 +12,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Diagnostic } from "vscode-languageserver-types";
 
-import { LspMalformedResponse, LspNoClients, LspUnsupportedOperation } from "./errors";
+import {
+	LspBinaryMissing,
+	LspInitializeError,
+	LspMalformedResponse,
+	LspNoClients,
+	LspPermissionDenied,
+	LspSpawnError,
+	LspUnsupportedOperation,
+} from "./errors";
 import type { LspRuntime, LocatedClient } from "./runtime";
 
 const OPERATIONS = [
@@ -388,6 +396,35 @@ const ensureClients = async (
 		waitForDiagnostics: capability === "diagnostics",
 	});
 	if (resolution.clients.length === 0) {
+		if (resolution.unavailable.length === 1) {
+			const unavailable = resolution.unavailable[0];
+			if (unavailable !== undefined) {
+				if (unavailable.reason.includes("Spawn permission is")) {
+					throw LspPermissionDenied.make({
+						serverId: unavailable.serverId,
+						reason: unavailable.reason,
+					});
+				}
+				if (unavailable.reason.includes("server binary found")) {
+					throw LspBinaryMissing.make({
+						serverId: unavailable.serverId,
+						reason: unavailable.reason,
+					});
+				}
+				if (unavailable.reason.includes("initialize")) {
+					throw LspInitializeError.make({
+						serverId: unavailable.serverId,
+						reason: unavailable.reason,
+					});
+				}
+				if (unavailable.reason.includes("Failed to start")) {
+					throw LspSpawnError.make({
+						serverId: unavailable.serverId,
+						reason: unavailable.reason,
+					});
+				}
+			}
+		}
 		const reasons = resolution.unavailable
 			.map((item) => `- ${item.serverId}: ${item.reason}`)
 			.join("\n");

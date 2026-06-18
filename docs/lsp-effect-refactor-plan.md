@@ -92,7 +92,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Convert config/permission/spawn/init/request/unsupported/malformed/no-client paths gradually.
 - Tool formatting catches typed errors at the boundary when needed.
 
-**Status:** Mostly done; only permission/spawn granularity remains.
+**Status:** Done for planned typed boundary errors.
 
 **Notes:**
 
@@ -111,7 +111,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
   - `LspShutdownError`
   - `LspRuntimeShuttingDown`
 - Converted the shutdown race path to throw `LspRuntimeShuttingDown` and updated the regression test to assert the typed `_tag` + `reason`.
-- Remaining conversion is limited to permission-denied subtyping and more granular spawn/init public boundary errors.
+- Permission denied, missing binary, and initialize failures now surface as typed public-boundary errors where a single unavailable server explains the failure.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 4 — Do not mark clients broken for ordinary request errors
@@ -195,7 +195,7 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Converted unsupported operation failures to `LspUnsupportedOperation`.
 - Converted no-client failures to `LspNoClients`.
 - Updated regression tests to assert typed `_tag` + `reason`.
-- Remaining typed-error adoption: permission denial subtyping and more granular spawn/init propagation at the public boundary.
+- Added typed public-boundary errors for denied permissions (`LspPermissionDenied`), missing binaries (`LspBinaryMissing`), initialize failures (`LspInitializeError`), and generic spawn failures (`LspSpawnError`).
 - Added typed config parse errors (`LspConfigError`) and regression coverage: `invalid LSP config fails with typed config error`.
 - Added typed request error/timeout wrapping (`LspRequestError`, `LspRequestTimeout`) and updated request-error regression coverage.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
