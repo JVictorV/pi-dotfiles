@@ -396,58 +396,73 @@ const truncateText = (text: string): { text: string; truncated: boolean } => {
 	};
 };
 
-const ensureClients = async (
+const ensureClients = (
 	runtime: LspRuntime,
 	params: LspParams,
 	ctx: ExtensionContext,
 	capability: "navigation" | "diagnostics",
-): Promise<ReadonlyArray<LocatedClient>> => {
-	const filePath = requireFile(params);
-	const resolution = await runtime.clientsForFile(filePath, capability, ctx, {
-		prompt: true,
-		waitForDiagnostics: capability === "diagnostics",
-	});
-	if (resolution.clients.length === 0) {
-		if (resolution.unavailable.length === 1) {
-			const unavailable = resolution.unavailable[0];
-			if (unavailable !== undefined) {
-				if (unavailable.reason.includes("Spawn permission is")) {
-					throw LspPermissionDenied.make({
-						serverId: unavailable.serverId,
-						reason: unavailable.reason,
-					});
-				}
-				if (unavailable.reason.includes("server binary found")) {
-					throw LspBinaryMissing.make({
-						serverId: unavailable.serverId,
-						reason: unavailable.reason,
-					});
-				}
-				if (unavailable.reason.includes("initialize")) {
-					throw LspInitializeError.make({
-						serverId: unavailable.serverId,
-						reason: unavailable.reason,
-					});
-				}
-				if (unavailable.reason.includes("Failed to start")) {
-					throw LspSpawnError.make({
-						serverId: unavailable.serverId,
-						reason: unavailable.reason,
-					});
+): Effect.Effect<ReadonlyArray<LocatedClient>, unknown> =>
+	Effect.gen(function* () {
+		const filePath = requireFile(params);
+		const resolution = yield* Effect.tryPromise({
+			try: () =>
+				runtime.clientsForFile(filePath, capability, ctx, {
+					prompt: true,
+					waitForDiagnostics: capability === "diagnostics",
+				}),
+			catch: (cause) => cause,
+		});
+		if (resolution.clients.length === 0) {
+			if (resolution.unavailable.length === 1) {
+				const unavailable = resolution.unavailable[0];
+				if (unavailable !== undefined) {
+					if (unavailable.reason.includes("Spawn permission is")) {
+						return yield* Effect.fail(
+							LspPermissionDenied.make({
+								serverId: unavailable.serverId,
+								reason: unavailable.reason,
+							}),
+						);
+					}
+					if (unavailable.reason.includes("server binary found")) {
+						return yield* Effect.fail(
+							LspBinaryMissing.make({
+								serverId: unavailable.serverId,
+								reason: unavailable.reason,
+							}),
+						);
+					}
+					if (unavailable.reason.includes("initialize")) {
+						return yield* Effect.fail(
+							LspInitializeError.make({
+								serverId: unavailable.serverId,
+								reason: unavailable.reason,
+							}),
+						);
+					}
+					if (unavailable.reason.includes("Failed to start")) {
+						return yield* Effect.fail(
+							LspSpawnError.make({
+								serverId: unavailable.serverId,
+								reason: unavailable.reason,
+							}),
+						);
+					}
 				}
 			}
+			const reasons = resolution.unavailable
+				.map((item) => `- ${item.serverId}: ${item.reason}`)
+				.join("\n");
+			return yield* Effect.fail(
+				LspNoClients.make({
+					reason: reasons
+						? `No LSP clients available.\n${reasons}`
+						: "No LSP clients available for this file.",
+				}),
+			);
 		}
-		const reasons = resolution.unavailable
-			.map((item) => `- ${item.serverId}: ${item.reason}`)
-			.join("\n");
-		throw LspNoClients.make({
-			reason: reasons
-				? `No LSP clients available.\n${reasons}`
-				: "No LSP clients available for this file.",
-		});
-	}
-	return resolution.clients;
-};
+		return resolution.clients;
+	});
 
 const requireOperationSupport = (
 	operation: LspOperation,
@@ -677,6 +692,10 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 		async execute(_toolCallId, params: LspParams, _signal, _onUpdate, ctx) {
 			const runtime = getRuntime();
 			if (runtime === undefined) throw new Error("LSP runtime is not initialized.");
+			const ensureClientsBoundary = (
+				capability: "navigation" | "diagnostics",
+			): Promise<ReadonlyArray<LocatedClient>> =>
+				Effect.runPromise(ensureClients(runtime, params, ctx, capability));
 
 			let text: string;
 			let results: unknown;
@@ -699,7 +718,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const { filePath, line, character } = requirePosition(params);
 					const clients = requireOperationSupport(
 						params.operation,
-						await ensureClients(runtime, params, ctx, "navigation"),
+						await ensureClientsBoundary("navigation"),
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
@@ -723,7 +742,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const { filePath, line, character } = requirePosition(params);
 					const clients = requireOperationSupport(
 						params.operation,
-						await ensureClients(runtime, params, ctx, "navigation"),
+						await ensureClientsBoundary("navigation"),
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
@@ -750,7 +769,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const { filePath, line, character } = requirePosition(params);
 					const clients = requireOperationSupport(
 						params.operation,
-						await ensureClients(runtime, params, ctx, "navigation"),
+						await ensureClientsBoundary("navigation"),
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
@@ -773,7 +792,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const filePath = requireFile(params);
 					const clients = requireOperationSupport(
 						params.operation,
-						await ensureClients(runtime, params, ctx, "navigation"),
+						await ensureClientsBoundary("navigation"),
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const absolute = absolutePath(ctx.cwd, filePath);
@@ -799,7 +818,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const clients = requireOperationSupport(
 						params.operation,
 						params.filePath
-							? await ensureClients(runtime, params, ctx, "navigation")
+							? await ensureClientsBoundary("navigation")
 							: runtime.runningClients("navigation"),
 					);
 					if (clients.length === 0)
@@ -817,7 +836,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 				}
 				case "diagnostics": {
 					if (params.filePath) {
-						const clients = await ensureClients(runtime, params, ctx, "diagnostics");
+						const clients = await ensureClientsBoundary("diagnostics");
 						serverIds = clients.map(({ client }) => client.serverId);
 					}
 					const diagnostics = runtime.diagnostics(params.filePath);
@@ -830,10 +849,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					if (!params.newName) throw new Error("rename requires newName");
 					const { client } = firstMutationClient(
 						"rename",
-						requireOperationSupport(
-							"rename",
-							await ensureClients(runtime, params, ctx, "navigation"),
-						),
+						requireOperationSupport("rename", await ensureClientsBoundary("navigation")),
 					);
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
@@ -855,10 +871,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const filePath = requireFile(params);
 					const { client } = firstMutationClient(
 						"formatting",
-						requireOperationSupport(
-							"formatting",
-							await ensureClients(runtime, params, ctx, "navigation"),
-						),
+						requireOperationSupport("formatting", await ensureClientsBoundary("navigation")),
 					);
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
@@ -882,10 +895,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const filePath = requireFile(params);
 					const { client } = firstMutationClient(
 						"codeAction",
-						requireOperationSupport(
-							"codeAction",
-							await ensureClients(runtime, params, ctx, "navigation"),
-						),
+						requireOperationSupport("codeAction", await ensureClientsBoundary("navigation")),
 					);
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
@@ -928,10 +938,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const filePath = requireFile(params);
 					const { client } = firstMutationClient(
 						"organizeImports",
-						requireOperationSupport(
-							"organizeImports",
-							await ensureClients(runtime, params, ctx, "navigation"),
-						),
+						requireOperationSupport("organizeImports", await ensureClientsBoundary("navigation")),
 					);
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
