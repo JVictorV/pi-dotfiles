@@ -11,6 +11,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import type { Diagnostic } from "vscode-languageserver-types";
 
 import {
@@ -705,9 +706,11 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const position = { line: line - 1, character: character - 1 };
 					const method = methodForOperation(params.operation);
 					const raw = await runAcrossClients(clients, ({ client }) =>
-						client.request<unknown[]>(
-							method,
-							requestParamsForOperation(params.operation, file, position),
+						Effect.runPromise(
+							client.requestEffect<unknown[]>(
+								method,
+								requestParamsForOperation(params.operation, file, position),
+							),
 						),
 					);
 					const locations = requireNormalizedLocations(params.operation, raw);
@@ -726,13 +729,17 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const position = { line: line - 1, character: character - 1 };
 					const raw = await runAcrossClients(clients, async ({ client }) => {
-						const items = await client.request<unknown[]>("textDocument/prepareCallHierarchy", {
-							textDocument: { uri },
-							position,
-						});
+						const items = await Effect.runPromise(
+							client.requestEffect<unknown[]>("textDocument/prepareCallHierarchy", {
+								textDocument: { uri },
+								position,
+							}),
+						);
 						const item = items[0];
 						if (item === undefined) return [];
-						return await client.request<unknown[]>(methodForOperation(params.operation), { item });
+						return await Effect.runPromise(
+							client.requestEffect<unknown[]>(methodForOperation(params.operation), { item }),
+						);
 					});
 					const locations = callHierarchyToLocations(params.operation, raw);
 					results = locations;
@@ -749,10 +756,12 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const raw = await Promise.all(
 						clients.map(({ client }) =>
-							client.request("textDocument/hover", {
-								textDocument: { uri: file },
-								position: { line: line - 1, character: character - 1 },
-							}),
+							Effect.runPromise(
+								client.requestEffect("textDocument/hover", {
+									textDocument: { uri: file },
+									position: { line: line - 1, character: character - 1 },
+								}),
+							),
 						),
 					);
 					const hovers = raw.map(hoverToText).filter(Boolean);
@@ -769,9 +778,11 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					serverIds = clients.map(({ client }) => client.serverId);
 					const absolute = absolutePath(ctx.cwd, filePath);
 					const raw = await runAcrossClients(clients, ({ client }) =>
-						client.request<unknown[]>("textDocument/documentSymbol", {
-							textDocument: { uri: pathToFileURL(absolute).href },
-						}),
+						Effect.runPromise(
+							client.requestEffect<unknown[]>("textDocument/documentSymbol", {
+								textDocument: { uri: pathToFileURL(absolute).href },
+							}),
+						),
 					);
 					results = normalizeDocumentSymbols(raw, absolute);
 					const lines = flattenDocumentSymbols(raw, ctx.cwd, absolute).slice(
@@ -795,7 +806,9 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						throw new Error("No running LSP clients. Pass filePath to start a matching server.");
 					serverIds = clients.map(({ client }) => client.serverId);
 					const raw = await runAcrossClients(clients, ({ client }) =>
-						client.request<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
+						Effect.runPromise(
+							client.requestEffect<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
+						),
 					);
 					const locations = workspaceSymbolsToLocations(raw);
 					results = locations;
@@ -824,11 +837,13 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					);
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
-					const edit = await client.request("textDocument/rename", {
-						textDocument: { uri: pathToFileURL(file).href },
-						position: { line: line - 1, character: character - 1 },
-						newName: params.newName,
-					});
+					const edit = await Effect.runPromise(
+						client.requestEffect("textDocument/rename", {
+							textDocument: { uri: pathToFileURL(file).href },
+							position: { line: line - 1, character: character - 1 },
+							newName: params.newName,
+						}),
+					);
 					await mutationApproval(ctx, "Apply LSP rename?", `Apply rename to ${params.newName}?`);
 					const files = await applyWorkspaceEdit("rename", ctx.cwd, edit);
 					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
@@ -848,10 +863,12 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
 					const uri = pathToFileURL(file).href;
-					const edits = await client.request("textDocument/formatting", {
-						textDocument: { uri },
-						options: { tabSize: 2, insertSpaces: false },
-					});
+					const edits = await Effect.runPromise(
+						client.requestEffect("textDocument/formatting", {
+							textDocument: { uri },
+							options: { tabSize: 2, insertSpaces: false },
+						}),
+					);
 					await mutationApproval(ctx, "Apply LSP formatting?", `Apply formatting to ${filePath}?`);
 					const files = await applyWorkspaceEdit("formatting", ctx.cwd, {
 						changes: { [uri]: edits },
@@ -873,9 +890,11 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
 					const actions = (
-						await client.request<unknown[]>(
-							"textDocument/codeAction",
-							await codeActionRequestParams(file, params.codeActionKind),
+						await Effect.runPromise(
+							client.requestEffect<unknown[]>(
+								"textDocument/codeAction",
+								await codeActionRequestParams(file, params.codeActionKind),
+							),
 						)
 					).filter(isCodeAction);
 					if (!params.actionTitle) {
@@ -917,9 +936,11 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					serverIds = [client.serverId];
 					const file = absolutePath(ctx.cwd, filePath);
 					const actions = (
-						await client.request<unknown[]>(
-							"textDocument/codeAction",
-							await codeActionRequestParams(file, "source.organizeImports"),
+						await Effect.runPromise(
+							client.requestEffect<unknown[]>(
+								"textDocument/codeAction",
+								await codeActionRequestParams(file, "source.organizeImports"),
+							),
 						)
 					).filter(isCodeAction);
 					const action = actions.find((item) => item.edit !== undefined);
