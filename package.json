@@ -10,7 +10,9 @@
 		"format:check": "oxfmt --check . '!.repos/**'"
 	},
 	"dependencies": {
-		"effect": "^4.0.0-beta.84"
+		"effect": "^4.0.0-beta.84",
+		"vscode-jsonrpc": "^8.2.1",
+		"vscode-languageserver-types": "^3.17.5"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "^0.79.6",
