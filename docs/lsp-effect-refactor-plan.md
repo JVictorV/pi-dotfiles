@@ -211,14 +211,15 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 - Move maps into `SynchronizedRef` state.
 - Keep current `LspRuntime` as compatibility wrapper.
 
-**Status:** Initial bridge done.
+**Status:** Done for the compatibility-wrapper architecture.
 
 **Notes:**
 
 - Added `LspRuntimeSession` Effect service in `runtime.ts`.
-- Public `LspRuntime` methods now enter through a `ManagedRuntime` service layer and delegate to private unsafe implementations.
-- This creates the bridge needed for later Effect-native internals without changing the public API.
-- Runtime state now lives behind a `SynchronizedRef` state object; current implementation still uses private unsafe helpers while preserving behavior.
+- Public `LspRuntime` methods enter through a `ManagedRuntime` service layer.
+- Runtime state lives behind a `SynchronizedRef` state object.
+- Service methods now return named `Effect` workflows instead of delegating through private `*Unsafe` helpers.
+- `LspRuntime` remains as the stable compatibility wrapper for tool and command callers.
 - Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.
 
 ### Slice 6 — Diagnostics parity with opencode

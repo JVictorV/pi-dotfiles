@@ -111,50 +111,46 @@ export class LspRuntime {
 			Layer.succeed(
 				LspRuntimeSession,
 				LspRuntimeSession.of({
-					serverIds: Effect.sync(() => this.serverIdsUnsafe()),
-					status: Effect.sync(() => this.statusUnsafe()),
-					runningClients: (capability) => Effect.sync(() => this.runningClientsUnsafe(capability)),
-					diagnostics: (file) => Effect.sync(() => this.diagnosticsUnsafe(file)),
-					restart: (serverId) => Effect.promise(() => this.restartUnsafe(serverId)),
-					shutdown: Effect.promise(() => this.shutdownUnsafe()),
+					serverIds: this.serverIdsEffect(),
+					status: this.statusEffect(),
+					runningClients: (capability) => this.runningClientsEffect(capability),
+					diagnostics: (file) => this.diagnosticsEffect(file),
+					restart: (serverId) => this.restartEffect(serverId),
+					shutdown: this.shutdownEffect(),
 					clientsForFile: (filePath, capability, ctx, options) =>
-						Effect.tryPromise({
-							try: () => this.clientsForFileUnsafe(filePath, capability, ctx, options),
-							catch: (cause) => cause,
-						}),
-					touchRunningFile: (filePath) =>
-						Effect.promise(() => this.touchRunningFileUnsafe(filePath)),
+						this.clientsForFileEffect(filePath, capability, ctx, options),
+					touchRunningFile: (filePath) => this.touchRunningFileEffect(filePath),
 				}),
 			),
 		);
 	}
 
-	private stateUnsafe(): RuntimeState {
+	private currentState(): RuntimeState {
 		return SynchronizedRef.getUnsafe(this.state);
 	}
 
 	private get clients(): RuntimeState["clients"] {
-		return this.stateUnsafe().clients;
+		return this.currentState().clients;
 	}
 
 	private get clientDefinitions(): RuntimeState["clientDefinitions"] {
-		return this.stateUnsafe().clientDefinitions;
+		return this.currentState().clientDefinitions;
 	}
 
 	private get broken(): RuntimeState["broken"] {
-		return this.stateUnsafe().broken;
+		return this.currentState().broken;
 	}
 
 	private get spawning(): RuntimeState["spawning"] {
-		return this.stateUnsafe().spawning;
+		return this.currentState().spawning;
 	}
 
 	private get shuttingDown(): boolean {
-		return this.stateUnsafe().shuttingDown;
+		return this.currentState().shuttingDown;
 	}
 
 	private set shuttingDown(value: boolean) {
-		this.stateUnsafe().shuttingDown = value;
+		this.currentState().shuttingDown = value;
 	}
 
 	serverIds(): ReadonlyArray<string> {
@@ -209,92 +205,118 @@ export class LspRuntime {
 		);
 	}
 
-	private serverIdsUnsafe(): ReadonlyArray<string> {
-		return [...this.registry.keys()].sort();
+	private serverIdsEffect(): Effect.Effect<ReadonlyArray<string>> {
+		return Effect.sync(() => [...this.registry.keys()].sort());
 	}
 
-	private statusUnsafe(): ReadonlyArray<LspRuntimeStatus> {
-		return [...this.clients.values()].map((client) => ({
-			...client.status,
-			displayRoot: displayRoot(client.root, this.cwd),
-		}));
-	}
-
-	private runningClientsUnsafe(capability: LspCapability): ReadonlyArray<LocatedClient> {
-		const clients: LocatedClient[] = [];
-		for (const client of this.clients.values()) {
-			const key = clientKey(client.root, client.serverId);
-			const definition = this.clientDefinitions.get(key);
-			if (isBrokenClient(client)) {
-				this.broken.set(key, `${client.label} server is broken.`);
-				continue;
-			}
-			if (definition === undefined || !definition.capabilities[capability]) continue;
-			clients.push({ client, definition });
-		}
-		return clients;
-	}
-
-	private diagnosticsUnsafe(
-		file?: string,
-	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
-		const result = new Map<
-			string,
-			ReadonlyArray<import("vscode-languageserver-types").Diagnostic>
-		>();
-		const resolvedFile =
-			file === undefined
-				? undefined
-				: resolve(this.cwd, file.startsWith("@") ? file.slice(1) : file);
-		for (const client of this.clients.values()) {
-			for (const [diagnosticFile, diagnostics] of client.diagnostics.entries()) {
-				if (resolvedFile !== undefined && diagnosticFile !== resolvedFile) continue;
-				result.set(diagnosticFile, [...(result.get(diagnosticFile) ?? []), ...diagnostics]);
-			}
-		}
-		return result;
-	}
-
-	private async restartUnsafe(serverId?: string): Promise<void> {
-		const keys = [...this.clients.entries()]
-			.filter(([, client]) => serverId === undefined || client.serverId === serverId)
-			.map(([key]) => key);
-
-		await Promise.all(
-			keys.map(async (key) => {
-				const client = this.clients.get(key);
-				this.clients.delete(key);
-				this.clientDefinitions.delete(key);
-				await client?.shutdown();
-			}),
+	private statusEffect(): Effect.Effect<ReadonlyArray<LspRuntimeStatus>> {
+		return Effect.sync(() =>
+			[...this.clients.values()].map((client) => ({
+				...client.status,
+				displayRoot: displayRoot(client.root, this.cwd),
+			})),
 		);
-		if (keys.length > 0) this.notifyStatusChange();
-
-		for (const key of this.spawning.keys()) {
-			if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
-				this.spawning.delete(key);
-			}
-		}
-
-		for (const key of this.broken.keys()) {
-			if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
-				this.broken.delete(key);
-			}
-		}
 	}
 
-	private async shutdownUnsafe(): Promise<void> {
-		if (this.shuttingDown) return;
-		this.shuttingDown = true;
-		const clients = [...this.clients.values()];
-		this.clients.clear();
-		this.clientDefinitions.clear();
-		this.spawning.clear();
-		this.notifyStatusChange();
-		await Promise.all(clients.map((client) => client.shutdown()));
+	private runningClientsEffect(
+		capability: LspCapability,
+	): Effect.Effect<ReadonlyArray<LocatedClient>> {
+		return Effect.sync(() => {
+			const clients: LocatedClient[] = [];
+			for (const client of this.clients.values()) {
+				const key = clientKey(client.root, client.serverId);
+				const definition = this.clientDefinitions.get(key);
+				if (isBrokenClient(client)) {
+					this.broken.set(key, `${client.label} server is broken.`);
+					continue;
+				}
+				if (definition === undefined || !definition.capabilities[capability]) continue;
+				clients.push({ client, definition });
+			}
+			return clients;
+		});
 	}
 
-	private async clientsForFileUnsafe(
+	private diagnosticsEffect(
+		file?: string,
+	): Effect.Effect<
+		ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>>
+	> {
+		return Effect.sync(() => {
+			const result = new Map<
+				string,
+				ReadonlyArray<import("vscode-languageserver-types").Diagnostic>
+			>();
+			const resolvedFile =
+				file === undefined
+					? undefined
+					: resolve(this.cwd, file.startsWith("@") ? file.slice(1) : file);
+			for (const client of this.clients.values()) {
+				for (const [diagnosticFile, diagnostics] of client.diagnostics.entries()) {
+					if (resolvedFile !== undefined && diagnosticFile !== resolvedFile) continue;
+					result.set(diagnosticFile, [...(result.get(diagnosticFile) ?? []), ...diagnostics]);
+				}
+			}
+			return result;
+		});
+	}
+
+	private restartEffect(serverId?: string): Effect.Effect<void> {
+		return Effect.promise(async () => {
+			const keys = [...this.clients.entries()]
+				.filter(([, client]) => serverId === undefined || client.serverId === serverId)
+				.map(([key]) => key);
+
+			await Promise.all(
+				keys.map(async (key) => {
+					const client = this.clients.get(key);
+					this.clients.delete(key);
+					this.clientDefinitions.delete(key);
+					await client?.shutdown();
+				}),
+			);
+			if (keys.length > 0) this.notifyStatusChange();
+
+			for (const key of this.spawning.keys()) {
+				if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
+					this.spawning.delete(key);
+				}
+			}
+
+			for (const key of this.broken.keys()) {
+				if (serverId === undefined || key.endsWith(`\u0000${serverId}`)) {
+					this.broken.delete(key);
+				}
+			}
+		});
+	}
+
+	private shutdownEffect(): Effect.Effect<void> {
+		return Effect.promise(async () => {
+			if (this.shuttingDown) return;
+			this.shuttingDown = true;
+			const clients = [...this.clients.values()];
+			this.clients.clear();
+			this.clientDefinitions.clear();
+			this.spawning.clear();
+			this.notifyStatusChange();
+			await Promise.all(clients.map((client) => client.shutdown()));
+		});
+	}
+
+	private clientsForFileEffect(
+		filePath: string,
+		capability: LspCapability,
+		ctx: ExtensionContext,
+		options: { prompt: boolean; waitForDiagnostics?: boolean },
+	): Effect.Effect<ClientResolution, unknown> {
+		return Effect.tryPromise({
+			try: () => this.clientsForFilePromise(filePath, capability, ctx, options),
+			catch: (cause) => cause,
+		});
+	}
+
+	private async clientsForFilePromise(
 		filePath: string,
 		capability: LspCapability,
 		ctx: ExtensionContext,
@@ -395,7 +417,11 @@ export class LspRuntime {
 		return { clients, unavailable };
 	}
 
-	private async touchRunningFileUnsafe(filePath: string): Promise<void> {
+	private touchRunningFileEffect(filePath: string): Effect.Effect<void> {
+		return Effect.promise(() => this.touchRunningFilePromise(filePath));
+	}
+
+	private async touchRunningFilePromise(filePath: string): Promise<void> {
 		const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 		await Promise.all(
 			[...this.clients.values()].map(async (client) => {
