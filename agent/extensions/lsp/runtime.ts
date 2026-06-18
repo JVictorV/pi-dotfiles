@@ -50,6 +50,9 @@ interface RuntimeState {
 	broken: Map<string, string>;
 	spawning: Map<string, Deferred.Deferred<LspClient | undefined, Error>>;
 	shuttingDown: boolean;
+	activeOperations: number;
+	disposeRequested: boolean;
+	disposed: boolean;
 }
 
 const makeRuntimeState = (): RuntimeState => ({
@@ -58,6 +61,9 @@ const makeRuntimeState = (): RuntimeState => ({
 	broken: new Map(),
 	spawning: new Map(),
 	shuttingDown: false,
+	activeOperations: 0,
+	disposeRequested: false,
+	disposed: false,
 });
 
 const clientKey = (root: string, serverId: string): string => `${root}\u0000${serverId}`;
@@ -154,14 +160,17 @@ export class LspRuntime {
 	}
 
 	serverIds(): ReadonlyArray<string> {
+		if (this.currentState().disposed) return Effect.runSync(this.serverIdsEffect());
 		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.serverIds));
 	}
 
 	status(): ReadonlyArray<LspRuntimeStatus> {
+		if (this.currentState().disposed) return Effect.runSync(this.statusEffect());
 		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.status));
 	}
 
 	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
+		if (this.currentState().disposed) return Effect.runSync(this.runningClientsEffect(capability));
 		return this.sessionRuntime.runSync(
 			LspRuntimeSession.use((session) => session.runningClients(capability)),
 		);
@@ -170,20 +179,21 @@ export class LspRuntime {
 	diagnostics(
 		file?: string,
 	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
+		if (this.currentState().disposed) return Effect.runSync(this.diagnosticsEffect(file));
 		return this.sessionRuntime.runSync(
 			LspRuntimeSession.use((session) => session.diagnostics(file)),
 		);
 	}
 
 	async restart(serverId?: string): Promise<void> {
-		await this.sessionRuntime.runPromise(
-			LspRuntimeSession.use((session) => session.restart(serverId)),
-		);
+		await this.runOperation(LspRuntimeSession.use((session) => session.restart(serverId)));
 	}
 
 	async shutdown(): Promise<void> {
 		if (this.shuttingDown) return;
 		await this.sessionRuntime.runPromise(LspRuntimeSession.use((session) => session.shutdown));
+		this.currentState().disposeRequested = true;
+		await this.disposeIfIdle();
 	}
 
 	async clientsForFile(
@@ -192,7 +202,7 @@ export class LspRuntime {
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Promise<ClientResolution> {
-		return await this.sessionRuntime.runPromise(
+		return await this.runOperation(
 			LspRuntimeSession.use((session) =>
 				session.clientsForFile(filePath, capability, ctx, options),
 			),
@@ -200,9 +210,26 @@ export class LspRuntime {
 	}
 
 	async touchRunningFile(filePath: string): Promise<void> {
-		await this.sessionRuntime.runPromise(
-			LspRuntimeSession.use((session) => session.touchRunningFile(filePath)),
-		);
+		await this.runOperation(LspRuntimeSession.use((session) => session.touchRunningFile(filePath)));
+	}
+
+	private async runOperation<A, E>(effect: Effect.Effect<A, E, LspRuntimeSession>): Promise<A> {
+		const state = this.currentState();
+		if (state.disposed) throw lspRuntimeShuttingDown();
+		state.activeOperations += 1;
+		try {
+			return await this.sessionRuntime.runPromise(effect);
+		} finally {
+			state.activeOperations -= 1;
+			await this.disposeIfIdle();
+		}
+	}
+
+	private async disposeIfIdle(): Promise<void> {
+		const state = this.currentState();
+		if (!state.disposeRequested || state.disposed || state.activeOperations > 0) return;
+		state.disposed = true;
+		await this.sessionRuntime.dispose();
 	}
 
 	private serverIdsEffect(): Effect.Effect<ReadonlyArray<string>> {

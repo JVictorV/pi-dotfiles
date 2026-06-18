@@ -300,8 +300,20 @@ Eventually, the imperative `LspRuntime` should become a thin bridge over an Effe
 
 ## Next action
 
-Remaining follow-ups are now polish/backlog rather than crash/idempotency blockers:
+Remaining follow-ups are now product backlog rather than runtime hardening blockers:
 
-1. Consider a fully Effect-native `LspRuntimeSession` implementation instead of private unsafe helper delegation.
-2. Add typed permission-denied/spawn/init errors at the public boundary if user-facing differentiation becomes important.
-3. Add lower-priority lifecycle features (`didSave`, `didClose`) and more built-in servers.
+1. Add more built-in servers.
+2. Consider mutating LSP features behind explicit permission gates: rename, code actions, formatting, organize imports.
+3. If needed, split the current compatibility-wrapper runtime into smaller Effect service modules for readability.
+
+## Lifecycle extras
+
+**Status:** Done.
+
+**Notes:**
+
+- `LspClient.open()` sends `textDocument/didSave` after first open and after changed content is synced.
+- `LspClient.shutdown()` sends `textDocument/didClose` for open documents before the server shutdown request.
+- `LspRuntime.shutdown()` now requests `ManagedRuntime` disposal only after active operations drain, avoiding interruption of in-flight tool calls while still allowing post-shutdown status reads.
+- Added regression coverage: `client shutdown sends save and close lifecycle notifications`.
+- Validation: `npm test`, `npm run typecheck`, `npm run lint`, `npm run format:check` all pass.

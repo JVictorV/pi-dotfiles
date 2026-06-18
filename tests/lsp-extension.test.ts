@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -665,6 +665,35 @@ describe("LSP Extension", () => {
 			_tag: "LspPermissionDenied",
 			serverId: "fake",
 		});
+	});
+
+	test("client shutdown sends save and close lifecycle notifications", async () => {
+		const baseProject = await createProject();
+		const lifecyclePath = join(baseProject.cwd, "lifecycle.json");
+		const runtime = new LspRuntime({
+			cwd: baseProject.cwd,
+			config: createConfig({ FAKE_LSP_LIFECYCLE_FILE: lifecyclePath }),
+		});
+		runtimes.push(runtime);
+		const tool = registerTool(runtime);
+
+		await tool.execute(
+			"tool-call-lifecycle-1",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			undefined,
+			undefined,
+			baseProject.ctx,
+		);
+		await writeFile(baseProject.filePath, "savedAgain()\n", "utf8");
+		await runtime.touchRunningFile("main.fake");
+		await runtime.shutdown();
+
+		const lifecycle = JSON.parse(await readFile(lifecyclePath, "utf8")) as {
+			saves: number;
+			closes: number;
+		};
+		expect(lifecycle.saves).toBeGreaterThanOrEqual(2);
+		expect(lifecycle.closes).toBe(1);
 	});
 
 	test("shutdown tolerates language servers that already closed their stdio", async () => {

@@ -442,6 +442,7 @@ export class LspClient {
 					text,
 				},
 			});
+			await this.notifySave(file, text);
 		} else if (open.text !== text) {
 			const version = open.version + 1;
 			this.openDocuments.set(file, { version, text });
@@ -453,6 +454,7 @@ export class LspClient {
 						? [{ range: { start: { line: 0, character: 0 }, end: endPosition(open.text) }, text }]
 						: [{ text }],
 			});
+			await this.notifySave(file, text);
 		}
 
 		if (waitForDiagnostics) {
@@ -488,6 +490,7 @@ export class LspClient {
 
 	async shutdown(): Promise<void> {
 		if (this.disposed || this.closing) return;
+		await this.closeOpenDocuments().catch(() => undefined);
 		this.closing = true;
 
 		try {
@@ -645,6 +648,24 @@ export class LspClient {
 		await this.notify("workspace/didChangeWatchedFiles", {
 			changes: [{ uri: pathToFileURL(file).href, type }],
 		});
+	}
+
+	private async notifySave(file: string, text: string): Promise<void> {
+		await this.notify("textDocument/didSave", {
+			textDocument: { uri: pathToFileURL(file).href },
+			text,
+		});
+	}
+
+	private async closeOpenDocuments(): Promise<void> {
+		await Promise.all(
+			[...this.openDocuments.keys()].map(async (file) => {
+				await this.notify("textDocument/didClose", {
+					textDocument: { uri: pathToFileURL(file).href },
+				});
+			}),
+		);
+		this.openDocuments.clear();
 	}
 
 	private async notify(method: string, params: unknown): Promise<void> {

@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+
 import {
 	createMessageConnection,
 	StreamMessageReader,
@@ -11,6 +13,7 @@ const connection = createMessageConnection(
 const documents = new Map();
 const languageIds = new Map();
 const watchedChanges = new Map();
+const lifecycle = { saves: 0, closes: 0 };
 let hoverErrorsRemaining = Number(process.env.FAKE_LSP_HOVER_ERROR_COUNT ?? 0);
 
 const location = (uri, line, character) => ({
@@ -124,6 +127,14 @@ connection.onNotification("workspace/didChangeWatchedFiles", (params) => {
 	}
 });
 
+connection.onNotification("textDocument/didSave", () => {
+	lifecycle.saves += 1;
+});
+
+connection.onNotification("textDocument/didClose", () => {
+	lifecycle.closes += 1;
+});
+
 connection.onRequest("textDocument/diagnostic", (params) => ({
 	kind: "full",
 	items: [
@@ -233,7 +244,12 @@ connection.onRequest("callHierarchy/outgoingCalls", (params) => [
 	},
 ]);
 
-connection.onRequest("shutdown", () => null);
+connection.onRequest("shutdown", async () => {
+	if (process.env.FAKE_LSP_LIFECYCLE_FILE) {
+		await writeFile(process.env.FAKE_LSP_LIFECYCLE_FILE, JSON.stringify(lifecycle), "utf8");
+	}
+	return null;
+});
 connection.onNotification("exit", () => process.exit(0));
 
 connection.listen();
