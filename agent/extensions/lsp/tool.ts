@@ -612,58 +612,94 @@ const workspaceEditEntries = (
 	return entries;
 };
 
-const applyWorkspaceEdit = async (
+const applyWorkspaceEdit = (
 	operation: LspOperation,
 	cwd: string,
 	edit: unknown,
-): Promise<ReadonlyArray<string>> => {
-	const changedFiles: string[] = [];
-	for (const [uri, edits] of workspaceEditEntries(operation, edit)) {
-		const file = uriToPath(uri);
-		if (file === undefined) {
-			throw LspMalformedResponse.make({
-				operation,
-				reason: `${operation} returned non-file edit URI`,
+): Effect.Effect<ReadonlyArray<string>, unknown> =>
+	Effect.gen(function* () {
+		const changedFiles: string[] = [];
+		for (const [uri, edits] of workspaceEditEntries(operation, edit)) {
+			const file = uriToPath(uri);
+			if (file === undefined) {
+				return yield* Effect.fail(
+					LspMalformedResponse.make({
+						operation,
+						reason: `${operation} returned non-file edit URI`,
+					}),
+				);
+			}
+			const text = yield* Effect.tryPromise({
+				try: () => readFile(file, "utf8"),
+				catch: (cause) => cause,
 			});
+			const next = applyTextEdits(operation, text, edits);
+			if (next !== text) {
+				yield* Effect.tryPromise({
+					try: () => writeFile(file, next, "utf8"),
+					catch: (cause) => cause,
+				});
+				changedFiles.push(formatPath(cwd, file));
+			}
 		}
-		const text = await readFile(file, "utf8");
-		const next = applyTextEdits(operation, text, edits);
-		if (next !== text) {
-			await writeFile(file, next, "utf8");
-			changedFiles.push(formatPath(cwd, file));
-		}
-	}
-	return changedFiles;
-};
+		return changedFiles;
+	});
 
-const mutationApproval = async (
+const mutationApproval = (
 	ctx: ExtensionContext,
 	title: string,
 	body: string,
-): Promise<void> => {
-	if (!ctx.hasUI) throw new Error(`${title} requires interactive approval.`);
-	const approved = await ctx.ui.confirm(title, body);
-	if (!approved) throw new Error(`${title} was declined.`);
-};
+): Effect.Effect<void, unknown> =>
+	Effect.gen(function* () {
+		if (!ctx.hasUI) return yield* Effect.fail(new Error(`${title} requires interactive approval.`));
+		const approved = yield* Effect.tryPromise({
+			try: () => ctx.ui.confirm(title, body),
+			catch: (cause) => cause,
+		});
+		if (!approved) return yield* Effect.fail(new Error(`${title} was declined.`));
+	});
 
 const formatApplied = (label: string, files: ReadonlyArray<string>): string =>
 	files.length === 0
 		? `${label}: no edits returned.`
 		: `${label} to:\n${files.map((file) => `- ${file}`).join("\n")}`;
 
-const fullDocumentRange = async (file: string): Promise<LspRange> => ({
-	start: { line: 0, character: 0 },
-	end: endPosition(await readFile(file, "utf8")),
-});
+const touchChangedFiles = (
+	runtime: LspRuntime,
+	files: ReadonlyArray<string>,
+): Effect.Effect<void, unknown> =>
+	Effect.forEach(
+		files,
+		(file) =>
+			Effect.tryPromise({
+				try: () => runtime.touchRunningFile(file),
+				catch: (cause) => cause,
+			}),
+		{ concurrency: "unbounded", discard: true },
+	);
 
-const codeActionRequestParams = async (
+const fullDocumentRange = (file: string): Effect.Effect<LspRange, unknown> =>
+	Effect.tryPromise({
+		try: () => readFile(file, "utf8"),
+		catch: (cause) => cause,
+	}).pipe(
+		Effect.map((text) => ({
+			start: { line: 0, character: 0 },
+			end: endPosition(text),
+		})),
+	);
+
+const codeActionRequestParams = (
 	file: string,
 	kind?: string,
-): Promise<Record<string, unknown>> => ({
-	textDocument: { uri: pathToFileURL(file).href },
-	range: await fullDocumentRange(file),
-	context: { diagnostics: [], ...(kind ? { only: [kind] } : {}) },
-});
+): Effect.Effect<Record<string, unknown>, unknown> =>
+	fullDocumentRange(file).pipe(
+		Effect.map((range) => ({
+			textDocument: { uri: pathToFileURL(file).href },
+			range,
+			context: { diagnostics: [], ...(kind ? { only: [kind] } : {}) },
+		})),
+	);
 
 const firstMutationClient = (
 	operation: LspOperation,
@@ -871,9 +907,11 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							newName: params.newName,
 						}),
 					);
-					await mutationApproval(ctx, "Apply LSP rename?", `Apply rename to ${params.newName}?`);
-					const files = await applyWorkspaceEdit("rename", ctx.cwd, edit);
-					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					await Effect.runPromise(
+						mutationApproval(ctx, "Apply LSP rename?", `Apply rename to ${params.newName}?`),
+					);
+					const files = await Effect.runPromise(applyWorkspaceEdit("rename", ctx.cwd, edit));
+					await Effect.runPromise(touchChangedFiles(runtime, files));
 					results = { files };
 					text = formatApplied("Applied rename", files);
 					break;
@@ -893,11 +931,15 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							options: { tabSize: 2, insertSpaces: false },
 						}),
 					);
-					await mutationApproval(ctx, "Apply LSP formatting?", `Apply formatting to ${filePath}?`);
-					const files = await applyWorkspaceEdit("formatting", ctx.cwd, {
-						changes: { [uri]: edits },
-					});
-					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					await Effect.runPromise(
+						mutationApproval(ctx, "Apply LSP formatting?", `Apply formatting to ${filePath}?`),
+					);
+					const files = await Effect.runPromise(
+						applyWorkspaceEdit("formatting", ctx.cwd, {
+							changes: { [uri]: edits },
+						}),
+					);
+					await Effect.runPromise(touchChangedFiles(runtime, files));
 					results = { files };
 					text = formatApplied("Applied formatting", files);
 					break;
@@ -914,7 +956,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						await Effect.runPromise(
 							client.requestEffect<unknown[]>(
 								"textDocument/codeAction",
-								await codeActionRequestParams(file, params.codeActionKind),
+								await Effect.runPromise(codeActionRequestParams(file, params.codeActionKind)),
 							),
 						)
 					).filter(isCodeAction);
@@ -934,13 +976,13 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							reason: "Code actions without workspace edits are not supported.",
 						});
 					}
-					await mutationApproval(
-						ctx,
-						"Apply LSP code action?",
-						`Apply code action ${action.title}?`,
+					await Effect.runPromise(
+						mutationApproval(ctx, "Apply LSP code action?", `Apply code action ${action.title}?`),
 					);
-					const files = await applyWorkspaceEdit("codeAction", ctx.cwd, action.edit);
-					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					const files = await Effect.runPromise(
+						applyWorkspaceEdit("codeAction", ctx.cwd, action.edit),
+					);
+					await Effect.runPromise(touchChangedFiles(runtime, files));
 					results = { action: action.title, files };
 					text = formatApplied("Applied code action", files);
 					break;
@@ -957,7 +999,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 						await Effect.runPromise(
 							client.requestEffect<unknown[]>(
 								"textDocument/codeAction",
-								await codeActionRequestParams(file, "source.organizeImports"),
+								await Effect.runPromise(codeActionRequestParams(file, "source.organizeImports")),
 							),
 						)
 					).filter(isCodeAction);
@@ -968,13 +1010,17 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							reason: "No organize imports edit was returned.",
 						});
 					}
-					await mutationApproval(
-						ctx,
-						"Apply LSP organize imports?",
-						`Apply organize imports to ${filePath}?`,
+					await Effect.runPromise(
+						mutationApproval(
+							ctx,
+							"Apply LSP organize imports?",
+							`Apply organize imports to ${filePath}?`,
+						),
 					);
-					const files = await applyWorkspaceEdit("organizeImports", ctx.cwd, action.edit);
-					await Promise.all(files.map((file) => runtime.touchRunningFile(file)));
+					const files = await Effect.runPromise(
+						applyWorkspaceEdit("organizeImports", ctx.cwd, action.edit),
+					);
+					await Effect.runPromise(touchChangedFiles(runtime, files));
 					results = { action: action.title, files };
 					text = formatApplied("Applied organize imports", files);
 					break;

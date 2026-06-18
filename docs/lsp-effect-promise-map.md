@@ -89,5 +89,6 @@ Boundary functions allowed to consume promises:
   - Tool LSP requests now call `client.requestEffect` at the registered `execute` boundary instead of using `client.request` directly.
   - `ensureClients` now returns an Effect; the registered `execute` boundary is the only place that runs it as a Promise.
   - `runAcrossClients` now composes an Effect across clients instead of owning `Promise.all`.
-  - Remaining: convert workspace edit application, mutation approval, and code action params into Effects and run a single top-level program from `execute`.
+  - Workspace edit application, mutation approval, changed-file sync, and code action params now return Effects.
+  - Remaining: run a single top-level Effect program from `execute` instead of multiple boundary `Effect.runPromise` calls.
 - [ ] Slice 6: boundary cleanup
