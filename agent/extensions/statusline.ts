@@ -4,7 +4,7 @@
  * Rendered as a `belowEditor` widget so it sits directly below the editor.
  *
  * Single-line layout:
- *   model · thinking │ ~/dir (branch) ⇡#PR • session   45%  90k/200k
+ *   model │ thinking │ ~/dir │ (branch) │ ⇡#PR │ session   45%  90k/200k
  *
  * Pi data sources (vs ccstatusline widgets):
  *   - model           -> ctx.model.id
@@ -42,6 +42,8 @@ const THINKING_COLOR: Record<ThinkingLevel, ThemeColor> = {
 	high: "thinkingHigh",
 	xhigh: "thinkingXhigh",
 };
+
+const LEFT_SEPARATOR = "│";
 
 type GitState = { branch: string };
 type LspClientState = { id: string; label: string };
@@ -186,14 +188,12 @@ function shortLspName(client: LspClientState): string {
 	}
 }
 
-/** Build the left side: model · thinking │ ~/dir (branch) • session. */
+/** Build the left side: model │ thinking │ ~/dir │ (branch) │ session. */
 function buildLeft(theme: Theme, p: LeftParts): string {
 	const segs: string[] = [theme.fg("accent", p.model)];
 	if (p.thinking && p.thinking !== "off") {
-		segs.push(theme.fg("dim", "·"));
 		segs.push(theme.fg(THINKING_COLOR[p.thinking], p.thinking));
 	}
-	segs.push(theme.fg("dim", "│"));
 	segs.push(theme.fg("dim", shortenHome(p.dir)));
 	if (p.git.branch) {
 		segs.push(theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")"));
@@ -212,9 +212,9 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 		segs.push(theme.fg(color, `${label}${brokenLabel}`));
 	}
 	if (p.session) {
-		segs.push(theme.fg("dim", `• ${p.session}`));
+		segs.push(theme.fg("dim", p.session));
 	}
-	return segs.join(" ");
+	return segs.join(theme.fg("dim", ` ${LEFT_SEPARATOR} `));
 }
 
 /** Build the right side: 45.67%  90k/200k ("?" when token count is unknown). */
