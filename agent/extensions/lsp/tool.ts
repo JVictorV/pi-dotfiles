@@ -478,10 +478,13 @@ const requireOperationSupport = (
 	return supported;
 };
 
-const runAcrossClients = async <T>(
+const runAcrossClients = <T>(
 	clients: ReadonlyArray<LocatedClient>,
-	fn: (client: LocatedClient) => Promise<T>,
-) => (await Promise.all(clients.map(fn))).flat();
+	fn: (client: LocatedClient) => Effect.Effect<ReadonlyArray<T>, unknown>,
+): Effect.Effect<T[], unknown> =>
+	Effect.forEach(clients, fn, { concurrency: "unbounded" }).pipe(
+		Effect.map((results) => results.flat()),
+	);
 
 const absolutePath = (cwd: string, filePath: string): string =>
 	resolve(cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
@@ -724,8 +727,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					const file = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const position = { line: line - 1, character: character - 1 };
 					const method = methodForOperation(params.operation);
-					const raw = await runAcrossClients(clients, ({ client }) =>
-						Effect.runPromise(
+					const raw = await Effect.runPromise(
+						runAcrossClients(clients, ({ client }) =>
 							client.requestEffect<unknown[]>(
 								method,
 								requestParamsForOperation(params.operation, file, position),
@@ -747,19 +750,27 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					serverIds = clients.map(({ client }) => client.serverId);
 					const uri = pathToFileURL(absolutePath(ctx.cwd, filePath)).href;
 					const position = { line: line - 1, character: character - 1 };
-					const raw = await runAcrossClients(clients, async ({ client }) => {
-						const items = await Effect.runPromise(
-							client.requestEffect<unknown[]>("textDocument/prepareCallHierarchy", {
-								textDocument: { uri },
-								position,
+					const raw = await Effect.runPromise(
+						runAcrossClients(clients, ({ client }) =>
+							Effect.gen(function* () {
+								const items = yield* client.requestEffect<unknown[]>(
+									"textDocument/prepareCallHierarchy",
+									{
+										textDocument: { uri },
+										position,
+									},
+								);
+								const item = items[0];
+								if (item === undefined) return [];
+								return yield* client.requestEffect<unknown[]>(
+									methodForOperation(params.operation),
+									{
+										item,
+									},
+								);
 							}),
-						);
-						const item = items[0];
-						if (item === undefined) return [];
-						return await Effect.runPromise(
-							client.requestEffect<unknown[]>(methodForOperation(params.operation), { item }),
-						);
-					});
+						),
+					);
 					const locations = callHierarchyToLocations(params.operation, raw);
 					results = locations;
 					text = formatLocationList(ctx.cwd, params.operation, locations, limitFor(params, 100));
@@ -796,8 +807,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					);
 					serverIds = clients.map(({ client }) => client.serverId);
 					const absolute = absolutePath(ctx.cwd, filePath);
-					const raw = await runAcrossClients(clients, ({ client }) =>
-						Effect.runPromise(
+					const raw = await Effect.runPromise(
+						runAcrossClients(clients, ({ client }) =>
 							client.requestEffect<unknown[]>("textDocument/documentSymbol", {
 								textDocument: { uri: pathToFileURL(absolute).href },
 							}),
@@ -824,8 +835,8 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					if (clients.length === 0)
 						throw new Error("No running LSP clients. Pass filePath to start a matching server.");
 					serverIds = clients.map(({ client }) => client.serverId);
-					const raw = await runAcrossClients(clients, ({ client }) =>
-						Effect.runPromise(
+					const raw = await Effect.runPromise(
+						runAcrossClients(clients, ({ client }) =>
 							client.requestEffect<unknown[]>("workspace/symbol", { query: params.query ?? "" }),
 						),
 					);
