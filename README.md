@@ -116,11 +116,11 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 
 ## Credits
 
-Inspired by these pi/dotfiles setups:
+Inspired by these pi/dotfiles setups and codebases:
 
 - [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main) — vendored at [`.repos/dmmulroy-dotfiles`](.repos/dmmulroy-dotfiles)
 - [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles) — vendored at [`.repos/edusantosbrito-pi-dotfiles`](.repos/edusantosbrito-pi-dotfiles)
-- [anomalyco/opencode](https://github.com/anomalyco/opencode) — vendored at [`.repos/opencode`](.repos/opencode)
+- [anomalyco/opencode](https://github.com/anomalyco/opencode) — inspiration for ported behavior and architecture; vendored at [`.repos/opencode`](.repos/opencode)
 
 All are tracked as git submodules under `.repos/` for reference. Run
 `git submodule update --init` after cloning to populate them.
