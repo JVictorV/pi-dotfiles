@@ -57,20 +57,20 @@ Preferred order:
 
 ```ts
 type Result<T, E extends Error> =
-  | { readonly _tag: "ok"; readonly value: T }
-  | { readonly _tag: "err"; readonly error: E };
+	| { readonly _tag: "ok"; readonly value: T }
+	| { readonly _tag: "err"; readonly error: E };
 ```
 
 Prefer:
 
 ```ts
-Promise<Result<User, UserLookupError>>
+Promise<Result<User, UserLookupError>>;
 ```
 
 not:
 
 ```ts
-Promise<User> // rejects for ordinary lookup/storage failures
+Promise<User>; // rejects for ordinary lookup/storage failures
 ```
 
 Promise rejection is equivalent to throwing. Treat it as acceptable only for unrecoverable defects or unclassified third-party behavior at a boundary.
@@ -115,22 +115,22 @@ Example:
 
 ```ts
 export class UserStoreUnavailable extends Error {
-  readonly _tag = "UserStoreUnavailable";
+	readonly _tag = "UserStoreUnavailable";
 
-  constructor(
-    readonly operation: "findActiveByEmail",
-    readonly provider: "postgres",
-    readonly cause: unknown,
-  ) {
-    super(`User store unavailable during ${operation}`);
-  }
+	constructor(
+		readonly operation: "findActiveByEmail",
+		readonly provider: "postgres",
+		readonly cause: unknown,
+	) {
+		super(`User store unavailable during ${operation}`);
+	}
 }
 ```
 
 Keep error unions precise at module boundaries:
 
 ```ts
-Result<User, UserNotFound | UserStoreUnavailable>
+Result<User, UserNotFound | UserStoreUnavailable>;
 ```
 
 Avoid broad `AppError`-style types except near entrypoints, orchestration, logging, and rendering layers.
@@ -219,19 +219,19 @@ Prefer:
 
 ```ts
 type Invoice =
-  | { readonly _tag: "Draft"; readonly id: InvoiceId; readonly lines: NonEmptyArray<LineItem> }
-  | { readonly _tag: "Sent"; readonly id: InvoiceId; readonly sentAt: Instant }
-  | { readonly _tag: "Paid"; readonly id: InvoiceId; readonly paidAt: Instant };
+	| { readonly _tag: "Draft"; readonly id: InvoiceId; readonly lines: NonEmptyArray<LineItem> }
+	| { readonly _tag: "Sent"; readonly id: InvoiceId; readonly sentAt: Instant }
+	| { readonly _tag: "Paid"; readonly id: InvoiceId; readonly paidAt: Instant };
 ```
 
 Avoid:
 
 ```ts
 type Invoice = {
-  readonly isSent: boolean;
-  readonly isPaid: boolean;
-  readonly sentAt?: Date;
-  readonly paidAt?: Date;
+	readonly isSent: boolean;
+	readonly isPaid: boolean;
+	readonly sentAt?: Date;
+	readonly paidAt?: Date;
 };
 ```
 
@@ -327,11 +327,11 @@ Because TypeScript is structurally typed, this works well:
 
 ```ts
 type UsersForPasswordReset = {
-  findActiveByEmail(email: EmailAddress): Promise<Result<ActiveUser, UserLookupError>>;
+	findActiveByEmail(email: EmailAddress): Promise<Result<ActiveUser, UserLookupError>>;
 };
 
 export class PasswordReset {
-  constructor(private readonly users: UsersForPasswordReset) {}
+	constructor(private readonly users: UsersForPasswordReset) {}
 }
 ```
 
@@ -498,8 +498,8 @@ Prefer immutable values:
 
 ```ts
 type CreateUserInput = {
-  readonly email: EmailAddress;
-  readonly roles: ReadonlyArray<Role>;
+	readonly email: EmailAddress;
+	readonly roles: ReadonlyArray<Role>;
 };
 ```
 
@@ -631,11 +631,11 @@ For complex exported object types, document fields when helpful:
 ```ts
 /** Input required to create a user. */
 export type CreateUserInput = {
-  /** The actor creating the user. */
-  readonly actor: AdminUser;
+	/** The actor creating the user. */
+	readonly actor: AdminUser;
 
-  /** The parsed email address for the new user. */
-  readonly email: EmailAddress;
+	/** The parsed email address for the new user. */
+	readonly email: EmailAddress;
 };
 ```
 
