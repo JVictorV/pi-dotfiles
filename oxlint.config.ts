@@ -20,5 +20,6 @@ export default defineConfig({
 		"agent/npm/**",
 		"agent/bin/**",
 		"agent/sessions/**",
+		"agent/extensions/herdr-agent-state.ts",
 	],
 });
