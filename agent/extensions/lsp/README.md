@@ -1,6 +1,6 @@
 # LSP Extension
 
-Read-only Language Server Protocol support for pi. The extension gives the model semantic code-navigation tools that are more precise than grepping for text: definitions, references, hover/type info, symbols, call hierarchy, and diagnostics.
+Language Server Protocol support for pi. The extension gives the model semantic code-navigation tools that are more precise than grepping for text: definitions, references, hover/type info, symbols, call hierarchy, and diagnostics. It can also apply selected LSP edits after interactive approval: rename, formatting, code actions, and organize imports.
 
 The implementation is adapted from opencode's LSP architecture, but runs as a global pi extension and does not import from `.repos/opencode` at runtime.
 
@@ -10,7 +10,7 @@ The implementation is adapted from opencode's LSP architecture, but runs as a gl
 
 Registers one tool: `lsp`.
 
-Supported operations:
+Supported read/query operations:
 
 - `definition`
 - `references`
@@ -23,6 +23,13 @@ Supported operations:
 - `outgoingCalls`
 - `diagnostics`
 - `status`
+
+Supported mutating operations, all requiring interactive approval before writing files:
+
+- `rename`
+- `formatting`
+- `codeAction`
+- `organizeImports`
 
 For position-based operations, pass:
 
@@ -57,6 +64,55 @@ For diagnostics:
 	"filePath": "src/example.ts"
 }
 ```
+
+With `filePath`, diagnostics may start matching diagnostic-capable servers and then return cached diagnostics for that file. Without `filePath`, diagnostics returns cached diagnostics from already-running clients.
+
+For rename:
+
+```json
+{
+	"operation": "rename",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8,
+	"newName": "renamedSymbol"
+}
+```
+
+For formatting:
+
+```json
+{
+	"operation": "formatting",
+	"filePath": "src/example.ts"
+}
+```
+
+Formatting currently requests document formatting with `tabSize: 2` and `insertSpaces: false`.
+
+For code actions, omit `actionTitle` to list available actions; pass an exact title to apply that action's workspace edit:
+
+```json
+{
+	"operation": "codeAction",
+	"filePath": "src/example.ts",
+	"codeActionKind": "quickfix",
+	"actionTitle": "Fix all auto-fixable problems"
+}
+```
+
+Code actions that do not return a workspace edit are not applied.
+
+For organize imports:
+
+```json
+{
+	"operation": "organizeImports",
+	"filePath": "src/example.ts"
+}
+```
+
+Mutating operations fail in non-interactive contexts because they require a UI confirmation prompt before any files are written. Workspace edits are limited to text edits for `file://` documents; resource operations such as file create/rename/delete are not supported.
 
 ### Status line
 
@@ -147,7 +203,7 @@ For Node-based and configured binaries, resolution is:
 2. session `cwd` / workspace ancestors' `node_modules/.bin`
 3. `PATH`
 
-Absolute or relative command paths in config are resolved directly.
+Absolute command paths in config are used as-is. Relative command paths that contain a slash are resolved relative to the detected LSP root.
 
 ## Root detection
 
@@ -201,7 +257,7 @@ Config fields per server:
 - `strictRoot?: boolean`
 - `capabilities?: { navigation?: boolean; diagnostics?: boolean }`
 
-If `command` is omitted for a built-in server, the built-in command is used. If `command` is omitted for a custom server, the server is ignored.
+If `command` is omitted for a built-in server, the built-in command is used. If `command` is omitted for a custom server, the server is ignored. `env` is only applied when `command` is provided in config.
 
 ## Passive synchronization
 
@@ -211,7 +267,8 @@ Diagnostics are cached in the background but are only sent to the model when it 
 
 ## Limits and safety
 
-- v1 is read-only. Mutating LSP actions like rename, code actions, formatting, organize imports, and workspace edits are intentionally deferred.
+- Query operations are read-only. Mutating operations apply file text edits only after interactive approval.
+- Mutating operations use the first available running/matching client that advertises support for the requested provider.
 - Results are capped by operation and then truncated using pi's standard output limits.
 - Crashed or failed servers are marked broken for the current session and skipped until `/lsp-restart`.
 - Clients are session-scoped and shut down on session shutdown/reload/replacement.
