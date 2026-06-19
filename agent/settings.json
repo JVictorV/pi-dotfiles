@@ -8,5 +8,6 @@
 	"enabledModels": ["openai-codex/gpt-5.5", "anthropic/claude-opus-4-8"],
 	"skills": ["!**/.agents/skills/**"],
 	"hideThinkingBlock": false,
-	"quietStartup": true
+	"quietStartup": true,
+	"packages": ["npm:pi-mcp-adapter"]
 }

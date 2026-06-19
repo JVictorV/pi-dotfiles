@@ -27,6 +27,7 @@ import { homedir } from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ReadonlyFooterDataProvider,
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
@@ -49,6 +50,7 @@ type GitState = { branch: string };
 type LspClientState = { id: string; label: string };
 type LspState = { running: ReadonlyArray<LspClientState>; broken: ReadonlyArray<LspClientState> };
 type PrState = { number: number; url: string } | null;
+type McpState = { text: string; color: ThemeColor } | null;
 
 /** Shape of `gh pr view --json number,url` output. */
 const PrInfo = Schema.Struct({ number: Schema.Number, url: Schema.String });
@@ -147,6 +149,36 @@ function usageColor(pct: number): ThemeColor {
 	return "success";
 }
 
+const ESCAPE_CHAR = String.fromCharCode(27);
+const BELL_CHAR = String.fromCharCode(7);
+const ANSI_PATTERN = new RegExp(
+	`${ESCAPE_CHAR}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHAR}]*(?:${BELL_CHAR}|${ESCAPE_CHAR}\\\\))`,
+	"g",
+);
+
+function stripAnsi(value: string): string {
+	return value.replace(ANSI_PATTERN, "");
+}
+
+function mcpStateFromFooter(footerData: ReadonlyFooterDataProvider | undefined): McpState {
+	const raw = footerData?.getExtensionStatuses().get("mcp");
+	const text = raw ? stripAnsi(raw).trim() : "";
+	if (!text) return null;
+
+	const counts = /^MCP:\s*(\d+)\/(\d+)\s+servers\b/.exec(text);
+	if (counts) {
+		const connected = Number(counts[1]);
+		const total = Number(counts[2]);
+		const color: ThemeColor = connected === total ? "success" : connected > 0 ? "warning" : "dim";
+		return { text, color };
+	}
+
+	return {
+		text,
+		color: text.toLowerCase().includes("connecting") ? "warning" : "accent",
+	};
+}
+
 type LeftParts = {
 	model: string;
 	thinking: ThinkingLevel | "off" | undefined;
@@ -155,6 +187,7 @@ type LeftParts = {
 	git: GitState;
 	pr: PrState;
 	lsp: LspState;
+	mcp: McpState;
 };
 
 function isLspState(value: unknown): value is LspState {
@@ -211,6 +244,9 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 		const brokenLabel = broken.length > 0 ? ` !(${broken.join(", ")})` : "";
 		segs.push(theme.fg(color, `${label}${brokenLabel}`));
 	}
+	if (p.mcp) {
+		segs.push(theme.fg(p.mcp.color, p.mcp.text));
+	}
 	if (p.session) {
 		segs.push(theme.fg("dim", p.session));
 	}
@@ -248,6 +284,7 @@ function renderLine(
 	git: GitState,
 	pr: PrState,
 	lsp: LspState,
+	mcp: McpState,
 	width: number,
 ): string[] {
 	const usage = ctx.getContextUsage();
@@ -260,6 +297,7 @@ function renderLine(
 		git,
 		pr,
 		lsp,
+		mcp,
 	});
 	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
 	return [layout(theme, left, right, width)];
@@ -270,6 +308,7 @@ export default function (pi: ExtensionAPI) {
 	let gitState: GitState = { branch: "" };
 	let lspState: LspState = { running: [], broken: [] };
 	let prState: PrState = null;
+	let footerData: ReadonlyFooterDataProvider | undefined;
 	// Branch the cached PR was looked up for — avoids showing a stale PR after a switch.
 	let prBranch = "";
 	let requestRender: (() => void) | undefined;
@@ -323,20 +362,39 @@ export default function (pi: ExtensionAPI) {
 					},
 					invalidate() {},
 					render(width: number): string[] {
-						return renderLine(pi, ctx, theme, gitState, prState, lspState, width);
+						return renderLine(
+							pi,
+							ctx,
+							theme,
+							gitState,
+							prState,
+							lspState,
+							mcpStateFromFooter(footerData),
+							width,
+						);
 					},
 				};
 			},
 			{ placement: "belowEditor" },
 		);
 
-		// Suppress the built-in footer so nothing renders below the status line.
-		ctx.ui.setFooter(() => ({
-			invalidate() {},
-			render(): string[] {
-				return [];
-			},
-		}));
+		// Suppress the built-in footer so nothing renders below the status line, but keep a
+		// handle to extension statuses (notably pi-mcp-adapter's `mcp` status).
+		ctx.ui.setFooter((_tui, _theme, data) => {
+			footerData = data;
+			requestRender?.();
+			return {
+				dispose() {
+					if (footerData === data) footerData = undefined;
+				},
+				invalidate() {
+					requestRender?.();
+				},
+				render(): string[] {
+					return [];
+				},
+			};
+		});
 	});
 
 	pi.on("turn_end", runRefresh);

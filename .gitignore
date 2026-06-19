@@ -16,5 +16,11 @@ agent/bin/
 # pi-managed package installs (restored from settings.json "packages")
 agent/npm/
 
+# pi MCP adapter runtime/secrets
+agent/mcp-oauth/
+agent/mcp-cache.json
+agent/mcp-npx-cache.json
+agent/mcp-auth.json
+
 # OS noise
 .DS_Store
