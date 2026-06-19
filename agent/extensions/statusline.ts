@@ -4,7 +4,7 @@
  * Rendered as a `belowEditor` widget so it sits directly below the editor.
  *
  * Single-line layout:
- *   model │ thinking │ ~/dir │ (branch) │ ⇡#PR │ session   45%  90k/200k
+ *   model │ thinking │ ~/dir │ (branch)[gh-profile] │ ⇡#PR │ session   45%  90k/200k
  *
  * Pi data sources (vs ccstatusline widgets):
  *   - model           -> ctx.model.id
@@ -12,6 +12,7 @@
  *   - directory       -> ctx.sessionManager.getCwd() (home-shortened)
  *   - session name    -> ctx.sessionManager.getSessionName()
  *   - git-branch      -> git rev-parse (cached; widgets get no footerData)
+ *   - gh-profile      -> gh auth status --active (cached)
  *   - pr-link         -> gh pr view <branch> (cached; OSC 8 clickable link)
  *
  * The data layer (git + gh subprocesses, JSON decoding, state refresh) runs as
@@ -47,6 +48,7 @@ const THINKING_COLOR: Record<ThinkingLevel, ThemeColor> = {
 const LEFT_SEPARATOR = "│";
 
 type GitState = { branch: string };
+type GhState = { profile: string };
 type LspClientState = { id: string; label: string };
 type LspState = { running: ReadonlyArray<LspClientState>; broken: ReadonlyArray<LspClientState> };
 type PrState = { number: number; url: string } | null;
@@ -91,6 +93,26 @@ const fetchGit = Effect.fn("fetchGit")(function* (pi: ExtensionAPI) {
 	const branchRes = yield* runExec(pi, "git", ["rev-parse", "--abbrev-ref", "HEAD"], 3000);
 	const branch = branchRes.code === 0 ? branchRes.stdout.trim().replace(/^HEAD$/, "") : "";
 	return { branch } satisfies GitState;
+});
+
+/** Active GitHub CLI account/profile, or empty when `gh` is absent or unauthenticated. */
+const fetchGhProfile = Effect.fn("fetchGhProfile")(function* (pi: ExtensionAPI) {
+	const res = yield* runExec(
+		pi,
+		"gh",
+		[
+			"auth",
+			"status",
+			"--active",
+			"--json",
+			"hosts",
+			"--jq",
+			'.hosts | add | map(select(.active and .state == "success")) | .[0].login // ""',
+		],
+		5000,
+	);
+	const profile = res.code === 0 ? (res.stdout.trim().split(/\r?\n/, 1)[0]?.trim() ?? "") : "";
+	return { profile } satisfies GhState;
 });
 
 /** The open PR for `branch` via `gh`, or null when there is none / gh is absent. */
@@ -185,6 +207,7 @@ type LeftParts = {
 	dir: string;
 	session: string | undefined;
 	git: GitState;
+	gh: GhState;
 	pr: PrState;
 	lsp: LspState;
 	mcp: McpState;
@@ -221,7 +244,7 @@ function shortLspName(client: LspClientState): string {
 	}
 }
 
-/** Build the left side: model │ thinking │ ~/dir │ (branch) │ session. */
+/** Build the left side: model │ thinking │ ~/dir │ (branch)[gh-profile] │ session. */
 function buildLeft(theme: Theme, p: LeftParts): string {
 	const segs: string[] = [theme.fg("accent", p.model)];
 	if (p.thinking && p.thinking !== "off") {
@@ -229,7 +252,11 @@ function buildLeft(theme: Theme, p: LeftParts): string {
 	}
 	segs.push(theme.fg("dim", shortenHome(p.dir)));
 	if (p.git.branch) {
-		segs.push(theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")"));
+		const branch = theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")");
+		const ghProfile = p.gh.profile
+			? theme.fg("dim", "[") + theme.fg("accent", p.gh.profile) + theme.fg("dim", "]")
+			: "";
+		segs.push(branch + ghProfile);
 	}
 	if (p.pr) {
 		const label = theme.fg("mdLink", `⇡#${p.pr.number}`);
@@ -282,6 +309,7 @@ function renderLine(
 	ctx: ExtensionContext,
 	theme: Theme,
 	git: GitState,
+	gh: GhState,
 	pr: PrState,
 	lsp: LspState,
 	mcp: McpState,
@@ -295,6 +323,7 @@ function renderLine(
 		dir: ctx.sessionManager.getCwd(),
 		session: ctx.sessionManager.getSessionName(),
 		git,
+		gh,
 		pr,
 		lsp,
 		mcp,
@@ -306,6 +335,7 @@ function renderLine(
 export default function (pi: ExtensionAPI) {
 	// Cached git state, refreshed off the render path.
 	let gitState: GitState = { branch: "" };
+	let ghState: GhState = { profile: "" };
 	let lspState: LspState = { running: [], broken: [] };
 	let prState: PrState = null;
 	let footerData: ReadonlyFooterDataProvider | undefined;
@@ -318,7 +348,11 @@ export default function (pi: ExtensionAPI) {
 	// git state; a git failure resets everything. requestRender always fires.
 	const refresh = Effect.gen(function* () {
 		const git = yield* fetchGit(pi);
+		const gh = yield* fetchGhProfile(pi).pipe(
+			Effect.catch(() => Effect.succeed<GhState>({ profile: "" })),
+		);
 		gitState = git;
+		ghState = gh;
 		if (git.branch !== prBranch) {
 			prState = yield* fetchPr(pi, git.branch).pipe(
 				Effect.catch(() => Effect.succeed<PrState>(null)),
@@ -329,6 +363,7 @@ export default function (pi: ExtensionAPI) {
 		Effect.catchCause(() =>
 			Effect.sync(() => {
 				gitState = { branch: "" };
+				ghState = { profile: "" };
 				prState = null;
 				prBranch = "";
 			}),
@@ -367,6 +402,7 @@ export default function (pi: ExtensionAPI) {
 							ctx,
 							theme,
 							gitState,
+							ghState,
 							prState,
 							lspState,
 							mcpStateFromFooter(footerData),
