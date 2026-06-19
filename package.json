@@ -17,9 +17,9 @@
 		"vscode-languageserver-types": "^3.17.5"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "^0.79.7",
-		"@earendil-works/pi-coding-agent": "^0.79.7",
-		"@earendil-works/pi-tui": "^0.79.7",
+		"@earendil-works/pi-ai": "^0.79.8",
+		"@earendil-works/pi-coding-agent": "^0.79.8",
+		"@earendil-works/pi-tui": "^0.79.8",
 		"effect-rules": "^0.3.6",
 		"oxfmt": "^0.55.0",
 		"oxlint": "^1.70.0",

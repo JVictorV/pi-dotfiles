@@ -1,13 +1,20 @@
 {
-	"lastChangelogVersion": "0.79.7",
-	"theme": "light",
-	"defaultProvider": "openai-codex",
-	"defaultModel": "gpt-5.5",
-	"defaultThinkingLevel": "high",
-	"httpIdleTimeoutMs": 60000,
-	"enabledModels": ["openai-codex/gpt-5.5", "anthropic/claude-opus-4-8"],
-	"skills": ["!**/.agents/skills/**"],
-	"hideThinkingBlock": false,
-	"quietStartup": true,
-	"packages": ["npm:pi-mcp-adapter"]
+  "lastChangelogVersion": "0.79.8",
+  "theme": "light",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "high",
+  "httpIdleTimeoutMs": 60000,
+  "enabledModels": [
+    "openai-codex/gpt-5.5",
+    "anthropic/claude-opus-4-8"
+  ],
+  "skills": [
+    "!**/.agents/skills/**"
+  ],
+  "hideThinkingBlock": false,
+  "quietStartup": true,
+  "packages": [
+    "npm:pi-mcp-adapter"
+  ]
 }
