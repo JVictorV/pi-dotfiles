@@ -17,8 +17,26 @@ Then authenticate (recreates the gitignored `agent/auth.json`):
 pi   # follow the login prompt, or set provider API keys
 ```
 
-pi restores vendored tool binaries (`fd`, `rg`) on demand. There are no
-pi-managed packages configured.
+pi restores vendored tool binaries (`fd`, `rg`) on demand.
+
+### Figma MCP
+
+`agent/mcp.json` configures a Figma MCP server via
+[`figma-developer-mcp`](https://www.npmjs.com/package/figma-developer-mcp). It
+requires a Figma personal access token in `FIGMA_API_KEY`; do not commit the
+raw token.
+
+On macOS, store the token in Keychain:
+
+```bash
+security add-generic-password -a "$USER" -s figma-api-key -w "YOUR_FIGMA_PAT" -U
+```
+
+Then load it from `~/.zshrc` before starting pi:
+
+```bash
+export FIGMA_API_KEY="$(security find-generic-password -a "$USER" -s figma-api-key -w 2>/dev/null)"
+```
 
 ### Desktop notifications & sound (macOS)
 
