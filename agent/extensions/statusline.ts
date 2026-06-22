@@ -52,7 +52,7 @@ type GhState = { profile: string };
 type LspClientState = { id: string; label: string };
 type LspState = { running: ReadonlyArray<LspClientState>; broken: ReadonlyArray<LspClientState> };
 type PrState = { number: number; url: string } | null;
-type McpState = { text: string; color: ThemeColor } | null;
+type McpState = { text: string; compactText: string; color: ThemeColor } | null;
 
 /** Shape of `gh pr view --json number,url` output. */
 const PrInfo = Schema.Struct({ number: Schema.Number, url: Schema.String });
@@ -159,6 +159,23 @@ function shortenHome(path: string): string {
 	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
+function lastPathSegment(path: string): string {
+	const trimmed = path.replace(/\/+$/g, "");
+	const index = trimmed.lastIndexOf("/");
+	return index >= 0 ? trimmed.slice(index + 1) : trimmed;
+}
+
+function compactPath(path: string): string {
+	const shortened = shortenHome(path);
+	if (shortened === "~") return shortened;
+
+	const last = lastPathSegment(shortened);
+	if (!last || shortened === last) return shortened;
+	if (shortened.startsWith("~/")) return `~/${last}`;
+	if (shortened.startsWith("/")) return `…/${last}`;
+	return last;
+}
+
 function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	if (n >= 1000) return `${(n / 1000).toFixed(0)}k`;
@@ -192,12 +209,18 @@ function mcpStateFromFooter(footerData: ReadonlyFooterDataProvider | undefined):
 		const connected = Number(counts[1]);
 		const total = Number(counts[2]);
 		const color: ThemeColor = connected === total ? "success" : connected > 0 ? "warning" : "dim";
-		return { text, color };
+		return {
+			text: `MCP: ${connected}/${total}`,
+			compactText: `MCP ${connected}/${total}`,
+			color,
+		};
 	}
 
+	const connecting = text.toLowerCase().includes("connecting");
 	return {
 		text,
-		color: text.toLowerCase().includes("connecting") ? "warning" : "accent",
+		compactText: connecting ? "MCP…" : "MCP",
+		color: connecting ? "warning" : "accent",
 	};
 }
 
@@ -211,6 +234,13 @@ type LeftParts = {
 	pr: PrState;
 	lsp: LspState;
 	mcp: McpState;
+};
+
+type ResponsiveSegment = {
+	readonly text: string;
+	readonly compactText?: string;
+	readonly priority: number;
+	readonly required?: boolean;
 };
 
 function isLspState(value: unknown): value is LspState {
@@ -244,40 +274,118 @@ function shortLspName(client: LspClientState): string {
 	}
 }
 
-/** Build the left side: model │ thinking │ ~/dir │ (branch)[gh-profile] │ session. */
-function buildLeft(theme: Theme, p: LeftParts): string {
-	const segs: string[] = [theme.fg("accent", p.model)];
-	if (p.thinking && p.thinking !== "off") {
-		segs.push(theme.fg(THINKING_COLOR[p.thinking], p.thinking));
+function joinResponsiveSegments(theme: Theme, segments: ReadonlyArray<ResponsiveSegment>): string {
+	return segments.map((segment) => segment.text).join(theme.fg("dim", ` ${LEFT_SEPARATOR} `));
+}
+
+function chooseRemovalIndex(segments: ReadonlyArray<ResponsiveSegment>): number | undefined {
+	let selectedIndex: number | undefined;
+	let selectedPriority = Number.NEGATIVE_INFINITY;
+
+	for (let index = 0; index < segments.length; index += 1) {
+		const segment = segments[index];
+		if (!segment || segment.required) continue;
+		if (segment.priority >= selectedPriority) {
+			selectedIndex = index;
+			selectedPriority = segment.priority;
+		}
 	}
-	segs.push(theme.fg("dim", shortenHome(p.dir)));
+
+	return selectedIndex;
+}
+
+function buildLspSegment(theme: Theme, lsp: LspState): ResponsiveSegment {
+	const running = lsp.running.map(shortLspName);
+	const broken = lsp.broken.map(shortLspName);
+	const color: ThemeColor = broken.length > 0 ? "warning" : running.length > 0 ? "success" : "dim";
+	const label = running.length > 0 ? `LSP (${running.join(", ")})` : "LSP (Not running)";
+	const brokenLabel = broken.length > 0 ? ` !(${broken.join(", ")})` : "";
+	const compactLabel = broken.length > 0 ? "LSP!" : running.length > 0 ? "LSP✓" : "LSP–";
+
+	return {
+		text: theme.fg(color, `${label}${brokenLabel}`),
+		compactText: theme.fg(color, compactLabel),
+		priority: 40,
+	};
+}
+
+function buildLeftSegments(theme: Theme, p: LeftParts): ReadonlyArray<ResponsiveSegment> {
+	const segments: ResponsiveSegment[] = [
+		{ text: theme.fg("accent", p.model), priority: 0, required: true },
+	];
+
+	if (p.thinking && p.thinking !== "off") {
+		segments.push({ text: theme.fg(THINKING_COLOR[p.thinking], p.thinking), priority: 5 });
+	}
+
+	segments.push({
+		text: theme.fg("dim", shortenHome(p.dir)),
+		compactText: theme.fg("dim", compactPath(p.dir)),
+		priority: 10,
+	});
+
 	if (p.git.branch) {
 		const branch = theme.fg("dim", "(") + theme.fg("mdLink", p.git.branch) + theme.fg("dim", ")");
 		const ghProfile = p.gh.profile
 			? theme.fg("dim", "[") + theme.fg("accent", p.gh.profile) + theme.fg("dim", "]")
 			: "";
-		segs.push(branch + ghProfile);
+		segments.push({
+			text: branch + ghProfile,
+			compactText: theme.fg("mdLink", p.git.branch),
+			priority: 20,
+		});
 	}
+
 	if (p.pr) {
 		const label = theme.fg("mdLink", `⇡#${p.pr.number}`);
-		segs.push(getCapabilities().hyperlinks ? hyperlink(label, p.pr.url) : label);
+		segments.push({
+			text: getCapabilities().hyperlinks ? hyperlink(label, p.pr.url) : label,
+			priority: 30,
+		});
 	}
-	{
-		const running = p.lsp.running.map(shortLspName);
-		const broken = p.lsp.broken.map(shortLspName);
-		const color: ThemeColor =
-			broken.length > 0 ? "warning" : running.length > 0 ? "success" : "dim";
-		const label = running.length > 0 ? `LSP (${running.join(", ")})` : "LSP (Not running)";
-		const brokenLabel = broken.length > 0 ? ` !(${broken.join(", ")})` : "";
-		segs.push(theme.fg(color, `${label}${brokenLabel}`));
-	}
+
+	segments.push(buildLspSegment(theme, p.lsp));
+
 	if (p.mcp) {
-		segs.push(theme.fg(p.mcp.color, p.mcp.text));
+		segments.push({
+			text: theme.fg(p.mcp.color, p.mcp.text),
+			compactText: theme.fg(p.mcp.color, p.mcp.compactText),
+			priority: 50,
+		});
 	}
+
 	if (p.session) {
-		segs.push(theme.fg("dim", p.session));
+		segments.push({ text: theme.fg("dim", p.session), priority: 60 });
 	}
-	return segs.join(theme.fg("dim", ` ${LEFT_SEPARATOR} `));
+
+	return segments;
+}
+
+/** Build the left side, compacting/dropping optional segments to fit `availableWidth`. */
+function buildLeft(theme: Theme, p: LeftParts, availableWidth: number): string {
+	if (availableWidth <= 0) return "";
+
+	const segments = buildLeftSegments(theme, p);
+	const full = joinResponsiveSegments(theme, segments);
+	if (visibleWidth(full) <= availableWidth) return full;
+
+	const compactSegments = segments.map((segment) => ({
+		...segment,
+		text: segment.compactText ?? segment.text,
+	}));
+	const compact = joinResponsiveSegments(theme, compactSegments);
+	if (visibleWidth(compact) <= availableWidth) return compact;
+
+	const remaining = [...compactSegments];
+	while (visibleWidth(joinResponsiveSegments(theme, remaining)) > availableWidth) {
+		const removalIndex = chooseRemovalIndex(remaining);
+		if (removalIndex === undefined) break;
+		remaining.splice(removalIndex, 1);
+	}
+
+	const responsive = joinResponsiveSegments(theme, remaining);
+	if (visibleWidth(responsive) <= availableWidth) return responsive;
+	return truncateToWidth(responsive, availableWidth, theme.fg("dim", "…"));
 }
 
 /** Build the right side: 45.67%  90k/200k ("?" when token count is unknown). */
@@ -297,10 +405,16 @@ function buildRight(
 	);
 }
 
-/** Join left/right into a single padded line clamped to width with ellipsis. */
+/** Join left/right into a single padded line, preserving the right side when space is tight. */
 function layout(theme: Theme, left: string, right: string, width: number): string {
-	const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-	return truncateToWidth(left + " ".repeat(gap) + right, width, theme.fg("dim", "…"));
+	if (width <= 0) return "";
+	if (!left) return truncateToWidth(right, width, theme.fg("dim", "…"));
+
+	const rightWidth = visibleWidth(right);
+	if (rightWidth >= width) return truncateToWidth(right, width, theme.fg("dim", "…"));
+
+	const gap = Math.max(1, width - visibleWidth(left) - rightWidth);
+	return truncateToWidth(left + " ".repeat(gap) + right, width, "");
 }
 
 /** Assemble the full status line for the given render width. */
@@ -317,18 +431,22 @@ function renderLine(
 ): string[] {
 	const usage = ctx.getContextUsage();
 	const limit = usage?.contextWindow ?? ctx.model?.contextWindow ?? 200000;
-	const left = buildLeft(theme, {
-		model: ctx.model ? prettyModel(ctx.model.id) : "no-model",
-		thinking: pi.getThinkingLevel(),
-		dir: ctx.sessionManager.getCwd(),
-		session: ctx.sessionManager.getSessionName(),
-		git,
-		gh,
-		pr,
-		lsp,
-		mcp,
-	});
 	const right = buildRight(theme, usage?.tokens ?? null, limit, usage?.percent ?? null);
+	const left = buildLeft(
+		theme,
+		{
+			model: ctx.model ? prettyModel(ctx.model.id) : "no-model",
+			thinking: pi.getThinkingLevel(),
+			dir: ctx.sessionManager.getCwd(),
+			session: ctx.sessionManager.getSessionName(),
+			git,
+			gh,
+			pr,
+			lsp,
+			mcp,
+		},
+		Math.max(0, width - visibleWidth(right) - 1),
+	);
 	return [layout(theme, left, right, width)];
 }
 
