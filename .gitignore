@@ -21,6 +21,7 @@ agent/mcp-oauth/
 agent/mcp-cache.json
 agent/mcp-npx-cache.json
 agent/mcp-auth.json
+agent/mcp-onboarding.json
 
 # OS noise
 .DS_Store

@@ -3,7 +3,7 @@
   "theme": "light",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.5",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "xhigh",
   "httpIdleTimeoutMs": 60000,
   "enabledModels": [
     "openai-codex/gpt-5.5",
@@ -12,7 +12,7 @@
   "skills": [
     "!**/.agents/skills/**"
   ],
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "quietStartup": true,
   "packages": [
     "npm:pi-mcp-adapter"
