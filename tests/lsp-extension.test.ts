@@ -648,6 +648,29 @@ describe("LSP Extension", () => {
 		});
 	});
 
+	test("tool failures expose a non-empty message for the harness", async () => {
+		const project = await createProject(createConfig({ FAKE_LSP_MALFORMED_DEFINITION: "1" }));
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		// The agent harness builds a failed tool's tool_result content from
+		// `error.message`. A `Schema.TaggedErrorClass` defaults to an empty message,
+		// which the Anthropic API rejects ("content cannot be empty if is_error is
+		// true"). Each LSP error must therefore surface its reason as `message`.
+		await expect(
+			tool.execute(
+				"tool-call-error-message",
+				{ operation: "definition", filePath: "main.fake", line: 1, character: 1 },
+				undefined,
+				undefined,
+				project.ctx,
+			),
+		).rejects.toMatchObject({
+			_tag: "LspMalformedResponse",
+			message: "definition returned malformed locations",
+		});
+	});
+
 	test("unsupported server capabilities fail before issuing requests", async () => {
 		const project = await createProject(createConfig({ FAKE_LSP_NO_DEFINITION: "1" }));
 		runtimes.push(project.runtime);
