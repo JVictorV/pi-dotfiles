@@ -201,7 +201,8 @@ For Node-based and configured binaries, resolution is:
 
 1. detected LSP root `node_modules/.bin`
 2. session `cwd` / workspace ancestors' `node_modules/.bin`
-3. `PATH`
+3. pi config root `node_modules/.bin` (for language servers installed once in `~/.pi`)
+4. `PATH`
 
 Absolute command paths in config are used as-is. Relative command paths that contain a slash are resolved relative to the detected LSP root.
 

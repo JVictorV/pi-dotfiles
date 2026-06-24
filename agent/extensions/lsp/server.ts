@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { env } from "node:process";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
 
 import { LspSpawnError, lspErrorReason, type LspError } from "./errors";
@@ -87,6 +88,11 @@ const findOnPath = Effect.fn("findOnPath")(function* (bin: string) {
 	return undefined;
 });
 
+const findInAgentNodeModules = Effect.fn("findInAgentNodeModules")(function* (bin: string) {
+	const agentRoot = dirname(getAgentDir());
+	return yield* findInNodeModules(bin, agentRoot, agentRoot);
+});
+
 export const findExecutable = Effect.fn("findExecutable")(function* (
 	bin: string,
 	root: string,
@@ -100,6 +106,7 @@ export const findExecutable = Effect.fn("findExecutable")(function* (
 	return (
 		(yield* findInNodeModules(bin, root, cwd)) ??
 		(yield* findInNodeModules(bin, cwd, cwd)) ??
+		(yield* findInAgentNodeModules(bin)) ??
 		(yield* findOnPath(bin))
 	);
 });

@@ -258,7 +258,7 @@ Use after import-heavy edits when the language server supports it.
 
 ## Troubleshooting
 
-- The extension does not install language servers. If a server is missing, check project dependencies or PATH before suggesting installation.
+- The extension does not install language servers. If a server is missing, check project dependencies, the pi config root dependencies (`~/.pi/node_modules/.bin`), or PATH before suggesting installation.
 - The first query for a repo may prompt the human to allow starting a server.
 - If a server is denied, broken, or stale, ask the human to use `/lsp-status`, `/lsp-allow <server>`, `/lsp-reset <server|all>`, or `/lsp-restart <server|all>` as appropriate.
 - If LSP output is empty but the code clearly exists, fall back to `rg` and direct file reads; not every language server supports every operation.

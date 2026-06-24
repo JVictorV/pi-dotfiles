@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import lspExtension from "../agent/extensions/lsp";
 import { loadLspConfig } from "../agent/extensions/lsp/config";
+import { findExecutable } from "../agent/extensions/lsp/server";
 import { LspPermissionStore } from "../agent/extensions/lsp/permissions";
 import { LspRuntime } from "../agent/extensions/lsp/runtime";
 import { registerLspTool } from "../agent/extensions/lsp/tool";
@@ -152,6 +153,22 @@ describe("LSP Extension", () => {
 		);
 	});
 
+	test("binary resolution falls back to pi config root node_modules", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-lsp-agent-bin-test-"));
+		const cwd = join(root, "project");
+		const binDir = join(root, "node_modules", ".bin");
+		const binName = "pi-test-agent-language-server";
+		const binPath = join(binDir, binName);
+
+		process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+		await mkdir(cwd, { recursive: true });
+		await mkdir(binDir, { recursive: true });
+		await writeFile(binPath, "#!/bin/sh\nexit 0\n", "utf8");
+		await chmod(binPath, 0o755);
+
+		await expect(Effect.runPromise(findExecutable(binName, cwd, cwd))).resolves.toBe(binPath);
+	});
+
 	test("lsp tool returns hover information from a language server", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);
@@ -200,8 +217,9 @@ describe("LSP Extension", () => {
 	});
 
 	test("document open uses language ids for common file types", async () => {
+		const config = createConfig({ FAKE_LSP_REPORT_LANGUAGE_ID: "1" }, [".vue"]);
 		const project = await createProject(
-			createConfig({ FAKE_LSP_REPORT_LANGUAGE_ID: "1" }, [".vue"]),
+			{ servers: { ...config.servers, vue: { disabled: true } } },
 			"main.vue",
 		);
 		runtimes.push(project.runtime);
