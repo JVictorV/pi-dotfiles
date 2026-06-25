@@ -779,7 +779,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 			"Prefer lsp over grep when looking for semantic relationships such as where a symbol is defined or referenced.",
 		],
 		parameters: paramsSchema,
-		async execute(_toolCallId, params: LspParams, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params: LspParams, signal, _onUpdate, ctx) {
 			return await Effect.runPromise(
 				Effect.gen(function* () {
 					const runtime = getRuntime();
@@ -1102,6 +1102,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 					};
 					return { content: [textContent(truncated.text)], details };
 				}),
+				{ signal },
 			);
 		},
 	});

@@ -807,6 +807,32 @@ describe("LSP Extension", () => {
 		});
 	});
 
+	test("lsp tool execution is abortable while waiting for spawn permission", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+		project.confirm.mockImplementation(() => new Promise<boolean>(() => {}));
+		const controller = new AbortController();
+
+		const pending = tool.execute(
+			"tool-call-abort-permission-prompt",
+			{ operation: "hover", filePath: "main.fake", line: 1, character: 1 },
+			controller.signal,
+			undefined,
+			project.ctx,
+		);
+		controller.abort();
+
+		const outcome = await Promise.race([
+			pending.then(
+				() => "resolved",
+				() => "rejected",
+			),
+			wait(250).then(() => "timed-out"),
+		]);
+		expect(outcome).toBe("rejected");
+	});
+
 	test("client shutdown sends save and close lifecycle notifications", async () => {
 		const baseProject = await createProject();
 		const lifecyclePath = join(baseProject.cwd, "lifecycle.json");
