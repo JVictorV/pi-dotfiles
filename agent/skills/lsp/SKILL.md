@@ -39,10 +39,10 @@ If you do not know the exact position, first inspect the file with `read` or use
 
 ```json
 {
-  "operation": "definition",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "definition",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
@@ -52,10 +52,10 @@ Use for imported functions/classes, component references, methods, types, variab
 
 ```json
 {
-  "operation": "references",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "references",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
@@ -65,10 +65,10 @@ Use before changing public APIs, renaming symbols, deleting code, or judging imp
 
 ```json
 {
-  "operation": "hover",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "hover",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
@@ -78,8 +78,8 @@ Use when TypeScript inference, overloads, doc comments, or framework-generated t
 
 ```json
 {
-  "operation": "documentSymbol",
-  "filePath": "src/example.ts"
+	"operation": "documentSymbol",
+	"filePath": "src/example.ts"
 }
 ```
 
@@ -89,9 +89,9 @@ Use to map a large file before reading it deeply.
 
 ```json
 {
-  "operation": "workspaceSymbol",
-  "filePath": "src/example.ts",
-  "query": "UserService"
+	"operation": "workspaceSymbol",
+	"filePath": "src/example.ts",
+	"query": "UserService"
 }
 ```
 
@@ -103,10 +103,10 @@ First prepare the call hierarchy at the symbol:
 
 ```json
 {
-  "operation": "prepareCallHierarchy",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "prepareCallHierarchy",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
@@ -114,19 +114,19 @@ Then ask for callers or callees:
 
 ```json
 {
-  "operation": "incomingCalls",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "incomingCalls",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
 ```json
 {
-  "operation": "outgoingCalls",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8
+	"operation": "outgoingCalls",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8
 }
 ```
 
@@ -136,8 +136,8 @@ Use this for behavior tracing, dependency direction, and safe refactors.
 
 ```json
 {
-  "operation": "diagnostics",
-  "filePath": "src/example.ts"
+	"operation": "diagnostics",
+	"filePath": "src/example.ts"
 }
 ```
 
@@ -147,7 +147,7 @@ Use after edits or while diagnosing type/lint errors. Diagnostics are cached by 
 
 ```json
 {
-  "operation": "status"
+	"operation": "status"
 }
 ```
 
@@ -168,11 +168,11 @@ Before mutating:
 
 ```json
 {
-  "operation": "rename",
-  "filePath": "src/example.ts",
-  "line": 12,
-  "character": 8,
-  "newName": "renamedSymbol"
+	"operation": "rename",
+	"filePath": "src/example.ts",
+	"line": 12,
+	"character": 8,
+	"newName": "renamedSymbol"
 }
 ```
 
@@ -182,8 +182,8 @@ Use for language-aware renames instead of search-and-replace.
 
 ```json
 {
-  "operation": "formatting",
-  "filePath": "src/example.ts"
+	"operation": "formatting",
+	"filePath": "src/example.ts"
 }
 ```
 
@@ -195,9 +195,9 @@ List available actions first:
 
 ```json
 {
-  "operation": "codeAction",
-  "filePath": "src/example.ts",
-  "codeActionKind": "quickfix"
+	"operation": "codeAction",
+	"filePath": "src/example.ts",
+	"codeActionKind": "quickfix"
 }
 ```
 
@@ -205,10 +205,10 @@ Apply an exact title only after seeing it:
 
 ```json
 {
-  "operation": "codeAction",
-  "filePath": "src/example.ts",
-  "codeActionKind": "quickfix",
-  "actionTitle": "Fix all auto-fixable problems"
+	"operation": "codeAction",
+	"filePath": "src/example.ts",
+	"codeActionKind": "quickfix",
+	"actionTitle": "Fix all auto-fixable problems"
 }
 ```
 
@@ -218,8 +218,8 @@ Code actions without workspace edits are not applied.
 
 ```json
 {
-  "operation": "organizeImports",
-  "filePath": "src/example.ts"
+	"operation": "organizeImports",
+	"filePath": "src/example.ts"
 }
 ```
 

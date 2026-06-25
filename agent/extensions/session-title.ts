@@ -18,7 +18,7 @@
  *   falls back to the currently active model when none is available/authed.
  */
 
-import { type Api, complete, type Model } from "@earendil-works/pi-ai";
+import { type Api, complete, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Clock, Effect, Option, Schema } from "effect";
 
