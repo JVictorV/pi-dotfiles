@@ -12,6 +12,7 @@ const GITHUB_REFRESH_INTERVAL = "60 seconds";
 const PrInfo = Schema.Struct({ number: Schema.Number, url: Schema.String });
 const PrInfoJson = Schema.fromJsonString(PrInfo);
 const decodePrInfoJsonOption = Schema.decodeUnknownOption(PrInfoJson);
+const TASK_BRANCH_PATTERN = /^[^/]+\/[^/]+\/([^/]+)$/u;
 
 /** Segment that renders the current Git branch and active GitHub profile. */
 export const repositorySegment: StatusLineSegment = {
@@ -36,7 +37,7 @@ export const repositorySegment: StatusLineSegment = {
 
 		return Option.some({
 			full: branchText + profileText,
-			compact: context.theme.fg("mdLink", branch.name),
+			compact: context.theme.fg("mdLink", compactGitBranchName(branch.name)),
 		});
 	},
 };
@@ -123,6 +124,13 @@ const refreshGitAndBranchPullRequest = Effect.gen(function* () {
 const refreshGitHubStatus = Effect.all([refreshGitHubProfile, refreshPullRequest], {
 	concurrency: "unbounded",
 }).pipe(Effect.asVoid);
+
+/** Compact a Git branch for narrow status-line layouts. */
+export function compactGitBranchName(branchName: string): string {
+	const match = TASK_BRANCH_PATTERN.exec(branchName);
+	const taskId = match?.[1];
+	return taskId ?? branchName;
+}
 
 /** Repository feature: Git branch, GitHub profile, and branch pull request status. */
 export const repositoryFeature: StatusLineFeature = {

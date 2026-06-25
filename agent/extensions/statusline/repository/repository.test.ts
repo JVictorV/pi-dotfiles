@@ -5,10 +5,24 @@ import {
 	classifyGitHubProfileResult,
 	classifyPullRequestFailure,
 	classifyPullRequestResult,
+	compactGitBranchName,
 } from ".";
 import { GitHubProfile, PullRequest } from "./state";
 
 const result = (code: number, stdout = "", stderr = "") => ({ stdout, stderr, code });
+
+describe("Git branch display", () => {
+	test("uses the task id as compact text for type/description/task-id branches", () => {
+		expect(compactGitBranchName("feature/add-status-branch/TASK-9637")).toBe("TASK-9637");
+	});
+
+	test("keeps non-matching branch names unchanged", () => {
+		expect(compactGitBranchName("feature/add-status-branch")).toBe("feature/add-status-branch");
+		expect(compactGitBranchName("feature/add/status/TASK-9637")).toBe(
+			"feature/add/status/TASK-9637",
+		);
+	});
+});
 
 describe("GitHub status source", () => {
 	test("parses the active gh profile login", () => {
