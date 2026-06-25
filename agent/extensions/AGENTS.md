@@ -11,6 +11,7 @@ Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`.
 | --------------------------- | ------------------------------------------------------------------------- |
 | Block/rewrite bash commands | `git-interceptor.ts` (`tool_call` + `isToolCallEventType("bash", event)`) |
 | Custom tool registration    | `stack.ts` (registers `stack` tool; `effect` + `Schema`), `lsp/`          |
+| Tool result safety          | `tool-result-sanitizer.ts` (guards provider-legal errored tool results)   |
 | Status bar / footer widget  | `statusline.ts` (`belowEditor` widget, registered at `session_start`)     |
 | Turn-end side effects       | `notify.ts` (OSC 777 desktop notification)                                |
 | Per-turn "working" message  | `whimsical.ts`                                                            |

@@ -73,10 +73,12 @@ interface StackDetails {
 }
 
 class StackToolError extends Schema.TaggedErrorClass<StackToolError>()("StackToolError", {
+	message: Schema.String,
 	reason: Schema.String,
 }) {}
 
-const stackToolError = (reason: string): StackToolError => StackToolError.make({ reason });
+const stackToolError = (reason: string): StackToolError =>
+	StackToolError.make({ message: reason, reason });
 const textContent = (text: string): TextContent => ({ type: "text", text });
 
 const clampTimeoutSeconds = (timeout: number | undefined): number => {
