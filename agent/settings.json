@@ -1,13 +1,13 @@
 {
 	"lastChangelogVersion": "0.80.2",
 	"theme": "light",
-	"defaultProvider": "openai-codex",
-	"defaultModel": "gpt-5.5",
+	"defaultProvider": "anthropic",
+	"defaultModel": "claude-opus-4-8",
 	"defaultThinkingLevel": "xhigh",
 	"httpIdleTimeoutMs": 60000,
 	"enabledModels": ["openai-codex/gpt-5.5", "anthropic/claude-opus-4-8"],
 	"skills": ["!**/.agents/skills/**"],
 	"hideThinkingBlock": true,
 	"quietStartup": true,
-	"packages": ["npm:pi-mcp-adapter"]
+	"packages": ["npm:pi-mcp-adapter", "npm:@ygncode/pi-web"]
 }

@@ -16,6 +16,11 @@ agent/bin/
 # pi-managed package installs (restored from settings.json "packages")
 agent/npm/
 
+# pi-web runtime artifacts, local DB, and secrets (VAPID private key, push subs)
+agent/pi-web/
+agent/pi-web-version
+agent/pi-web.sqlite*
+
 # pi MCP adapter runtime/secrets
 agent/mcp-oauth/
 agent/mcp-cache.json
