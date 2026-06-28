@@ -25,5 +25,10 @@
 		"noUnusedLocals": false,
 		"noUnusedParameters": false,
 		"noPropertyAccessFromIndexSignature": false
-	}
+	},
+	// web-tools is a vendored extension with its own tsconfig (it needs the DOM lib and
+	// relaxed strictness for the HTML parsing pipeline). It is typechecked via
+	// `typecheck:web-tools`. node_modules must be listed explicitly because specifying
+	// `exclude` overrides TypeScript's default excludes.
+	"exclude": ["node_modules", "agent/extensions/web-tools"]
 }
