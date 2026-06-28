@@ -18,7 +18,8 @@ const DEFAULTS = {
 	fetchFallbackUserAgent: "opencode",
 	searchEnabled: true,
 	searchProvider: "exa",
-	// Public Exa MCP endpoint. Override here if you run your own proxy or need an API key.
+	// Public Exa MCP endpoint. The API key is read from the environment (see
+	// `resolveSearchEndpoint`); override this base URL if you run your own proxy.
 	searchEndpoint: "https://mcp.exa.ai/mcp",
 	searchTimeoutSeconds: 25,
 	searchDefaultMaxResults: 8,
@@ -55,6 +56,30 @@ export function parseEnumSetting<T extends string>(
 	return allowed.includes(normalized) ? normalized : fallback;
 }
 
+/**
+ * Resolve the Exa MCP endpoint, injecting the API key from the environment when present.
+ *
+ * The hosted Exa MCP server authenticates via an `exaApiKey` query parameter. The key is
+ * read from `WEB_TOOLS_EXA_API_KEY` (preferred) or `EXA_API_KEY` so it never lives in tracked
+ * source. An existing `exaApiKey` already on the base URL is left untouched.
+ *
+ * @param baseEndpoint - The configured Exa MCP base URL.
+ * @returns The endpoint with an `exaApiKey` query parameter when a key is available, otherwise unchanged.
+ */
+export function resolveSearchEndpoint(baseEndpoint: string): string {
+	const apiKey = (process.env.WEB_TOOLS_EXA_API_KEY ?? process.env.EXA_API_KEY)?.trim();
+	if (!apiKey) return baseEndpoint;
+	try {
+		const url = new URL(baseEndpoint);
+		if (!url.searchParams.has("exaApiKey")) {
+			url.searchParams.set("exaApiKey", apiKey);
+		}
+		return url.toString();
+	} catch {
+		return baseEndpoint;
+	}
+}
+
 export function getWebToolsSettings(): WebToolsSettings {
 	const fetchDefaultFormat = parseEnumSetting(undefined, FETCH_DEFAULT_FORMAT_VALUES, DEFAULTS.fetchDefaultFormat);
 	const searchProvider = parseEnumSetting(undefined, SEARCH_PROVIDER_VALUES, DEFAULTS.searchProvider);
@@ -72,7 +97,7 @@ export function getWebToolsSettings(): WebToolsSettings {
 		search: {
 			enabled: DEFAULTS.searchEnabled,
 			provider: searchProvider,
-			endpoint: DEFAULTS.searchEndpoint,
+			endpoint: resolveSearchEndpoint(DEFAULTS.searchEndpoint),
 			timeoutSeconds: DEFAULTS.searchTimeoutSeconds,
 			defaultMaxResults: DEFAULTS.searchDefaultMaxResults,
 			defaultDepth: searchDefaultDepth,

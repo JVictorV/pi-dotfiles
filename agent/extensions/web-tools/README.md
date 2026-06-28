@@ -15,7 +15,9 @@ Pi extension that registers two public-web tools:
 > Local deviations from upstream:
 >
 > - search endpoint defaults to the public Exa MCP endpoint
->   (`https://mcp.exa.ai/mcp`) instead of the upstream author's private proxy.
+>   (`https://mcp.exa.ai/mcp`) instead of the upstream author's private proxy, and the Exa
+>   API key is injected client-side from `WEB_TOOLS_EXA_API_KEY` / `EXA_API_KEY`
+>   (`resolveSearchEndpoint` in `settings.ts`).
 > - tests import `test` from `vitest` instead of `node:test`.
 > - the per-extension `package.json` was dropped (this repo is not an npm
 >   workspace); runtime deps live in the root `package.json`.
@@ -74,6 +76,9 @@ Current defaults:
 Behavior notes:
 
 - uses the Exa MCP endpoint
+- the Exa API key is read from the environment (`WEB_TOOLS_EXA_API_KEY`, falling back to
+  `EXA_API_KEY`) and injected as the `exaApiKey` query parameter; without a key the public
+  endpoint is used unauthenticated (rate-limited)
 - Exa currently supports provider depths `auto` and `fast`; tool input `deep` is downgraded to `fast`
 - search responses are limited to `1 MB`
 - provider requests currently send:
