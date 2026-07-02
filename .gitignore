@@ -7,7 +7,8 @@ agent/auth.json
 # Local conversation history
 agent/sessions/
 
-# Local LSP spawn preferences (absolute paths)
+# Local trust decisions and LSP spawn preferences (absolute paths)
+agent/trust.json
 agent/lsp-permissions.json
 
 # Vendored tool binaries (large, platform-specific; pi fetches these)
