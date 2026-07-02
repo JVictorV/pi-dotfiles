@@ -7,6 +7,7 @@ import type { StatusLineSnapshot } from "./state";
 export type StatusLineSegmentId =
 	| "model"
 	| "effort"
+	| "fable-routing"
 	| "directory"
 	| "git"
 	| "pull-request"

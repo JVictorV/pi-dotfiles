@@ -7,6 +7,7 @@ import { makeStatusLineRenderContext } from "./core/render-context";
 import { StatusLineRuntime } from "./core/runtime";
 import { directoryFeature } from "./directory";
 import { effortFeature } from "./effort";
+import { fableRoutingFeature } from "./fable";
 import { lspFeature } from "./lsp";
 import { mcpFeature } from "./mcp";
 import { modelFeature } from "./model";
@@ -16,6 +17,7 @@ import { sessionFeature } from "./session";
 const STATUS_LINE_FEATURES: ReadonlyArray<StatusLineFeature> = [
 	modelFeature,
 	effortFeature,
+	fableRoutingFeature,
 	directoryFeature,
 	repositoryFeature,
 	lspFeature,

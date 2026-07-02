@@ -5,7 +5,11 @@
 	"defaultModel": "claude-opus-4-8",
 	"defaultThinkingLevel": "xhigh",
 	"httpIdleTimeoutMs": 60000,
-	"enabledModels": ["openai-codex/gpt-5.5", "anthropic/claude-opus-4-8"],
+	"enabledModels": [
+		"openai-codex/gpt-5.5",
+		"anthropic/claude-opus-4-8",
+		"anthropic/claude-fable-5"
+	],
 	"skills": ["!**/.agents/skills/**"],
 	"hideThinkingBlock": true,
 	"quietStartup": true,
