@@ -1,8 +1,8 @@
 {
-	"lastChangelogVersion": "0.80.2",
+	"lastChangelogVersion": "0.80.3",
 	"theme": "light",
 	"defaultProvider": "anthropic",
-	"defaultModel": "claude-opus-4-8",
+	"defaultModel": "claude-fable-5",
 	"defaultThinkingLevel": "xhigh",
 	"httpIdleTimeoutMs": 60000,
 	"enabledModels": [
