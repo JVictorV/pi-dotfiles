@@ -7,6 +7,9 @@ agent/auth.json
 # Local conversation history
 agent/sessions/
 
+# herdr subagent orchestration runtime registry/tasks
+agent/herdr-subagents/
+
 # Local trust decisions and LSP spawn preferences (absolute paths)
 agent/trust.json
 agent/lsp-permissions.json
