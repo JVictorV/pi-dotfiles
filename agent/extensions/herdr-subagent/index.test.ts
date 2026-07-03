@@ -45,6 +45,7 @@ const originalEnv = {
 	FAKE_HERDR_TAB_CLOSE_FAIL: process.env.FAKE_HERDR_TAB_CLOSE_FAIL,
 	FAKE_HERDR_TAB_GET_FAIL: process.env.FAKE_HERDR_TAB_GET_FAIL,
 	FAKE_HERDR_WAIT_HANG: process.env.FAKE_HERDR_WAIT_HANG,
+	FAKE_HERDR_AGENT_STATUS: process.env.FAKE_HERDR_AGENT_STATUS,
 };
 
 const restoreEnv = (): void => {
@@ -55,6 +56,7 @@ const restoreEnv = (): void => {
 	setEnv("FAKE_HERDR_TAB_CLOSE_FAIL", originalEnv.FAKE_HERDR_TAB_CLOSE_FAIL);
 	setEnv("FAKE_HERDR_TAB_GET_FAIL", originalEnv.FAKE_HERDR_TAB_GET_FAIL);
 	setEnv("FAKE_HERDR_WAIT_HANG", originalEnv.FAKE_HERDR_WAIT_HANG);
+	setEnv("FAKE_HERDR_AGENT_STATUS", originalEnv.FAKE_HERDR_AGENT_STATUS);
 };
 
 const setEnv = (name: string, value: string | undefined): void => {
@@ -173,7 +175,8 @@ if (args[0] === "tab" && args[1] === "get") {
   process.exit(0);
 }
 if (args[0] === "agent" && args[1] === "get") {
-  writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: args[2], tab_id: "wTest:t2", workspace_id: "wTest", agent_status: "idle", cwd: "/workspace", foreground_cwd: "/workspace" } } });
+  const agentStatus = process.env.FAKE_HERDR_AGENT_STATUS || "idle";
+  writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: args[2], tab_id: "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" } } });
   process.exit(0);
 }
 if (args[0] === "agent" && (args[1] === "list" || args[1] === "focus")) {
@@ -379,6 +382,45 @@ describe("herdr_subagent extension", () => {
 		expect(respawned.content[0]?.text).toContain("Spawned worker-a");
 	});
 
+	test("concurrent spawns all persist in the registry", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		// pi executes sibling tool calls in parallel; spawns must not clobber
+		// each other's registry writes.
+		await Promise.all([
+			tool.execute(
+				"tool-call-a",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+			tool.execute(
+				"tool-call-b",
+				{ action: "spawn", name: "worker-b", agentType: "worker", task: "Task B." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		]);
+
+		const status = await tool.execute(
+			"tool-call-status",
+			{ action: "status" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const text = status.content[0]?.text ?? "";
+		expect(text).toContain("worker-a");
+		expect(text).toContain("worker-b");
+	});
+
 	test("role default thinking is applied and an explicit thinking overrides it", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
@@ -424,15 +466,73 @@ describe("herdr_subagent extension", () => {
 		setEnv("FAKE_HERDR_WAIT_HANG", "1");
 		const tool = await loadTool(agentDir);
 
+		// Non-done statuses still go through the native `herdr wait agent-status`.
 		await expect(
 			tool.execute(
 				"tool-call",
-				{ action: "wait", target: "wTest:p1", timeoutMs: 300 },
+				{ action: "wait", target: "wTest:p1", status: "working", timeoutMs: 300 },
 				undefined,
 				undefined,
 				makeContext("/workspace"),
 			),
 		).rejects.toThrow(/timed out/);
+	}, 8_000);
+
+	test("wait for done resolves when herdr reports done", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		const tool = await loadTool(agentDir);
+
+		const result = await tool.execute(
+			"tool-call",
+			{ action: "wait", target: "wTest:p1", timeoutMs: 2_000 },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		expect(result.content[0]?.text).toContain("finished");
+	}, 8_000);
+
+	test("wait for done resolves when the finished pane reports idle (already viewed)", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		// Herdr reports `idle`, not `done`, once a finished pane has been viewed.
+		setEnv("FAKE_HERDR_AGENT_STATUS", "idle");
+		const tool = await loadTool(agentDir);
+
+		const result = await tool.execute(
+			"tool-call",
+			{ action: "wait", target: "wTest:p1", timeoutMs: 2_000 },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		expect(result.content[0]?.text).toContain("finished");
+		expect(result.content[0]?.text).toContain("idle");
+	}, 8_000);
+
+	test("wait for done times out while the subagent is still working", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const tool = await loadTool(agentDir);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{ action: "wait", target: "wTest:p1", timeoutMs: 500 },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/timed out .* last agent status: working/);
 	}, 8_000);
 
 	test("close still fails when the tab exists but herdr close fails", async () => {

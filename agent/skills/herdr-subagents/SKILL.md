@@ -99,7 +99,7 @@ Then inspect before trusting the result:
 { "action": "inspect", "target": "investigate-tests", "lines": 200 }
 ```
 
-Herdr's `done` status means "finished but not yet viewed". If a human is watching the subagent's tab, the status can go straight to `idle`, so a timed-out `done` wait does not mean failure — inspect the panel, or re-wait with `"status": "idle"`.
+Herdr's raw `done` status means "finished but not yet viewed"; a viewed pane reports `idle` instead. The tool's `done` wait handles this: it polls and completes on either `done` or a stable `idle`, so it works even when a human is watching the subagent's tab. A `done` wait timing out therefore means the subagent is genuinely still working (or blocked) — inspect the panel.
 
 Focus a panel:
 
@@ -152,7 +152,7 @@ Deliverable:
 
 Failed actions reject with an error message; read it before retrying.
 
-- `wait` timeout: not fatal. Inspect the panel — the subagent may have finished (a viewed pane reports `idle`, not `done`) or may still be working. Re-wait or ask the user.
+- `wait` timeout: not fatal. The timeout message includes the last observed agent status. Inspect the panel — the subagent may still be working or blocked — then re-wait or ask the user.
 - `spawn` fails with "already registered": `close` that name first (close also cleans up stale entries whose tab is already gone) or pick a new name.
 - Other herdr failures (exit codes, timeouts): run `status` to re-sync pane ids, then retry once. Do not blindly re-`spawn` — check whether the panel was actually created first.
 

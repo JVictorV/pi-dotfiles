@@ -46,6 +46,8 @@ const AGENT_SCOPES: ReadonlyArray<AgentScope> = ["user", "project", "both"];
 
 const DEFAULT_INSPECT_LINES = 120;
 const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
+const WAIT_POLL_INTERVAL_MS = 2_000;
+const WAIT_IDLE_CONFIRMATIONS = 2;
 const HERDR_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 2_000;
 const RUNTIME_DIR = path.join(getAgentDir(), "herdr-subagents");
@@ -159,6 +161,24 @@ const rejectAction = (message: string): Promise<never> =>
 const textContent = (text: string): TextContent => ({ type: "text", text });
 
 const nowIso = (): string => new Date().toISOString();
+
+const sleep = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
+	new Promise((resolve) => {
+		const onAbort = (): void => {
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		timer.unref?.();
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -436,11 +456,43 @@ const readRegistry = async (): Promise<Registry> => {
 
 const writeRegistry = async (registry: Registry): Promise<void> => {
 	await fs.mkdir(RUNTIME_DIR, { recursive: true });
-	await fs.writeFile(REGISTRY_PATH, `${JSON.stringify(registry, null, 2)}\n`, {
+	// Write-then-rename so a concurrent readRegistry never sees a torn file
+	// (a torn read parses as an empty registry and would drop entries on the
+	// next write).
+	const tempPath = `${REGISTRY_PATH}.tmp-${randomUUID()}`;
+	await fs.writeFile(tempPath, `${JSON.stringify(registry, null, 2)}\n`, {
 		encoding: "utf8",
 		mode: 0o600,
 	});
+	await fs.rename(tempPath, REGISTRY_PATH);
 };
+
+let registryLock: Promise<unknown> = Promise.resolve();
+
+const withRegistryLock = <T>(operation: () => Promise<T>): Promise<T> => {
+	const next = registryLock.then(operation, operation);
+	registryLock = next.then(
+		() => undefined,
+		() => undefined,
+	);
+	return next;
+};
+
+/**
+ * Serialized read-modify-write for the registry. Sibling tool calls run in
+ * parallel in pi, so every mutation must re-read the current registry inside
+ * the lock; snapshotting entries earlier and writing them back would drop
+ * concurrent spawns (last writer wins).
+ */
+const mutateRegistry = (
+	mutate: (entries: Record<string, RegistryEntry>) => Record<string, RegistryEntry>,
+): Promise<Registry> =>
+	withRegistryLock(async () => {
+		const current = await readRegistry();
+		const nextRegistry: Registry = { version: 1, entries: mutate({ ...current.entries }) };
+		await writeRegistry(nextRegistry);
+		return nextRegistry;
+	});
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -622,7 +674,9 @@ const resolvePane = async (
 					workspaceId: getString(agent, "workspace_id") ?? entry.workspaceId,
 					updatedAt: nowIso(),
 				};
-				await writeRegistry({ version: 1, entries: { ...registry.entries, [target]: updated } });
+				await mutateRegistry((entries) =>
+					entries[entry.name] ? { ...entries, [entry.name]: updated } : entries,
+				);
 			}
 			return { name: entry?.name ?? target, paneId, liveAgent: agent };
 		}
@@ -634,9 +688,12 @@ const resolvePane = async (
 	if (target.includes(":p") || /^\w+-p\d+$/.test(target)) {
 		return { name: target, paneId: target };
 	}
+	const known = Object.keys(registry.entries);
 	return {
 		ok: false,
-		message: `Could not resolve subagent or pane target: ${target}`,
+		message: `Could not resolve subagent or pane target: ${target}. ${
+			known.length > 0 ? `Known subagents: ${known.join(", ")}.` : "No subagents are registered."
+		} Run the status action to list live agents and pane ids.`,
 		stdout: "",
 		stderr: "",
 		code: null,
@@ -653,6 +710,7 @@ const commandStatus = async (signal: AbortSignal | undefined) => {
 	const result = getRecord(response, "result");
 	const liveAgents = result ? getArray(result, "agents").filter(isRecord) : [];
 	const nextEntries: Record<string, RegistryEntry> = { ...registry.entries };
+	const liveUpdates: Record<string, RegistryEntry> = {};
 	const seenNames = new Set<string>();
 	const rows: string[] = [];
 
@@ -669,7 +727,7 @@ const commandStatus = async (signal: AbortSignal | undefined) => {
 		);
 		if (matched && paneId) {
 			seenNames.add(matched.name);
-			nextEntries[matched.name] = {
+			const updated: RegistryEntry = {
 				...matched,
 				target: terminalId ?? paneId,
 				terminalId: terminalId ?? matched.terminalId,
@@ -678,6 +736,8 @@ const commandStatus = async (signal: AbortSignal | undefined) => {
 				workspaceId: getString(agent, "workspace_id") ?? matched.workspaceId,
 				updatedAt: nowIso(),
 			};
+			nextEntries[matched.name] = updated;
+			liveUpdates[matched.name] = updated;
 		}
 		const name = matched?.name ?? "-";
 		const status = getString(agent, "agent_status") ?? "unknown";
@@ -694,7 +754,14 @@ const commandStatus = async (signal: AbortSignal | undefined) => {
 		}
 	}
 
-	await writeRegistry({ version: 1, entries: nextEntries });
+	await mutateRegistry((entries) => {
+		for (const [name, updated] of Object.entries(liveUpdates)) {
+			if (entries[name]) {
+				entries[name] = updated;
+			}
+		}
+		return entries;
+	});
 	const text =
 		rows.length > 0
 			? `F NAME                   STATUS   PANE         CWD\n${rows.join("\n")}`
@@ -855,11 +922,7 @@ const commandSpawn = async (
 		createdAt: nowIso(),
 		updatedAt: nowIso(),
 	};
-	const nextRegistry: Registry = {
-		version: 1,
-		entries: { ...registry.entries, [params.name]: entry },
-	};
-	await writeRegistry(nextRegistry);
+	const nextRegistry = await mutateRegistry((entries) => ({ ...entries, [entry.name]: entry }));
 
 	return {
 		content: [
@@ -920,6 +983,58 @@ const commandSend = async (params: HerdrSubagentParams, signal: AbortSignal | un
 	};
 };
 
+/**
+ * Wait until a subagent has finished its turn.
+ *
+ * Herdr's `done` agent status means "finished and not yet viewed": pi only ever
+ * reports `working`/`blocked`/`idle`, and herdr synthesizes `done` for an idle
+ * pane nobody has looked at. A finished pane that is visible or already viewed
+ * reports `idle` directly, so `herdr wait agent-status --status done` can block
+ * for the full timeout even though the subagent finished long ago. Poll the
+ * agent status instead and accept either `done` or a stable `idle`.
+ *
+ * `idle` must be observed on {@link WAIT_IDLE_CONFIRMATIONS} consecutive polls
+ * because pi publishes a transient `idle` at session start, before the spawned
+ * task begins working.
+ */
+const waitForFinished = async (
+	resolved: ResolvedPane,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+): Promise<{ readonly observed: "done" | "idle" } | ActionFailure> => {
+	const deadline = Date.now() + timeoutMs;
+	// Scale the poll interval down for short timeouts so a quick wait can still
+	// confirm consecutive idle polls before the deadline.
+	const pollMs = Math.max(100, Math.min(WAIT_POLL_INTERVAL_MS, Math.floor(timeoutMs / 5)));
+	let consecutiveIdle = 0;
+	let lastStatus = "unknown";
+	for (;;) {
+		if (signal?.aborted) {
+			return actionFailure("wait was aborted.");
+		}
+		const agent = await liveAgent(resolved.paneId, signal);
+		lastStatus = agent ? (getString(agent, "agent_status") ?? "unknown") : "unknown";
+		if (lastStatus === "done") {
+			return { observed: "done" };
+		}
+		if (lastStatus === "idle") {
+			consecutiveIdle += 1;
+			if (consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS) {
+				return { observed: "idle" };
+			}
+		} else {
+			consecutiveIdle = 0;
+		}
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) {
+			return actionFailure(
+				`wait timed out after ${timeoutMs}ms; last agent status: ${lastStatus}. Inspect ${resolved.name} to check progress, then re-wait.`,
+			);
+		}
+		await sleep(Math.min(pollMs, remaining), signal);
+	}
+};
+
 const commandWait = async (params: HerdrSubagentParams, signal: AbortSignal | undefined) => {
 	const target = requireTarget(params);
 	if (!target) {
@@ -932,6 +1047,24 @@ const commandWait = async (params: HerdrSubagentParams, signal: AbortSignal | un
 	}
 	const status = params.status ?? "done";
 	const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+	if (status === "done") {
+		const outcome = await waitForFinished(resolved, timeoutMs, signal);
+		if (isActionFailure(outcome)) {
+			return outcome;
+		}
+		const viaIdle =
+			outcome.observed === "idle"
+				? " (reported idle: the pane was already viewed or finished before the wait)"
+				: "";
+		return {
+			content: [
+				textContent(
+					`${resolved.name} finished${viaIdle}. Inspect the panel before trusting the result.`,
+				),
+			],
+			details: { action: "wait", resolved, status, observed: outcome.observed },
+		};
+	}
 	const outcome = await runHerdr(
 		["wait", "agent-status", resolved.paneId, "--status", status, "--timeout", String(timeoutMs)],
 		signal,
@@ -973,10 +1106,11 @@ const tabExists = async (tabId: string, signal: AbortSignal | undefined): Promis
 	return !isCommandFailure(response);
 };
 
-const removeRegistryEntry = async (registry: Registry, name: string): Promise<void> => {
-	const nextEntries = { ...registry.entries };
-	delete nextEntries[name];
-	await writeRegistry({ version: 1, entries: nextEntries });
+const removeRegistryEntry = async (name: string): Promise<void> => {
+	await mutateRegistry((entries) => {
+		delete entries[name];
+		return entries;
+	});
 };
 
 const findRegistryEntry = (registry: Registry, target: string): RegistryEntry | undefined => {
@@ -1009,7 +1143,7 @@ const commandClose = async (params: HerdrSubagentParams, signal: AbortSignal | u
 			if (await tabExists(entry.tabId, signal)) {
 				return actionFailure(commandFailureText(outcome));
 			}
-			await removeRegistryEntry(registry, entry.name);
+			await removeRegistryEntry(entry.name);
 			return {
 				content: [
 					textContent(
@@ -1019,7 +1153,7 @@ const commandClose = async (params: HerdrSubagentParams, signal: AbortSignal | u
 				details: { action: "close", entry, stale: true },
 			};
 		}
-		await removeRegistryEntry(registry, entry.name);
+		await removeRegistryEntry(entry.name);
 		return {
 			content: [textContent(`Closed tab ${entry.tabId} for ${entry.name}.`)],
 			details: { action: "close", entry },
@@ -1037,7 +1171,7 @@ const commandClose = async (params: HerdrSubagentParams, signal: AbortSignal | u
 	// so the closed pane does not leave a permanently "missing" name behind.
 	const paneEntry = entry ?? findRegistryEntry(registry, resolved.paneId);
 	if (paneEntry) {
-		await removeRegistryEntry(registry, paneEntry.name);
+		await removeRegistryEntry(paneEntry.name);
 	}
 	return {
 		content: [textContent(`Closed pane ${resolved.paneId}.`)],
