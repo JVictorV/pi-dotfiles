@@ -68,6 +68,13 @@ const messages = [
 	"Following the vibes...",
 	"Bribing the dealer...",
 	"Asking the little tiger to release the card...",
+	"Superboosting the odds of this working...",
+	"Asking SuperSocial for a second opinion...",
+	"Locating our SuperAdvantage...",
+	"Prefixing everything with Super...",
+	"Verifying these odds are, in fact, Super...",
+	"Escalating from odds to SuperOdds...",
+	"Consulting the SuperSocial comment section (mistake)...",
 ];
 
 function pickRandom(): string {
