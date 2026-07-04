@@ -113,6 +113,31 @@ describe("buildOverview", () => {
 		expect(result.rows[0]).not.toHaveProperty("paneId");
 	});
 
+	test("copies model and thinking from the registry entry onto the row", () => {
+		const result = buildOverview(
+			[
+				entry({
+					name: "worker",
+					terminalId: "term-1",
+					model: "openai-codex/gpt-5.5",
+					thinking: "high",
+				}),
+				entry({ name: "bare", terminalId: "term-2" }),
+			],
+			[
+				agent({ terminal_id: "term-1", agent_status: "working" }),
+				agent({ terminal_id: "term-2", agent_status: "working" }),
+			],
+			BASE_TIME,
+		);
+
+		expect(result.rows.find((row) => row.name === "worker")).toMatchObject({
+			model: "openai-codex/gpt-5.5",
+			thinking: "high",
+		});
+		expect(result.rows.find((row) => row.name === "bare")).not.toHaveProperty("model");
+	});
+
 	test("matches by hints only for terminal-id-less entries", () => {
 		const result = buildOverview(
 			[
@@ -266,6 +291,41 @@ describe("renderOverview", () => {
 
 		expect(lines).toHaveLength(4);
 		expect(lines.at(-1)).toBe("  [dim]+2 more[/dim]");
+	});
+
+	test("renders a dim model·effort column with the provider prefix stripped", () => {
+		const lines = renderOverview(
+			overview([
+				{
+					name: "worker",
+					kind: "working",
+					elapsedMs: 45_000,
+					model: "openai-codex/gpt-5.5",
+					thinking: "high",
+				},
+				{ name: "critic", kind: "working", elapsedMs: 45_000, model: "anthropic/claude-opus-4-8" },
+				{ name: "bare", kind: "working", elapsedMs: 45_000 },
+			]),
+			tagTheme,
+		);
+
+		const worker = lines.find((line) => line.includes("worker"));
+		expect(worker).toContain("[dim]gpt-5.5·high");
+		expect(worker).not.toContain("openai-codex");
+		const critic = lines.find((line) => line.includes("critic"));
+		expect(critic).toContain("[dim]claude-opus-4-8");
+		// Rows without metadata still get the padded column so elapsed stays aligned.
+		const bare = lines.find((line) => line.includes("bare"));
+		expect(bare).toContain("[dim]");
+	});
+
+	test("omits the model·effort column when no visible row has metadata", () => {
+		const lines = renderOverview(
+			overview([{ name: "worker", kind: "working", elapsedMs: 45_000 }]),
+			tagTheme,
+		);
+
+		expect(lines[1]).toContain("[text]worker[/text]  [dim]45s[/dim]");
 	});
 
 	test("humanizes elapsed durations", () => {

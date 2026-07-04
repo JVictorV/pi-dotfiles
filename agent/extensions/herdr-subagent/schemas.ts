@@ -13,6 +13,7 @@ export const RegistryEntrySchema = Schema.Struct({
 	label: Schema.String,
 	agentType: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
+	thinking: Schema.optional(Schema.String),
 	taskFile: Schema.String,
 	systemPromptFile: Schema.optional(Schema.String),
 	createdAt: Schema.String,

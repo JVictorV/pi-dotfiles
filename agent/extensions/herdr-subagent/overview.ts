@@ -17,6 +17,10 @@ export interface OverviewRow {
 	readonly name: string;
 	readonly kind: OverviewRowKind;
 	readonly elapsedMs?: number;
+	/** pi model the subagent was spawned with, when explicitly set. */
+	readonly model?: string;
+	/** pi thinking level the subagent was spawned with, when explicitly set. */
+	readonly thinking?: string;
 }
 
 /** Overview model consumed by the widget renderer. */
@@ -160,6 +164,21 @@ const formatElapsed = (elapsedMs: number | undefined): string => {
 const truncateName = (name: string): string =>
 	name.length > NAME_MAX_WIDTH ? `${name.slice(0, NAME_MAX_WIDTH - 1)}…` : name;
 
+const META_MAX_WIDTH = 24;
+
+/** Strip the provider prefix from a model id: `openai-codex/gpt-5.5` → `gpt-5.5`. */
+const shortModel = (model: string): string => model.slice(model.lastIndexOf("/") + 1);
+
+/** Compact `model·effort` label for a row; empty when neither is known. */
+const metaFor = (row: OverviewRow): string => {
+	const parts = [
+		...(row.model === undefined ? [] : [shortModel(row.model)]),
+		...(row.thinking === undefined ? [] : [row.thinking]),
+	];
+	const meta = parts.join("·");
+	return meta.length > META_MAX_WIDTH ? `${meta.slice(0, META_MAX_WIDTH - 1)}…` : meta;
+};
+
 const paint = (
 	theme: OverviewTheme,
 	role: OverviewThemeRole,
@@ -195,6 +214,8 @@ export const buildOverview = (
 			name: entry.name,
 			kind,
 			elapsedMs: elapsedSinceCreated(entry, nowMs),
+			...(entry.model !== undefined ? { model: entry.model } : {}),
+			...(entry.thinking !== undefined ? { thinking: entry.thinking } : {}),
 		});
 	}
 
@@ -244,18 +265,22 @@ export const renderOverview = (
 		(widest, row) => Math.max(widest, truncateName(row.name).length),
 		0,
 	);
+	// Skip the model·effort column entirely when no visible row has metadata,
+	// so bare spawns keep the tighter two-column layout.
+	const metaWidth = visibleRows.reduce((widest, row) => Math.max(widest, metaFor(row).length), 0);
 
 	const lines = [header];
 	for (const row of visibleRows) {
 		const style = KIND_STYLES[row.kind];
 		const glyph = paint(theme, style.glyphRole, style.bold, style.glyph);
 		const name = paint(theme, style.nameRole, style.bold, truncateName(row.name).padEnd(nameWidth));
+		const meta = metaWidth > 0 ? `  ${theme.fg("dim", metaFor(row).padEnd(metaWidth))}` : "";
 		const elapsed = theme.fg(
 			"dim",
 			formatElapsed(row.elapsedMs === undefined ? undefined : row.elapsedMs + ageMs),
 		);
 		const suffix = row.kind === "blocked" ? `  ${paint(theme, "warning", true, "blocked")}` : "";
-		lines.push(`  ${glyph} ${name}  ${elapsed}${suffix}`);
+		lines.push(`  ${glyph} ${name}${meta}  ${elapsed}${suffix}`);
 	}
 
 	const moreCount = sortedRows.length - visibleRows.length;
