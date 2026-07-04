@@ -1,11 +1,22 @@
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Layer, ManagedRuntime } from "effect";
+import { Clock, Effect, Layer, ManagedRuntime } from "effect";
 
 import { executeAction } from "./actions";
+import {
+	herdrSubagentName,
+	herdrSubagentResultSocket,
+	isHerdrSubagentSession,
+	isRunningInsideHerdr,
+} from "./herdr-cli";
 import { createSubagentNotificationManager } from "./notifications";
 import { registerOverviewWidget } from "./overview-widget";
+import {
+	notifySubagentFinished,
+	startSubagentRpcServer,
+	type SubagentRpcServer,
+} from "./subagent-rpc";
 import {
 	ACTIONS,
 	AGENT_SCOPES,
@@ -46,6 +57,39 @@ const isRegistryEntry = (value: unknown): value is RegistryEntry =>
 const isResolvedPane = (value: unknown): value is ResolvedPane =>
 	isRecord(value) && typeof value.name === "string" && typeof value.paneId === "string";
 
+type TextPart = { readonly type: "text"; readonly text: string };
+
+type AssistantMessageLike = {
+	readonly role: "assistant";
+	readonly content: ReadonlyArray<unknown>;
+};
+
+const isTextPart = (value: unknown): value is TextPart =>
+	isRecord(value) && value.type === "text" && typeof value.text === "string";
+
+const isAssistantMessageLike = (value: unknown): value is AssistantMessageLike =>
+	isRecord(value) && value.role === "assistant" && Array.isArray(value.content);
+
+const discardPromise = (promise: Promise<unknown>): void => {
+	promise.then(
+		() => undefined,
+		() => undefined,
+	);
+};
+
+const finalAssistantText = (event: { readonly messages: ReadonlyArray<unknown> }): string => {
+	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+		const message = event.messages[index];
+		if (isAssistantMessageLike(message)) {
+			return message.content
+				.filter(isTextPart)
+				.map((part) => part.text)
+				.join("");
+		}
+	}
+	return "";
+};
+
 const actionDetails = (result: ToolResult): ActionDetails | undefined => {
 	const details = result.details;
 	if (!isRecord(details) || typeof details.action !== "string") {
@@ -75,10 +119,75 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 	const notifications = createSubagentNotificationManager(pi, (effect, options) =>
 		nodeRuntime.runPromise(effect, options),
 	);
+	let rpcServer: SubagentRpcServer | undefined;
+	let rpcServerStarting = false;
+	let resultSocketPath: string | undefined;
 	registerOverviewWidget(pi, (effect) => nodeRuntime.runPromise(effect));
 	if (typeof pi.on === "function") {
+		pi.on("session_start", () => {
+			if (!isRunningInsideHerdr() || isHerdrSubagentSession() || rpcServer || rpcServerStarting) {
+				return;
+			}
+			rpcServerStarting = true;
+			discardPromise(
+				nodeRuntime
+					.runPromise(
+						startSubagentRpcServer({
+							onFinished(payload) {
+								notifications.deliverExternal(payload.name, {
+									status: payload.status,
+									finalMessage: payload.finalMessage,
+									sentAtMs: payload.sentAtMs,
+								});
+							},
+						}),
+					)
+					.then(
+						(server) => {
+							rpcServerStarting = false;
+							rpcServer = server;
+							resultSocketPath = server.socketPath;
+						},
+						() => {
+							rpcServerStarting = false;
+						},
+					),
+			);
+		});
+		pi.on("agent_end", (event) => {
+			const socketPath = herdrSubagentResultSocket();
+			const name = herdrSubagentName();
+			if (!isHerdrSubagentSession() || !socketPath || !name) {
+				return;
+			}
+			const finalMessage = finalAssistantText(event).trim();
+			if (finalMessage.length === 0) {
+				return;
+			}
+			discardPromise(
+				Effect.runPromise(
+					Effect.gen(function* () {
+						const sentAtMs = yield* Clock.currentTimeMillis;
+						yield* notifySubagentFinished({
+							socketPath,
+							name,
+							status: "done",
+							finalMessage,
+							sentAtMs,
+						});
+					}),
+				),
+			);
+		});
 		pi.on("session_shutdown", () => {
 			notifications.cancelAll();
+			const server = rpcServer;
+			rpcServer = undefined;
+			rpcServerStarting = false;
+			resultSocketPath = undefined;
+			if (server) {
+				discardPromise(server.close());
+			}
 		});
 	}
 	pi.registerTool({
@@ -184,36 +293,38 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			),
 		}),
 		execute(_toolCallId, params: HerdrSubagentParams, signal, _onUpdate, ctx) {
-			return nodeRuntime.runPromise(executeAction(params, ctx), { signal }).then((result) => {
-				const details = actionDetails(result);
-				if (details?.action === "spawn" && params.notify !== false) {
-					notifications.arm({
-						name: details.entry.name,
-						paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
-						summarySource: params.task ?? "spawned subagent task",
-					});
-				}
-				if (details?.action === "send") {
-					if (params.notify === false) {
-						notifications.cancel(details.resolved.paneId);
-					} else {
+			return nodeRuntime
+				.runPromise(executeAction(params, ctx, { resultSocketPath }), { signal })
+				.then((result) => {
+					const details = actionDetails(result);
+					if (details?.action === "spawn" && params.notify !== false) {
 						notifications.arm({
-							name: details.resolved.name,
-							paneId: details.resolved.paneId,
-							summarySource: params.message ?? "subagent follow-up message",
+							name: details.entry.name,
+							paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
+							summarySource: params.task ?? "spawned subagent task",
 						});
 					}
-				}
-				if (details?.action === "wait") {
-					notifications.cancel(details.resolved.paneId);
-				}
-				if (details?.action === "close") {
-					notifications.cancel(
-						details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
-					);
-				}
-				return result;
-			});
+					if (details?.action === "send") {
+						if (params.notify === false) {
+							notifications.cancel(details.resolved.paneId);
+						} else {
+							notifications.arm({
+								name: details.resolved.name,
+								paneId: details.resolved.paneId,
+								summarySource: params.message ?? "subagent follow-up message",
+							});
+						}
+					}
+					if (details?.action === "wait") {
+						notifications.cancel(details.resolved.paneId);
+					}
+					if (details?.action === "close") {
+						notifications.cancel(
+							details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
+						);
+					}
+					return result;
+				});
 		},
 	});
 }

@@ -13,6 +13,8 @@ const WATCH_STARTUP_IDLE_STABILITY_MS = 10_000;
 const NOTIFICATION_TAIL_LINES = 60;
 const CUSTOM_MESSAGE_TYPE = "herdr-subagent-result";
 
+type NotificationPi = Pick<ExtensionAPI, "sendMessage">;
+
 type NotificationRequirements = ChildProcessSpawner | FileSystem | Path;
 // SAFETY: This boundary mirrors ManagedRuntime.runPromise, which accepts effects with any
 // error channel and turns failures into rejected Promises. Watcher internals still model expected
@@ -38,10 +40,23 @@ interface WatchedNotification extends ArmedNotification {
 	readonly paneTail: string;
 }
 
+interface ExternalNotification extends ArmedNotification {
+	readonly state: NotificationState;
+	readonly finalMessage: string;
+}
+
+interface ExternalNotificationResult {
+	readonly status: NotificationState;
+	readonly finalMessage: string;
+	readonly sentAtMs: number;
+}
+
 interface WatcherSlot {
 	readonly key: string;
 	readonly name: string;
 	readonly paneId: string;
+	readonly summarySource: string;
+	readonly armedAtMs: number;
 	readonly controller: AbortController;
 }
 
@@ -49,6 +64,8 @@ interface WatcherSlot {
 export interface SubagentNotificationManager {
 	/** Arm or re-arm one notification watcher for a subagent turn. */
 	arm(notification: ArmedNotification): void;
+	/** Deliver an external RPC result if, and only if, the matching watcher is armed. */
+	deliverExternal(name: string, result: ExternalNotificationResult): void;
 	/** Cancel any watcher matching a subagent name, pane id, or tool target. */
 	cancel(target: string | undefined): void;
 	/** Cancel all active notification watchers. */
@@ -90,6 +107,19 @@ const envelopeFor = (notification: WatchedNotification): string => {
 <pane_tail>
 ${escapeXmlText(notification.paneTail)}
 </pane_tail>
+</subagent_result>
+
+${guidanceFor(notification.state)}`;
+};
+
+const externalEnvelopeFor = (notification: ExternalNotification): string => {
+	const sourceSummary = summarizeSource(notification.summarySource);
+	const summary = `Subagent ${notification.name} ${stateVerb(notification.state)}: ${sourceSummary}`;
+	return `<subagent_result name="${escapeXmlText(notification.name)}" state="${notification.state}" pane="${escapeXmlText(notification.paneId)}">
+<summary>${escapeXmlText(summary)}</summary>
+<final_message>
+${escapeXmlText(notification.finalMessage)}
+</final_message>
 </subagent_result>
 
 ${guidanceFor(notification.state)}`;
@@ -172,22 +202,24 @@ const watchSubagent: (
 	},
 );
 
-const deliverNotification = (
-	pi: ExtensionAPI,
-	notification: WatchedNotification,
+const sendNotification = (
+	pi: NotificationPi,
+	notification: ArmedNotification & { readonly state: NotificationState },
+	content: string,
+	observed: ObservedState | "rpc",
 ): Effect.Effect<void, never> =>
 	Effect.try({
 		try: () => {
 			pi.sendMessage(
 				{
 					customType: CUSTOM_MESSAGE_TYPE,
-					content: envelopeFor(notification),
+					content,
 					display: true,
 					details: {
 						name: notification.name,
 						paneId: notification.paneId,
 						state: notification.state,
-						observed: notification.observed,
+						observed,
 					},
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
@@ -196,9 +228,21 @@ const deliverNotification = (
 		catch: () => undefined,
 	}).pipe(Effect.catch(() => Effect.void));
 
+const deliverWatchedNotification = (
+	pi: NotificationPi,
+	notification: WatchedNotification,
+): Effect.Effect<void, never> =>
+	sendNotification(pi, notification, envelopeFor(notification), notification.observed);
+
+const deliverExternalNotification = (
+	pi: NotificationPi,
+	notification: ExternalNotification,
+): Effect.Effect<void, never> =>
+	sendNotification(pi, notification, externalEnvelopeFor(notification), "rpc");
+
 /** Create a session-scoped manager for background herdr subagent notifications. */
 export const createSubagentNotificationManager = (
-	pi: ExtensionAPI,
+	pi: NotificationPi,
 	runPromise: RunPromise,
 ): SubagentNotificationManager => {
 	const watchers = new Map<string, WatcherSlot>();
@@ -221,6 +265,8 @@ export const createSubagentNotificationManager = (
 				key,
 				name: notification.name,
 				paneId: notification.paneId,
+				summarySource: notification.summarySource,
+				armedAtMs: Date.now(),
 				controller,
 			};
 			watchers.set(key, slot);
@@ -230,13 +276,34 @@ export const createSubagentNotificationManager = (
 						return;
 					}
 					watchers.delete(key);
-					Effect.runSync(deliverNotification(pi, watched));
+					Effect.runSync(deliverWatchedNotification(pi, watched));
 				})
 				.catch(() => {
 					if (watchers.get(key) === slot) {
 						watchers.delete(key);
 					}
 				});
+		},
+		deliverExternal(name, result) {
+			const key = watcherKey(name);
+			const slot = watchers.get(key);
+			if (!slot) {
+				return;
+			}
+			if (result.sentAtMs < slot.armedAtMs) {
+				return;
+			}
+			slot.controller.abort();
+			watchers.delete(key);
+			Effect.runSync(
+				deliverExternalNotification(pi, {
+					name: slot.name,
+					paneId: slot.paneId,
+					summarySource: slot.summarySource,
+					state: result.status,
+					finalMessage: truncateForModel(result.finalMessage).text,
+				}),
+			);
 		},
 		cancel(target) {
 			if (!target) {

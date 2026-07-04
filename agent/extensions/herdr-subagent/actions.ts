@@ -56,6 +56,10 @@ import type {
 
 type HerdrActionRequirements = ChildProcessSpawner | FileSystem | Path;
 
+interface HerdrActionEnvironment {
+	readonly resultSocketPath?: string;
+}
+
 const DEFAULT_INSPECT_LINES = 120;
 const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
 const WAIT_POLL_INTERVAL_MS = 2_000;
@@ -218,8 +222,9 @@ const cleanupFailedSpawn: (
 const commandSpawn: (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
+	environment: HerdrActionEnvironment,
 ) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
-	function* (params, ctx) {
+	function* (params, ctx, environment) {
 		const rawName = params.name;
 		const task = params.task;
 		if (!rawName || !task) {
@@ -306,6 +311,9 @@ const commandSpawn: (
 			HerdrSubagentError,
 			HerdrActionRequirements
 		> = Effect.gen(function* () {
+			const resultSocketEnv = environment.resultSocketPath
+				? ["--env", `HERDR_SUBAGENT_RESULT_SOCK=${environment.resultSocketPath}`]
+				: [];
 			const createArgs = [
 				"tab",
 				"create",
@@ -319,6 +327,7 @@ const commandSpawn: (
 				`HERDR_SUBAGENT_NAME=${name}`,
 				"--env",
 				`HERDR_SUBAGENT_ALLOW_SPAWN=${allowSpawn ? "1" : "0"}`,
+				...resultSocketEnv,
 				"--no-focus",
 			];
 			const created = yield* decodeHerdrJson(createArgs, decodeTabCreateResponse);
@@ -654,6 +663,7 @@ const commandClose: (
 const runAction = (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
+	environment: HerdrActionEnvironment,
 ): Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> => {
 	switch (params.action) {
 		case "status":
@@ -661,7 +671,7 @@ const runAction = (
 		case "agent-types":
 			return commandAgentTypes(params, ctx.cwd);
 		case "spawn":
-			return commandSpawn(params, ctx);
+			return commandSpawn(params, ctx, environment);
 		case "inspect":
 			return commandInspect(params);
 		case "send":
@@ -680,8 +690,9 @@ const runAction = (
 export const executeAction: (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
+	environment?: HerdrActionEnvironment,
 ) => Effect.Effect<ToolResult, HerdrSubagentToolError, HerdrActionRequirements> = Effect.fnUntraced(
-	function* (params, ctx) {
+	function* (params, ctx, environment = {}) {
 		if (!isRunningInsideHerdr()) {
 			return yield* new HerdrNotAvailable({
 				message:
@@ -689,7 +700,7 @@ export const executeAction: (
 			});
 		}
 		yield* guardSubagentRecursion(params.action);
-		return yield* runAction(params, ctx);
+		return yield* runAction(params, ctx, environment);
 	},
 	Effect.mapError(toToolError),
 );

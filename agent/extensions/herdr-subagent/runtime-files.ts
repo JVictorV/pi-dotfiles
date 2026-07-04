@@ -104,7 +104,8 @@ export const deleteRuntimeFiles: (
 	}
 });
 
-const safeFilePart = (value: string): string => {
+/** Convert an arbitrary value into a conservative filesystem path segment. */
+export const safeFilePart = (value: string): string => {
 	const cleaned = value.replaceAll(/[^a-zA-Z0-9._-]+/g, "-").replaceAll(/^-+|-+$/g, "");
 	return cleaned.length > 0 ? cleaned : "subagent";
 };

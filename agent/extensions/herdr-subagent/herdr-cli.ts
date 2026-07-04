@@ -28,6 +28,14 @@ export const isHerdrSubagentSession = (): boolean =>
 export const isHerdrSubagentSpawnAllowed = (): boolean =>
 	globalThis.process?.env["HERDR_SUBAGENT_ALLOW_SPAWN"] === "1";
 
+/** Return the configured subagent name for this pi process, if any. */
+export const herdrSubagentName = (): string | undefined =>
+	globalThis.process?.env["HERDR_SUBAGENT_NAME"];
+
+/** Return the orchestrator result socket path passed to this subagent, if any. */
+export const herdrSubagentResultSocket = (): string | undefined =>
+	globalThis.process?.env["HERDR_SUBAGENT_RESULT_SOCK"];
+
 type HerdrProcessRequirements = ChildProcessSpawner | FileSystem | Path;
 
 type HerdrExitOutcome =

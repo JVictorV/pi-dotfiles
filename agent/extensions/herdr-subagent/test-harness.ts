@@ -47,7 +47,7 @@ export interface ToolDefinition {
 	): Promise<ToolResult>;
 }
 
-export type SessionEvent = "session_shutdown";
+export type SessionEvent = "session_start" | "session_shutdown" | "agent_end";
 
 export interface SentCustomMessage {
 	readonly message: unknown;
@@ -59,7 +59,7 @@ export interface SentUserMessage {
 	readonly options: unknown;
 }
 
-type SessionHandler = (event: { readonly type: SessionEvent }) => void;
+type SessionHandler = (event: { readonly type: SessionEvent } | unknown, ctx?: unknown) => void;
 
 /** Minimal fake pi API used by the herdr_subagent tool integration tests. */
 export interface FakePi {
@@ -83,8 +83,8 @@ export interface LoadedTool {
 	readonly sentMessages: SentCustomMessage[];
 	/** User messages injected through pi.sendUserMessage. */
 	readonly sentUserMessages: SentUserMessage[];
-	/** Dispatch a fake session lifecycle event. */
-	dispatch(event: SessionEvent): void;
+	/** Dispatch a fake session lifecycle or agent event. */
+	dispatch(event: SessionEvent, payload?: unknown, ctx?: unknown): void;
 }
 
 /** Minimal pi tool context used by herdr_subagent tool execution tests. */
@@ -105,6 +105,7 @@ const originalEnv = {
 	HERDR_ENV: envRecord().HERDR_ENV,
 	HERDR_SUBAGENT_NAME: envRecord().HERDR_SUBAGENT_NAME,
 	HERDR_SUBAGENT_ALLOW_SPAWN: envRecord().HERDR_SUBAGENT_ALLOW_SPAWN,
+	HERDR_SUBAGENT_RESULT_SOCK: envRecord().HERDR_SUBAGENT_RESULT_SOCK,
 	PATH: envRecord().PATH,
 	PI_CODING_AGENT_DIR: envRecord().PI_CODING_AGENT_DIR,
 	FAKE_HERDR_LOG: envRecord().FAKE_HERDR_LOG,
@@ -226,9 +227,9 @@ export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> 
 		pi,
 		sentMessages,
 		sentUserMessages,
-		dispatch(event) {
+		dispatch(event, payload, ctx) {
 			for (const handler of handlers.get(event) ?? []) {
-				handler({ type: event });
+				handler(payload ?? { type: event }, ctx);
 			}
 		},
 	};
@@ -304,6 +305,7 @@ const restoreEnv = (): void => {
 	setEnv("HERDR_ENV", originalEnv.HERDR_ENV);
 	setEnv("HERDR_SUBAGENT_NAME", originalEnv.HERDR_SUBAGENT_NAME);
 	setEnv("HERDR_SUBAGENT_ALLOW_SPAWN", originalEnv.HERDR_SUBAGENT_ALLOW_SPAWN);
+	setEnv("HERDR_SUBAGENT_RESULT_SOCK", originalEnv.HERDR_SUBAGENT_RESULT_SOCK);
 	setEnv("PATH", originalEnv.PATH);
 	setEnv("PI_CODING_AGENT_DIR", originalEnv.PI_CODING_AGENT_DIR);
 	setEnv("FAKE_HERDR_LOG", originalEnv.FAKE_HERDR_LOG);
@@ -343,9 +345,9 @@ const loadedMissingTool = (
 		pi,
 		sentMessages,
 		sentUserMessages,
-		dispatch(event) {
+		dispatch(event, payload, ctx) {
 			for (const handler of handlers.get(event) ?? []) {
-				handler({ type: event });
+				handler(payload ?? { type: event }, ctx);
 			}
 		},
 	};

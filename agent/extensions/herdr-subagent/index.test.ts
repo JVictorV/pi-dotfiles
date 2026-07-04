@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -18,7 +18,9 @@ import {
 	setSubagentSession,
 	writeAgent,
 } from "./test-harness";
+import { createSubagentNotificationManager } from "./notifications";
 import { decodeRegistryEntry } from "./schemas";
+import { notifySubagentFinished, startSubagentRpcServer } from "./subagent-rpc";
 
 afterEach(cleanupHarness);
 
@@ -44,6 +46,13 @@ const tabCreateCalls = (
 	calls: ReadonlyArray<ReadonlyArray<string>>,
 ): ReadonlyArray<ReadonlyArray<string>> =>
 	calls.filter((args) => args[0] === "tab" && args[1] === "create");
+
+const TEST_FRESH_SENT_AT_MS = 4_000_000_000_000;
+
+const modeBits = (mode: number): number => mode & 0o777;
+
+const resultSocketArg = (args: ReadonlyArray<string> | undefined): string | undefined =>
+	args?.find((arg) => arg.startsWith("HERDR_SUBAGENT_RESULT_SOCK="));
 
 describe("herdr_subagent extension", () => {
 	test("fails before touching herdr when not running inside herdr", async () => {
@@ -490,6 +499,306 @@ describe("herdr_subagent extension", () => {
 			setTimeout(resolve, 150);
 		});
 		expect(loaded.sentMessages).toHaveLength(0);
+	});
+
+	test("stale RPC after re-arm is dropped and the fresh watcher remains armed", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "old task" });
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "new task" });
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "old result",
+				sentAtMs: 0,
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "fresh result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain("fresh result");
+			expect(content).not.toContain("old result");
+		} finally {
+			manager.cancelAll();
+		}
+	}, 8_000);
+
+	test("RPC result delivery uses the actual final message and consumes the watcher", async () => {
+		const root = await makeTempRoot();
+		const socketPath = path.join(root, "result.sock");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		const server = await runHerdrSubagentEffect(
+			startSubagentRpcServer({
+				socketPath,
+				onFinished(payload) {
+					manager.deliverExternal(payload.name, {
+						status: payload.status,
+						finalMessage: payload.finalMessage,
+						sentAtMs: payload.sentAtMs,
+					});
+				},
+			}),
+		);
+		try {
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "Task A.",
+			});
+
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath,
+					name: "worker-a",
+					status: "done",
+					finalMessage: "the actual result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+				}),
+			);
+
+			await vi.waitFor(
+				() => {
+					expect(sentMessages).toHaveLength(1);
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain("<final_message>\nthe actual result\n</final_message>");
+			expect(content).not.toContain("<pane_tail>");
+
+			setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 2_200);
+			});
+			expect(sentMessages).toHaveLength(1);
+		} finally {
+			manager.cancelAll();
+			await server.close();
+		}
+	}, 8_000);
+
+	test("RPC result delivery without an armed watcher is dropped", async () => {
+		const root = await makeTempRoot();
+		const socketPath = path.join(root, "result.sock");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		const server = await runHerdrSubagentEffect(
+			startSubagentRpcServer({
+				socketPath,
+				onFinished(payload) {
+					manager.deliverExternal(payload.name, {
+						status: payload.status,
+						finalMessage: payload.finalMessage,
+						sentAtMs: payload.sentAtMs,
+					});
+				},
+			}),
+		);
+		try {
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath,
+					name: "worker-a",
+					status: "done",
+					finalMessage: "the actual result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+				}),
+			);
+
+			expect(sentMessages).toHaveLength(0);
+		} finally {
+			await server.close();
+		}
+	});
+
+	test("RPC client degrades quickly when the orchestrator socket is unavailable", async () => {
+		const root = await makeTempRoot();
+		const outcome = await Promise.race([
+			runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath: path.join(root, "missing.sock"),
+					name: "worker-a",
+					status: "done",
+					finalMessage: "the actual result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+				}),
+			).then(() => "resolved" as const),
+			new Promise<"timed-out">((resolve) => {
+				setTimeout(() => resolve("timed-out"), 1_000);
+			}),
+		]);
+
+		expect(outcome).toBe("resolved");
+	});
+
+	test("server close after restart does not unlink the new server socket", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-rpc-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			setEnv("PI_CODING_AGENT_DIR", agentDir);
+			let received = 0;
+			const first = await runHerdrSubagentEffect(
+				startSubagentRpcServer({ ownerId: "same-owner", onFinished() {} }),
+			);
+			const second = await runHerdrSubagentEffect(
+				startSubagentRpcServer({
+					ownerId: "same-owner",
+					onFinished() {
+						received += 1;
+					},
+				}),
+			);
+			try {
+				expect(second.socketPath).not.toBe(first.socketPath);
+				await first.close();
+				await access(second.socketPath);
+				await runHerdrSubagentEffect(
+					notifySubagentFinished({
+						socketPath: second.socketPath,
+						name: "worker-a",
+						status: "done",
+						finalMessage: "still connected",
+						sentAtMs: TEST_FRESH_SENT_AT_MS,
+					}),
+				);
+				await vi.waitFor(() => {
+					expect(received).toBe(1);
+				});
+			} finally {
+				await second.close();
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("RPC directory and socket permissions are owner-only", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-rpc-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			setEnv("PI_CODING_AGENT_DIR", agentDir);
+			const server = await runHerdrSubagentEffect(startSubagentRpcServer({ onFinished() {} }));
+			try {
+				expect(modeBits((await stat(path.dirname(server.socketPath))).mode)).toBe(0o700);
+				expect(modeBits((await stat(server.socketPath)).mode)).toBe(0o600);
+			} finally {
+				await server.close();
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("spawn passes the RPC result socket only after the server is available", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+			const { log } = await installFakeHerdr(root);
+			setEnv("HERDR_ENV", "1");
+			setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+			const loaded = await loadToolWithFakePi(agentDir);
+
+			await loaded.tool.execute(
+				"tool-call-no-rpc",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+
+			loaded.dispatch("session_start", { type: "session_start" }, { mode: "print", hasUI: false });
+			const rpcDir = path.join(agentDir, "herdr-subagents", "rpc");
+			await vi.waitFor(
+				async () => {
+					const sockets = await readdir(rpcDir);
+					expect(sockets.some((name) => name.startsWith("v1-") && name.endsWith(".sock"))).toBe(
+						true,
+					);
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+
+			await loaded.tool.execute(
+				"tool-call-with-rpc",
+				{ action: "spawn", name: "worker-b", agentType: "worker", task: "Task B." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+
+			const creates = tabCreateCalls(await readHerdrCalls(log));
+			expect(creates).toHaveLength(2);
+			expect(resultSocketArg(creates[0])).toBeUndefined();
+			const socketArg = resultSocketArg(creates[1]);
+			expect(socketArg).toBeDefined();
+			const socketPath = socketArg?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+			await access(socketPath);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 8_000);
+
+	test("RPC server unlinks a stale socket file before listening", async () => {
+		const root = await makeTempRoot();
+		const socketPath = path.join(root, "stale.sock");
+		await writeFile(socketPath, "stale", "utf8");
+
+		const server = await runHerdrSubagentEffect(
+			startSubagentRpcServer({
+				socketPath,
+				onFinished() {},
+			}),
+		);
+		try {
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath,
+					name: "worker-a",
+					status: "done",
+					finalMessage: "the actual result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+				}),
+			);
+		} finally {
+			await server.close();
+		}
 	});
 
 	test("lets an explicit model override the role default", async () => {
