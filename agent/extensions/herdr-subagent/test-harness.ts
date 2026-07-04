@@ -104,6 +104,7 @@ const envRecord = (): Record<string, string | undefined> => processEnv;
 const originalEnv = {
 	HERDR_ENV: envRecord().HERDR_ENV,
 	HERDR_SUBAGENT_NAME: envRecord().HERDR_SUBAGENT_NAME,
+	HERDR_SUBAGENT_ALLOW_SPAWN: envRecord().HERDR_SUBAGENT_ALLOW_SPAWN,
 	PATH: envRecord().PATH,
 	PI_CODING_AGENT_DIR: envRecord().PI_CODING_AGENT_DIR,
 	FAKE_HERDR_LOG: envRecord().FAKE_HERDR_LOG,
@@ -145,6 +146,12 @@ export const setEnv = (name: string, value: string | undefined): void => {
 		return;
 	}
 	env[name] = value;
+};
+
+/** Simulate whether the current pi session is a spawned herdr subagent session. */
+export const setSubagentSession = (name: string | undefined, allowSpawn = false): void => {
+	setEnv("HERDR_SUBAGENT_NAME", name);
+	setEnv("HERDR_SUBAGENT_ALLOW_SPAWN", name && allowSpawn ? "1" : undefined);
 };
 
 /** Create a temporary root directory that will be removed by cleanupHarness. */
@@ -246,6 +253,7 @@ export const installFakeHerdr = async (
 	await chmod(script, 0o755);
 	setEnv("FAKE_HERDR_LOG", log);
 	setEnv("PATH", `${bin}${path.delimiter}${originalEnv.PATH ?? ""}`);
+	setSubagentSession(undefined);
 	return { bin, log };
 };
 
@@ -294,6 +302,7 @@ export const lastRunCommandFromCalls = (
 const restoreEnv = (): void => {
 	setEnv("HERDR_ENV", originalEnv.HERDR_ENV);
 	setEnv("HERDR_SUBAGENT_NAME", originalEnv.HERDR_SUBAGENT_NAME);
+	setEnv("HERDR_SUBAGENT_ALLOW_SPAWN", originalEnv.HERDR_SUBAGENT_ALLOW_SPAWN);
 	setEnv("PATH", originalEnv.PATH);
 	setEnv("PI_CODING_AGENT_DIR", originalEnv.PI_CODING_AGENT_DIR);
 	setEnv("FAKE_HERDR_LOG", originalEnv.FAKE_HERDR_LOG);

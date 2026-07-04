@@ -24,6 +24,10 @@ export const isRunningInsideHerdr = (): boolean => globalThis.process?.env["HERD
 export const isHerdrSubagentSession = (): boolean =>
 	globalThis.process?.env["HERDR_SUBAGENT_NAME"] !== undefined;
 
+/** Return whether this spawned subagent session may recursively spawn subagents. */
+export const isHerdrSubagentSpawnAllowed = (): boolean =>
+	globalThis.process?.env["HERDR_SUBAGENT_ALLOW_SPAWN"] === "1";
+
 type HerdrProcessRequirements = ChildProcessSpawner | FileSystem | Path;
 
 type HerdrExitOutcome =

@@ -14,6 +14,7 @@ import {
 	readHerdrCalls,
 	runCommandFromCalls,
 	setEnv,
+	setSubagentSession,
 	writeAgent,
 } from "./test-harness";
 
@@ -37,6 +38,11 @@ const firstMessageOptions = (options: unknown): Record<string, unknown> => {
 	return Object.fromEntries(Object.entries(options));
 };
 
+const tabCreateCalls = (
+	calls: ReadonlyArray<ReadonlyArray<string>>,
+): ReadonlyArray<ReadonlyArray<string>> =>
+	calls.filter((args) => args[0] === "tab" && args[1] === "create");
+
 describe("herdr_subagent extension", () => {
 	test("fails before touching herdr when not running inside herdr", async () => {
 		const root = await makeTempRoot();
@@ -48,6 +54,168 @@ describe("herdr_subagent extension", () => {
 		await expect(
 			tool.execute("tool-call", { action: "status" }, undefined, undefined, makeContext(root)),
 		).rejects.toThrow(/HERDR_ENV is not 1/);
+	});
+
+	test("denies recursive mutating actions from subagent sessions before herdr calls", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setSubagentSession("worker-a");
+		const tool = await loadTool(agentDir);
+		const deniedActions = [
+			{ action: "spawn", name: "child-a", task: "Delegate this." },
+			{ action: "send", target: "worker-b", message: "Continue." },
+			{ action: "close", target: "worker-b" },
+			{ action: "focus", target: "worker-b" },
+		] as const;
+
+		for (const params of deniedActions) {
+			await expect(
+				tool.execute("tool-call", params, undefined, undefined, makeContext("/workspace")),
+			).rejects.toThrow(/STATUS: done or STATUS: blocked.*allowSpawn/);
+		}
+		expect(await readHerdrCalls(log)).toEqual([]);
+	});
+
+	test("allows read-only actions from subagent sessions", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		setSubagentSession("worker-a");
+		const tool = await loadTool(agentDir);
+
+		const agentTypes = await tool.execute(
+			"tool-call-agent-types",
+			{ action: "agent-types" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const status = await tool.execute(
+			"tool-call-status",
+			{ action: "status" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const inspected = await tool.execute(
+			"tool-call-inspect",
+			{ action: "inspect", target: "wTest:p1" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const waited = await tool.execute(
+			"tool-call-wait",
+			{ action: "wait", target: "wTest:p1", timeoutMs: 2_000 },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(agentTypes.content[0]?.text).toContain("No agent types found");
+		expect(status.content[0]?.text).toContain("No herdr agents found");
+		expect(inspected.content[0]?.text).toContain("STATUS: done");
+		expect(waited.content[0]?.text).toContain("finished");
+	}, 8_000);
+
+	test("allows spawn from a subagent session with the explicit environment grant", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setSubagentSession("worker-a", true);
+		const tool = await loadTool(agentDir);
+
+		const result = await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "child-a", agentType: "worker", task: "Child task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(result.content[0]?.text).toContain("Spawned child-a");
+	});
+
+	test("spawn allowSpawn parameter controls the child recursion grant env", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call-default",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Default task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await tool.execute(
+			"tool-call-allow",
+			{
+				action: "spawn",
+				name: "worker-b",
+				agentType: "worker",
+				task: "Allowed task.",
+				allowSpawn: true,
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		const creates = tabCreateCalls(await readHerdrCalls(log));
+		expect(creates).toHaveLength(2);
+		expect(creates[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=0");
+		expect(creates[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=1");
+	});
+
+	test("agent frontmatter allowSpawn grants child recursion unless a param overrides it", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		const agentsDir = path.join(agentDir, "agents");
+		await mkdir(agentsDir, { recursive: true });
+		await writeFile(
+			path.join(agentsDir, "delegator.md"),
+			"---\nname: delegator\ndescription: can delegate\nmodel: openai-codex/gpt-5.5\nallowSpawn: true\n---\n\nYou may delegate.\n",
+			"utf8",
+		);
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call-frontmatter",
+			{ action: "spawn", name: "delegator-a", agentType: "delegator", task: "Task A." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await tool.execute(
+			"tool-call-override",
+			{
+				action: "spawn",
+				name: "delegator-b",
+				agentType: "delegator",
+				task: "Task B.",
+				allowSpawn: false,
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		const creates = tabCreateCalls(await readHerdrCalls(log));
+		expect(creates).toHaveLength(2);
+		expect(creates[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=1");
+		expect(creates[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=0");
 	});
 
 	test("spawns a role with the role's default model", async () => {

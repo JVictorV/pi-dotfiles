@@ -34,6 +34,15 @@ export class ActionRejected extends Schema.TaggedErrorClass<ActionRejected>()("A
 	message: Schema.String,
 }) {}
 
+/** A spawned subagent attempted to recursively orchestrate subagents without an explicit grant. */
+export class SubagentRecursionDenied extends Schema.TaggedErrorClass<SubagentRecursionDenied>()(
+	"SubagentRecursionDenied",
+	{
+		message: Schema.String,
+		action: Schema.Literals(["spawn", "send", "close", "focus"]),
+	},
+) {}
+
 /** A target name, terminal id, or pane id could not be resolved. */
 export class TargetNotResolved extends Schema.TaggedErrorClass<TargetNotResolved>()(
 	"TargetNotResolved",
@@ -63,6 +72,7 @@ export type HerdrSubagentError =
 	| HerdrNotAvailable
 	| HerdrCommandFailed
 	| ActionRejected
+	| SubagentRecursionDenied
 	| TargetNotResolved
 	| WaitTimedOut
 	| HerdrFileSystemFailed
@@ -102,6 +112,7 @@ export const toToolError = (failure: HerdrSubagentError): HerdrSubagentToolError
 			return new HerdrSubagentToolError({ message: commandFailureText(failure) });
 		case "HerdrNotAvailable":
 		case "ActionRejected":
+		case "SubagentRecursionDenied":
 		case "TargetNotResolved":
 		case "WaitTimedOut":
 			return new HerdrSubagentToolError({ message: failure.message });

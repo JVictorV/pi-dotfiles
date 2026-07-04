@@ -50,6 +50,7 @@ export interface HerdrSubagentParams {
 	readonly model?: string;
 	readonly thinking?: string;
 	readonly tools?: ReadonlyArray<string>;
+	readonly allowSpawn?: boolean;
 	readonly message?: string;
 	readonly lines?: number;
 	readonly source?: PaneReadSource;
@@ -69,6 +70,7 @@ export interface AgentDefinition {
 	readonly name: string;
 	readonly description: string;
 	readonly tools?: ReadonlyArray<string>;
+	readonly allowSpawn?: boolean;
 	readonly model?: string;
 	readonly thinking?: string;
 	readonly systemPrompt: string;

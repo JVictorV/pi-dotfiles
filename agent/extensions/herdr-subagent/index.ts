@@ -97,6 +97,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			"Avoid spawning anthropic/claude-fable-5 with herdr_subagent by default; Fable should usually orchestrate rather than work. Use it only for pure high-taste critique/copy/UI direction or explicit subjective comparisons.",
 			"Prefer one herdr_subagent spawn per task, with tab labels like agent: <name>; inspect a subagent panel before trusting its result.",
 			"After herdr_subagent spawn or send, wait for the automatic subagent_result follow-up notification instead of polling wait; use wait only when explicitly blocking is necessary.",
+			"Spawned subagents cannot spawn their own subagents by default; orchestrators may grant recursive delegation with allowSpawn when genuinely needed.",
 			"Keep herdr_subagent fan-out to at most 12 concurrent subagents; start small and scale up only when the task genuinely benefits from parallelism.",
 			"For parallel code editing, avoid multiple herdr_subagent workers mutating the same worktree unless the user has explicitly isolated their worktrees.",
 		],
@@ -152,6 +153,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			tools: Type.Optional(
 				Type.Array(Type.String(), {
 					description: "Tool allowlist for spawned subagent. Overrides agentType tools.",
+				}),
+			),
+			allowSpawn: Type.Optional(
+				Type.Boolean({
+					description:
+						"Allow the spawned subagent to spawn its own subagents (default false; keep fan-out budgets in mind).",
 				}),
 			),
 			message: Type.Optional(Type.String({ description: "Follow-up prompt for action=send." })),

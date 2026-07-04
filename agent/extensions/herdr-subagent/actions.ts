@@ -9,6 +9,7 @@ import {
 	HerdrCommandFailed,
 	HerdrNotAvailable,
 	type HerdrSubagentError,
+	SubagentRecursionDenied,
 	HerdrSubagentToolError,
 	SpawnRejected,
 	toToolError,
@@ -17,6 +18,8 @@ import {
 import {
 	currentPane,
 	decodeHerdrJson,
+	isHerdrSubagentSession,
+	isHerdrSubagentSpawnAllowed,
 	isRunningInsideHerdr,
 	liveAgent,
 	runHerdr,
@@ -43,6 +46,7 @@ import * as SubagentName from "./subagent-name";
 import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
 import type {
 	AgentDefinition,
+	HerdrSubagentAction,
 	HerdrSubagentParams,
 	PiToolContext,
 	RegistryEntry,
@@ -56,6 +60,39 @@ const DEFAULT_INSPECT_LINES = 120;
 const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
 const WAIT_POLL_INTERVAL_MS = 2_000;
 const WAIT_IDLE_CONFIRMATIONS = 2;
+
+type RecursionGuardedAction = "spawn" | "send" | "close" | "focus";
+
+const RECURSION_GUARDED_ACTIONS: ReadonlyArray<RecursionGuardedAction> = [
+	"spawn",
+	"send",
+	"close",
+	"focus",
+];
+
+const subagentRecursionDeniedMessage = (action: HerdrSubagentAction): string =>
+	`Subagent sessions cannot run herdr_subagent action=${action} by default. Finish your own task and report back to your orchestrator with STATUS: done or STATUS: blocked instead of spawning or directing additional agents. If recursive delegation is genuinely needed, the orchestrator can grant spawn rights with allowSpawn; keep fan-out budgets in mind.`;
+
+const isRecursionGuardedAction = (action: HerdrSubagentAction): action is RecursionGuardedAction =>
+	RECURSION_GUARDED_ACTIONS.some((guardedAction) => guardedAction === action);
+
+const guardSubagentRecursion = (
+	action: HerdrSubagentAction,
+): Effect.Effect<void, SubagentRecursionDenied> => {
+	if (
+		!isHerdrSubagentSession() ||
+		isHerdrSubagentSpawnAllowed() ||
+		!isRecursionGuardedAction(action)
+	) {
+		return Effect.void;
+	}
+	return Effect.fail(
+		new SubagentRecursionDenied({
+			action,
+			message: subagentRecursionDeniedMessage(action),
+		}),
+	);
+};
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -244,6 +281,7 @@ const commandSpawn: (
 		const spawnWorkspaceId = workspaceId;
 		const cwd = params.cwd ?? pane?.foreground_cwd ?? pane?.cwd ?? ctx.cwd;
 		const label = params.label ?? `agent: ${name}`;
+		const allowSpawn = params.allowSpawn ?? agent?.allowSpawn ?? false;
 		const reservedAt = yield* nowIso;
 		const reservation: RegistryEntry = {
 			name,
@@ -276,6 +314,8 @@ const commandSpawn: (
 				label,
 				"--env",
 				`HERDR_SUBAGENT_NAME=${name}`,
+				"--env",
+				`HERDR_SUBAGENT_ALLOW_SPAWN=${allowSpawn ? "1" : "0"}`,
 				"--no-focus",
 			];
 			const created = yield* decodeHerdrJson(createArgs, decodeTabCreateResponse);
@@ -644,6 +684,7 @@ export const executeAction: (
 					"HERDR_ENV is not 1; herdr_subagent can only inspect or control panels from inside herdr.",
 			});
 		}
+		yield* guardSubagentRecursion(params.action);
 		return yield* runAction(params, ctx);
 	},
 	Effect.mapError(toToolError),

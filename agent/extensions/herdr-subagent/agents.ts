@@ -7,6 +7,28 @@ import type { HerdrFileSystemFailed } from "./errors";
 import { isDirectory, readDirectory, readTextFile } from "./runtime-files";
 import type { AgentDefinition, AgentDiscovery, AgentScope } from "./types";
 
+type AgentFrontmatter = Record<string, unknown>;
+
+const frontmatterString = (value: unknown): string | undefined =>
+	typeof value === "string" ? value : undefined;
+
+const frontmatterBoolean = (value: unknown): boolean | undefined => {
+	if (typeof value === "boolean") {
+		return value;
+	}
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "true") {
+		return true;
+	}
+	if (normalized === "false") {
+		return false;
+	}
+	return undefined;
+};
+
 export const buildTaskPrompt = (
 	name: string,
 	task: string,
@@ -56,13 +78,13 @@ const loadAgentsFromDir: (
 			if (Result.isFailure(content) || content.success === undefined) {
 				continue;
 			}
-			const parsed = parseFrontmatter<Record<string, string>>(content.success);
-			const name = parsed.frontmatter.name;
-			const description = parsed.frontmatter.description;
+			const parsed = parseFrontmatter<AgentFrontmatter>(content.success);
+			const name = frontmatterString(parsed.frontmatter.name);
+			const description = frontmatterString(parsed.frontmatter.description);
 			if (!name || !description) {
 				continue;
 			}
-			const tools = parsed.frontmatter.tools
+			const tools = frontmatterString(parsed.frontmatter.tools)
 				?.split(",")
 				.map((tool) => tool.trim())
 				.filter((tool) => tool.length > 0);
@@ -70,8 +92,9 @@ const loadAgentsFromDir: (
 				name,
 				description,
 				tools: tools && tools.length > 0 ? tools : undefined,
-				model: parsed.frontmatter.model,
-				thinking: parsed.frontmatter.thinking,
+				allowSpawn: frontmatterBoolean(parsed.frontmatter.allowSpawn),
+				model: frontmatterString(parsed.frontmatter.model),
+				thinking: frontmatterString(parsed.frontmatter.thinking),
 				systemPrompt: parsed.body.trim(),
 				source,
 				filePath,
