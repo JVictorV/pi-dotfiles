@@ -55,6 +55,7 @@ export interface HerdrSubagentParams {
 	readonly source?: PaneReadSource;
 	readonly status?: WaitStatus;
 	readonly timeoutMs?: number;
+	readonly notify?: boolean;
 }
 
 export interface CommandSuccess {

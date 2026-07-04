@@ -346,7 +346,7 @@ const commandSpawn: (
 			return {
 				content: [
 					textContent(
-						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${cwd}\n\nNext: inspect ${name} or wait for status done.`,
+						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${cwd}\n\nNext: you will receive a subagent_result follow-up when ${name} finishes or blocks. Do not poll wait or duplicate the work; use wait only when you explicitly need to block.`,
 					),
 				],
 				details: { action: "spawn", entry },

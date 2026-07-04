@@ -1,13 +1,14 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
 	cleanupHarness,
 	installFakeHerdr,
 	lastRunCommandFromCalls,
 	loadTool,
+	loadToolWithFakePi,
 	makeContext,
 	makeTempRoot,
 	readHerdrCalls,
@@ -17,6 +18,24 @@ import {
 } from "./test-harness";
 
 afterEach(cleanupHarness);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+const firstMessageContent = (message: unknown): string => {
+	if (!isRecord(message)) {
+		return "";
+	}
+	const content = Object.getOwnPropertyDescriptor(message, "content")?.value;
+	return typeof content === "string" ? content : "";
+};
+
+const firstMessageOptions = (options: unknown): Record<string, unknown> => {
+	if (!isRecord(options)) {
+		return {};
+	}
+	return Object.fromEntries(Object.entries(options));
+};
 
 describe("herdr_subagent extension", () => {
 	test("fails before touching herdr when not running inside herdr", async () => {
@@ -56,6 +75,228 @@ describe("herdr_subagent extension", () => {
 		const command = runCommandFromCalls(await readHerdrCalls(log));
 		expect(command).toContain("--model");
 		expect(command).toContain("openai-codex/gpt-5.5");
+	});
+
+	test("spawn arms a watcher that sends a follow-up result envelope with pane tail", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-a",
+				agentType: "worker",
+				task: "Implement the focused change and report the result.",
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+		const delivered = loaded.sentMessages[0];
+		const content = firstMessageContent(delivered?.message);
+		expect(firstMessageOptions(delivered?.options)).toEqual({
+			deliverAs: "followUp",
+			triggerTurn: true,
+		});
+		expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
+		expect(content).toContain("Subagent worker-a finished");
+		expect(content).toContain("Implement the focused change");
+		expect(content).toContain("STATUS: done");
+		expect(content).toContain("All good.");
+	});
+
+	test("blocked watcher notifications distinguish attention-needed state", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "blocked");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Find the blocker." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+		const content = firstMessageContent(loaded.sentMessages[0]?.message);
+		expect(content).toContain('state="blocked"');
+		expect(content).toContain("Subagent worker-a needs attention");
+		expect(content).toContain("use herdr_subagent send or focus to unblock");
+	});
+
+	test("explicit wait consumes an armed watcher without a duplicate notification", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		await loaded.tool.execute(
+			"tool-call-wait",
+			{ action: "wait", target: "worker-a", timeoutMs: 2_000 },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 150);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
+	}, 8_000);
+
+	test("close cancels an armed watcher", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await loaded.tool.execute(
+			"tool-call-close",
+			{ action: "close", target: "worker-a" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 150);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
+	});
+
+	test("send replaces a live watcher and delivers exactly one notification", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Initial task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		await loaded.tool.execute(
+			"tool-call-send",
+			{ action: "send", target: "worker-a", message: "Follow-up after spawn." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
+			"Follow-up after spawn.",
+		);
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 2_200);
+		});
+		expect(loaded.sentMessages).toHaveLength(1);
+	}, 8_000);
+
+	test("session shutdown cancels pending watchers", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		loaded.dispatch("session_shutdown");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 2_200);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
+	}, 8_000);
+
+	test("notify false disables spawn watcher delivery", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-a",
+				agentType: "worker",
+				task: "Task A.",
+				notify: false,
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 150);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
 	});
 
 	test("lets an explicit model override the role default", async () => {

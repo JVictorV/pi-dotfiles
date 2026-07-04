@@ -47,10 +47,44 @@ export interface ToolDefinition {
 	): Promise<ToolResult>;
 }
 
+export type SessionEvent = "session_shutdown";
+
+export interface SentCustomMessage {
+	readonly message: unknown;
+	readonly options: unknown;
+}
+
+export interface SentUserMessage {
+	readonly content: unknown;
+	readonly options: unknown;
+}
+
+type SessionHandler = (event: { readonly type: SessionEvent }) => void;
+
 /** Minimal fake pi API used by the herdr_subagent tool integration tests. */
 export interface FakePi {
 	/** Capture a registered tool definition. */
 	registerTool(tool: ToolDefinition): void;
+	/** Subscribe to session lifecycle events used by the extension. */
+	on(event: SessionEvent, handler: SessionHandler): void;
+	/** Capture custom messages injected by the extension. */
+	sendMessage(message: unknown, options?: unknown): void;
+	/** Capture user messages injected by the extension. */
+	sendUserMessage(content: unknown, options?: unknown): void;
+}
+
+/** Loaded herdr_subagent tool plus fake pi observations. */
+export interface LoadedTool {
+	/** Captured herdr_subagent tool definition. */
+	readonly tool: ToolDefinition;
+	/** Fake pi API instance used to load the extension. */
+	readonly pi: FakePi;
+	/** Custom messages injected through pi.sendMessage. */
+	readonly sentMessages: SentCustomMessage[];
+	/** User messages injected through pi.sendUserMessage. */
+	readonly sentUserMessages: SentUserMessage[];
+	/** Dispatch a fake session lifecycle event. */
+	dispatch(event: SessionEvent): void;
 }
 
 /** Minimal pi tool context used by herdr_subagent tool execution tests. */
@@ -87,9 +121,14 @@ const originalEnv = {
 };
 
 let tempRoots: string[] = [];
+let loadedTools: LoadedTool[] = [];
 
 /** Restore environment variables and remove temporary roots created by this harness. */
 export const cleanupHarness = async (): Promise<void> => {
+	for (const loaded of loadedTools) {
+		loaded.dispatch("session_shutdown");
+	}
+	loadedTools = [];
 	restoreEnv();
 	const roots = tempRoots;
 	tempRoots = [];
@@ -123,31 +162,76 @@ export const makeContext = (cwd: string): FakeContext => ({
 });
 
 /** Load the extension default export and return the captured herdr_subagent tool. */
-export const loadTool = async (agentDir: string): Promise<ToolDefinition> => {
+export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> => {
 	setEnv("PI_CODING_AGENT_DIR", agentDir);
 	const registered: ToolDefinition[] = [];
+	const sentMessages: SentCustomMessage[] = [];
+	const sentUserMessages: SentUserMessage[] = [];
+	const handlers = new Map<SessionEvent, SessionHandler[]>();
 	const pi: FakePi = {
 		registerTool(tool) {
 			registered.push(tool);
+		},
+		on(event, handler) {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+		sendMessage(message, options) {
+			sentMessages.push({ message, options });
+		},
+		sendUserMessage(content, options) {
+			sentUserMessages.push({ content, options });
 		},
 	};
 
 	const moduleUrl = new URL(`./index.ts?test=${randomUUID()}`, import.meta.url).href;
 	const imported: unknown = await import(moduleUrl);
 	if (!isRecord(imported)) {
-		return missingTool("extension module did not import as an object");
+		return loadedMissingTool(
+			pi,
+			sentMessages,
+			sentUserMessages,
+			"extension module did not import as an object",
+		);
 	}
 	const factory = imported.default;
 	if (!isExtensionFactory(factory)) {
-		return missingTool("extension module default export is not a function");
+		return loadedMissingTool(
+			pi,
+			sentMessages,
+			sentUserMessages,
+			"extension module default export is not a function",
+		);
 	}
 	factory(pi);
 
 	const tool = registered.find((candidate) => candidate.name === "herdr_subagent");
 	if (!tool) {
-		return missingTool("herdr_subagent tool was not registered");
+		return loadedMissingTool(
+			pi,
+			sentMessages,
+			sentUserMessages,
+			"herdr_subagent tool was not registered",
+		);
 	}
-	return tool;
+	const loaded: LoadedTool = {
+		tool,
+		pi,
+		sentMessages,
+		sentUserMessages,
+		dispatch(event) {
+			for (const handler of handlers.get(event) ?? []) {
+				handler({ type: event });
+			}
+		},
+	};
+	loadedTools.push(loaded);
+	return loaded;
+};
+
+/** Load the extension default export and return the captured herdr_subagent tool. */
+export const loadTool = async (agentDir: string): Promise<ToolDefinition> => {
+	const loaded = await loadToolWithFakePi(agentDir);
+	return loaded.tool;
 };
 
 /** Install a fake herdr binary on PATH and return its binary directory and call log path. */
@@ -235,6 +319,28 @@ const missingTool = (message: string): ToolDefinition => ({
 		return { content: [{ type: "text", text: message }], details: { message }, isError: true };
 	},
 });
+
+const loadedMissingTool = (
+	pi: FakePi,
+	sentMessages: SentCustomMessage[],
+	sentUserMessages: SentUserMessage[],
+	message: string,
+): LoadedTool => {
+	const handlers = new Map<SessionEvent, SessionHandler[]>();
+	const loaded: LoadedTool = {
+		tool: missingTool(message),
+		pi,
+		sentMessages,
+		sentUserMessages,
+		dispatch(event) {
+			for (const handler of handlers.get(event) ?? []) {
+				handler({ type: event });
+			}
+		},
+	};
+	loadedTools.push(loaded);
+	return loaded;
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
