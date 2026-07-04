@@ -4,17 +4,59 @@ import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
-import { decodeHerdrJson, isHerdrSubagentSession, isRunningInsideHerdr } from "./herdr-cli";
-import { buildOverview, renderOverviewLines } from "./overview";
+import {
+	currentPane,
+	decodeHerdrJson,
+	isHerdrSubagentSession,
+	isRunningInsideHerdr,
+} from "./herdr-cli";
+import { buildOverview, type Overview, type OverviewTheme, renderOverview } from "./overview";
 import { decodeAgentListResponse } from "./schemas";
 import { listEntries } from "./store";
+import type { RegistryEntry } from "./types";
 
 const WIDGET_ID = "herdr-subagents";
+
+/** Minimal widget component shape returned to `ctx.ui.setWidget`. */
+interface WidgetComponent {
+	render(width: number): string[];
+	invalidate(): void;
+}
+
+/**
+ * Build a themed widget component factory for an overview snapshot.
+ *
+ * Lines are computed inside `render` from the live theme (and cached until
+ * `invalidate`), so theme switches recolor the widget without a fresh poll.
+ *
+ * @param overview - Overview snapshot to render.
+ * @returns A factory suitable for the component form of `ctx.ui.setWidget`.
+ */
+const overviewWidget =
+	(overview: Overview) =>
+	(_tui: unknown, theme: OverviewTheme): WidgetComponent => {
+		let cache: string[] | undefined;
+		return {
+			render() {
+				cache ??= renderOverview(overview, theme);
+				return cache;
+			},
+			invalidate() {
+				cache = undefined;
+			},
+		};
+	};
 const DEFAULT_ACTIVE_POLL_MS = 2_000;
 const DEFAULT_IDLE_POLL_MS = 15_000;
 
 type OverviewWidgetRequirements = ChildProcessSpawner | FileSystem | Path;
 type RunPromise = <A>(effect: Effect.Effect<A, unknown, OverviewWidgetRequirements>) => Promise<A>;
+
+const entriesForOwner = (
+	entries: ReadonlyArray<RegistryEntry>,
+	ownerPaneId: string | undefined,
+): ReadonlyArray<RegistryEntry> =>
+	ownerPaneId ? entries.filter((entry) => entry.ownerPaneId === ownerPaneId) : entries;
 
 /** Poll interval overrides for the overview widget. */
 export interface OverviewWidgetOptions {
@@ -63,6 +105,12 @@ export const registerOverviewWidget = (
 		currentToken = token;
 		clearWidget = () => ctx.ui.setWidget(WIDGET_ID, undefined);
 		previousKinds.clear();
+		const ownerPaneId = runPromise(
+			currentPane().pipe(
+				Effect.map((pane) => pane.pane_id),
+				Effect.catch(() => Effect.succeed(undefined)),
+			),
+		).catch(() => undefined);
 
 		const schedule = (delayMs: number): void => {
 			if (currentToken !== token) {
@@ -78,16 +126,19 @@ export const registerOverviewWidget = (
 			if (currentToken !== token) {
 				return;
 			}
-			runPromise(
-				Effect.gen(function* () {
-					const entries = yield* listEntries;
-					if (entries.length === 0) {
-						return { entries, agents: [] };
-					}
-					const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
-					return { entries, agents: response.result.agents };
-				}),
-			)
+			ownerPaneId
+				.then((sessionOwnerPaneId) =>
+					runPromise(
+						Effect.gen(function* () {
+							const entries = entriesForOwner(yield* listEntries, sessionOwnerPaneId);
+							if (entries.length === 0) {
+								return { entries, agents: [] };
+							}
+							const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
+							return { entries, agents: response.result.agents };
+						}),
+					),
+				)
 				.then((snapshot): number => {
 					if (currentToken !== token) {
 						return idlePollMs;
@@ -108,8 +159,10 @@ export const registerOverviewWidget = (
 					for (const row of overview.rows) {
 						previousKinds.set(row.name, row.kind);
 					}
-					const lines = renderOverviewLines(overview);
-					ctx.ui.setWidget(WIDGET_ID, lines.length > 0 ? lines : undefined);
+					ctx.ui.setWidget(
+						WIDGET_ID,
+						overview.rows.length > 0 ? overviewWidget(overview) : undefined,
+					);
 					return pollMs;
 				})
 				.catch(() => idlePollMs)

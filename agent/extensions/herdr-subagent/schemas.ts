@@ -3,6 +3,7 @@ import { Schema } from "effect";
 export const RegistryEntrySchema = Schema.Struct({
 	name: Schema.String,
 	phase: Schema.optional(Schema.Literals(["reserved", "active"])),
+	ownerPaneId: Schema.optional(Schema.String),
 	target: Schema.optional(Schema.String),
 	paneId: Schema.optional(Schema.String),
 	tabId: Schema.optional(Schema.String),

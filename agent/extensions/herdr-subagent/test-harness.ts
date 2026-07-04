@@ -114,6 +114,7 @@ const originalEnv = {
 	FAKE_HERDR_AGENT_STATUS: envRecord().FAKE_HERDR_AGENT_STATUS,
 	FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE: envRecord().FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
 	FAKE_HERDR_PANE_RUN_FAIL: envRecord().FAKE_HERDR_PANE_RUN_FAIL,
+	FAKE_HERDR_PANE_CURRENT_FAIL: envRecord().FAKE_HERDR_PANE_CURRENT_FAIL,
 	FAKE_HERDR_AGENT_LIST_ENABLE: envRecord().FAKE_HERDR_AGENT_LIST_ENABLE,
 	FAKE_HERDR_AGENT_LIST_FAIL: envRecord().FAKE_HERDR_AGENT_LIST_FAIL,
 	FAKE_HERDR_AGENT_LIST_TERMINAL_ID: envRecord().FAKE_HERDR_AGENT_LIST_TERMINAL_ID,
@@ -315,6 +316,7 @@ const restoreEnv = (): void => {
 		originalEnv.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
 	);
 	setEnv("FAKE_HERDR_PANE_RUN_FAIL", originalEnv.FAKE_HERDR_PANE_RUN_FAIL);
+	setEnv("FAKE_HERDR_PANE_CURRENT_FAIL", originalEnv.FAKE_HERDR_PANE_CURRENT_FAIL);
 	setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", originalEnv.FAKE_HERDR_AGENT_LIST_ENABLE);
 	setEnv("FAKE_HERDR_AGENT_LIST_FAIL", originalEnv.FAKE_HERDR_AGENT_LIST_FAIL);
 	setEnv("FAKE_HERDR_AGENT_LIST_TERMINAL_ID", originalEnv.FAKE_HERDR_AGENT_LIST_TERMINAL_ID);
@@ -380,6 +382,10 @@ const nextAgentStatus = () => {
   return agentStatus;
 };
 if (args[0] === "pane" && args[1] === "current") {
+  if (process.env.FAKE_HERDR_PANE_CURRENT_FAIL === "1") {
+    process.stderr.write("pane current failed");
+    process.exit(1);
+  }
   writeJson({ result: { pane: { pane_id: "wTest:p0", terminal_id: "term-root", tab_id: "wTest:t1", workspace_id: "wTest", cwd: "/workspace", foreground_cwd: "/workspace" } } });
   process.exit(0);
 }

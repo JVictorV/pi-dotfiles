@@ -1,9 +1,24 @@
 import { describe, expect, test } from "vitest";
 
 import type { HerdrAgent } from "./schemas";
-import { buildOverview, renderOverviewLines, type Overview, type OverviewRow } from "./overview";
+import {
+	buildOverview,
+	type Overview,
+	type OverviewRow,
+	type OverviewTheme,
+	renderOverview,
+} from "./overview";
 import { matchEntriesToAgents } from "./store";
 import type { RegistryEntry } from "./types";
+
+/**
+ * Theme fake that tags text with its color role and bold state so tests can
+ * assert both layout structure and the theme role assigned to each segment.
+ */
+const tagTheme: OverviewTheme = {
+	fg: (role, text) => `[${role}]${text}[/${role}]`,
+	bold: (text) => `<b>${text}</b>`,
+};
 
 const BASE_TIME = Date.parse("2026-01-01T00:00:00.000Z");
 const BASE_TIME_ISO = new Date(BASE_TIME).toISOString();
@@ -87,16 +102,15 @@ describe("buildOverview", () => {
 		expect(result.counts.spawning).toBe(1);
 	});
 
-	test("uses matched live agent status and pane id", () => {
+	test("uses matched live agent status without exposing the pane id", () => {
 		const result = buildOverview(
 			[entry({ name: "worker", terminalId: "term-1" })],
 			[agent({ terminal_id: "term-1", pane_id: "pane-1", agent_status: "working" })],
 			BASE_TIME + 45_000,
 		);
 
-		expect(result.rows).toEqual([
-			{ name: "worker", kind: "working", elapsedMs: 45_000, paneId: "pane-1" },
-		]);
+		expect(result.rows).toEqual([{ name: "worker", kind: "working", elapsedMs: 45_000 }]);
+		expect(result.rows[0]).not.toHaveProperty("paneId");
 	});
 
 	test("matches by hints only for terminal-id-less entries", () => {
@@ -143,95 +157,132 @@ describe("buildOverview", () => {
 	});
 });
 
-describe("renderOverviewLines", () => {
+describe("renderOverview", () => {
 	test("renders no lines when there are no rows", () => {
-		expect(renderOverviewLines(overview([]))).toEqual([]);
+		expect(renderOverview(overview([]), tagTheme)).toEqual([]);
 	});
 
-	test("formats nonzero header counts in canonical order", () => {
-		const lines = renderOverviewLines(
+	test("colors header count chips per kind in canonical order", () => {
+		const header = renderOverview(
 			overview([
 				{ name: "done", kind: "done", elapsedMs: 1_000 },
 				{ name: "blocked", kind: "blocked", elapsedMs: 1_000 },
 				{ name: "working", kind: "working", elapsedMs: 1_000 },
 				{ name: "spawning", kind: "spawning", elapsedMs: 1_000 },
 			]),
-		);
+			tagTheme,
+		)[0];
 
-		expect(lines[0]).toBe("subagents: 1 blocked · 1 working · 1 spawning · 1 done");
+		expect(header).toContain("[dim]subagents[/dim]");
+		// Blocked chip pops: warning + bold.
+		expect(header).toContain("[warning]<b>⚠ 1</b>[/warning]");
+		expect(header).toContain("[accent]● 1[/accent]");
+		expect(header).toContain("[dim]◌ 1[/dim]");
+		expect(header).toContain("[success]✓ 1[/success]");
+		// Canonical order: blocked, then working, then spawning, then done.
+		const indices = ["⚠ 1", "● 1", "◌ 1", "✓ 1"].map((chip) => header?.indexOf(chip) ?? -1);
+		expect(indices).toEqual([...indices].sort((a, b) => a - b));
+		expect(indices.every((index) => index >= 0)).toBe(true);
 	});
 
-	test("sorts blocked rows before working rows and includes glyphs", () => {
-		const lines = renderOverviewLines(
+	test("sorts blocked rows first and assigns each kind its glyph and theme role", () => {
+		const lines = renderOverview(
 			overview([
-				{ name: "work", kind: "working", elapsedMs: 45_000, paneId: "pane-work" },
-				{ name: "block", kind: "blocked", elapsedMs: 45_000, paneId: "pane-block" },
+				{ name: "work", kind: "working", elapsedMs: 45_000 },
+				{ name: "block", kind: "blocked", elapsedMs: 45_000 },
 				{ name: "spawn", kind: "spawning", elapsedMs: 45_000 },
-				{ name: "done", kind: "done", elapsedMs: 45_000 },
-				{ name: "idle", kind: "idle", elapsedMs: 45_000 },
+				{ name: "finished", kind: "done", elapsedMs: 45_000 },
+				{ name: "waiting", kind: "idle", elapsedMs: 45_000 },
 				{ name: "mystery", kind: "unknown", elapsedMs: 45_000 },
 				{ name: "lost", kind: "missing", elapsedMs: 45_000 },
 			]),
+			tagTheme,
 			10,
 		);
+		const body = lines.slice(1).join("\n");
 
-		expect(lines[1]).toContain("⚠ block");
-		expect(lines[2]).toContain("⚙ work");
-		expect(lines.join("\n")).toContain("… spawn");
-		expect(lines.join("\n")).toContain("✓ done");
-		expect(lines.join("\n")).toContain("○ idle");
-		expect(lines.join("\n")).toContain("? mystery");
-		expect(lines.join("\n")).toContain("✗ lost");
+		// Blocked sorts to the first row, painted warning + bold, and spelled out.
+		expect(lines[1]).toContain("[warning]<b>⚠</b>[/warning]");
+		expect(lines[1]).toContain("[warning]<b>block");
+		expect(lines[1]).toContain("[warning]<b>blocked</b>[/warning]");
+		// Working sorts next and is accent.
+		expect(lines[2]).toContain("[accent]●[/accent]");
+		expect(lines[2]).toContain("[accent]work");
+		// Done keeps a success glyph but a de-emphasized (muted) name.
+		expect(body).toContain("[success]✓[/success]");
+		expect(body).toContain("[muted]finished");
+		// Remaining kinds keep their glyph + role.
+		expect(body).toContain("[dim]◌[/dim]");
+		expect(body).toContain("[muted]○[/muted]");
+		expect(body).toContain("[dim]?[/dim]");
+		expect(body).toContain("[error]✗[/error]");
 	});
 
-	test("truncates long names, pads elapsed, and trims trailing whitespace", () => {
-		const lines = renderOverviewLines(
+	test("never renders a pane id", () => {
+		const lines = renderOverview(
+			overview([{ name: "worker", kind: "working", elapsedMs: 45_000 }]),
+			tagTheme,
+		);
+
+		expect(lines.join("\n")).not.toMatch(/pane|w\d+:p/i);
+	});
+
+	test("paints elapsed dim and spells out blocked only for blocked rows", () => {
+		const lines = renderOverview(
 			overview([
-				{
-					name: "very-long-subagent-name",
-					kind: "working",
-					elapsedMs: 45_000,
-					paneId: "pane-long",
-				},
-				{ name: "none", kind: "idle" },
+				{ name: "stuck", kind: "blocked", elapsedMs: 45_000 },
+				{ name: "busy", kind: "working", elapsedMs: 45_000 },
 			]),
+			tagTheme,
 			10,
 		);
 
-		expect(lines[1]).toBe("  ⚙ very-long-subagent-… working  45s    pane-long");
-		expect(lines[2]).toBe("  ○ none                 idle     -");
-		expect(lines[2]?.endsWith(" ")).toBe(false);
+		expect(lines[1]).toContain("[dim]45s[/dim]");
+		expect(lines[1]).toContain("[warning]<b>blocked</b>[/warning]");
+		expect(lines[2]).toContain("[dim]45s[/dim]");
+		expect(lines[2]).not.toContain("blocked");
 	});
 
-	test("truncates rows and appends a status hint", () => {
-		const lines = renderOverviewLines(
+	test("truncates long names with an ellipsis", () => {
+		const lines = renderOverview(
+			overview([{ name: "very-long-subagent-name-that-overflows", kind: "working" }]),
+			tagTheme,
+		);
+
+		expect(lines[1]).toContain("very-long-subagent-na…");
+	});
+
+	test("truncates rows and appends a dim status hint", () => {
+		const lines = renderOverview(
 			overview([
 				{ name: "a", kind: "working" },
 				{ name: "b", kind: "working" },
 				{ name: "c", kind: "working" },
 				{ name: "d", kind: "working" },
 			]),
+			tagTheme,
 			2,
 		);
 
 		expect(lines).toHaveLength(4);
-		expect(lines.at(-1)).toBe("  +2 more (use herdr_subagent status)");
+		expect(lines.at(-1)).toBe("  [dim]+2 more · herdr_subagent status[/dim]");
 	});
 
 	test("humanizes elapsed durations", () => {
-		const lines = renderOverviewLines(
+		const body = renderOverview(
 			overview([
 				{ name: "seconds", kind: "working", elapsedMs: 45_000 },
 				{ name: "minutes", kind: "working", elapsedMs: 192_000 },
 				{ name: "hours", kind: "working", elapsedMs: 3_840_000 },
 				{ name: "none", kind: "working" },
 			]),
+			tagTheme,
 			10,
-		);
+		).join("\n");
 
-		expect(lines.join("\n")).toContain("45s");
-		expect(lines.join("\n")).toContain("3m12s");
-		expect(lines.join("\n")).toContain("1h04m");
-		expect(lines.join("\n")).toContain("none                 working  -");
+		expect(body).toContain("[dim]45s[/dim]");
+		expect(body).toContain("[dim]3m12s[/dim]");
+		expect(body).toContain("[dim]1h04m[/dim]");
+		expect(body).toContain("[dim]-[/dim]");
 	});
 });

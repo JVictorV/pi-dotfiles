@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import type { OverviewTheme } from "./overview";
 import { registerOverviewWidget, type OverviewWidgetOptions } from "./overview-widget";
 import {
 	cleanupHarness,
@@ -20,15 +21,28 @@ const IDLE_POLL_MS = 100;
 
 type SessionEvent = "session_start" | "session_shutdown";
 type WidgetLines = ReadonlyArray<string> | undefined;
+type WidgetComponent = { render(width: number): string[]; invalidate(): void };
+type WidgetFactory = (tui: unknown, theme: OverviewTheme) => WidgetComponent;
+type WidgetContent = ReadonlyArray<string> | WidgetFactory | undefined;
 type WidgetCall = { readonly id: string; readonly lines: WidgetLines };
 type NotifyCall = { readonly message: string; readonly level: string };
+
+/** Pass-through theme so the fake widget captures plain, uncolored layout lines. */
+const plainTheme: OverviewTheme = {
+	fg: (_role, text) => text,
+	bold: (text) => text,
+};
+
+/** Resolve either a plain line array or a component factory into rendered lines. */
+const resolveWidget = (content: WidgetContent): WidgetLines =>
+	typeof content === "function" ? content({}, plainTheme).render(80) : content;
 
 type FakeWidgetContext = {
 	readonly cwd: string;
 	readonly hasUI: boolean;
 	readonly mode: "tui" | "print";
 	readonly ui: {
-		readonly setWidget: (id: string, lines: WidgetLines) => void;
+		readonly setWidget: (id: string, content: WidgetContent) => void;
 		readonly notify: (message: string, level: string) => void;
 		readonly confirm: (title: string, message: string) => Promise<boolean>;
 	};
@@ -84,8 +98,8 @@ const makeContext = (
 		hasUI: overrides.hasUI ?? true,
 		mode: overrides.mode ?? "tui",
 		ui: {
-			setWidget(id, lines) {
-				widgetCalls?.push({ id, lines });
+			setWidget(id, content) {
+				widgetCalls?.push({ id, lines: resolveWidget(content) });
 			},
 			notify(message, level) {
 				notifyCalls?.push({ message, level });
@@ -119,21 +133,31 @@ const startHarness = async (): Promise<{ readonly root: string; readonly agentDi
 	return { root, agentDir };
 };
 
+interface WriteEntryOptions {
+	readonly includeOwner?: boolean;
+}
+
 const writeEntry = async (
 	agentDir: string,
 	overrides: Partial<RegistryEntry> & { readonly name: string },
+	options: WriteEntryOptions = {},
 ): Promise<void> => {
 	const registryDir = path.join(agentDir, "herdr-subagents", "registry");
 	await mkdir(registryDir, { recursive: true });
 	const now = "2026-01-01T00:00:00.000Z";
+	const { ownerPaneId: overrideOwnerPaneId, ...entryOverrides } = overrides;
+	const ownerPaneId =
+		options.includeOwner === false ? undefined : (overrideOwnerPaneId ?? "wTest:p0");
+	const ownerFields = ownerPaneId ? { ownerPaneId } : {};
 	const entry: RegistryEntry = {
 		phase: "active",
+		...ownerFields,
 		cwd: "/workspace",
 		label: `agent: ${overrides.name}`,
 		taskFile: `/tmp/${overrides.name}.md`,
 		createdAt: now,
 		updatedAt: now,
-		...overrides,
+		...entryOverrides,
 	};
 	await writeFile(
 		path.join(registryDir, `${overrides.name}.json`),
@@ -195,8 +219,54 @@ describe("herdr subagent overview widget poller", () => {
 		await vi.waitFor(
 			() => {
 				const lines = lastWidgetLines(pi.widgetCalls);
-				expect(lines?.[0]).toContain("subagents: 1 working");
-				expect(lines?.some((line) => line.includes("⚙ worker-a"))).toBe(true);
+				expect(lines?.[0]).toContain("subagents");
+				expect(lines?.[0]).toContain("● 1");
+				expect(lines?.some((line) => line.includes("● worker-a"))).toBe(true);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+	});
+
+	test("shows only registry entries owned by the current session pane", async () => {
+		const { agentDir } = await startHarness();
+		await writeEntry(agentDir, { name: "owned-a" });
+		await writeEntry(agentDir, { name: "foreign-a", ownerPaneId: "wOther:p0" });
+		await writeEntry(agentDir, { name: "legacy-a" }, { includeOwner: false });
+		const pi = makeFakePi();
+		activePi = pi;
+		registerTestWidget(pi);
+
+		pi.dispatch("session_start", makeContext("/workspace"));
+
+		await vi.waitFor(
+			() => {
+				const lines = lastWidgetLines(pi.widgetCalls);
+				expect(lines?.some((line) => line.includes("owned-a"))).toBe(true);
+				expect(lines?.some((line) => line.includes("foreign-a"))).toBe(false);
+				expect(lines?.some((line) => line.includes("legacy-a"))).toBe(false);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+	});
+
+	test("falls back to showing all entries when the current session pane cannot be resolved", async () => {
+		const { agentDir } = await startHarness();
+		await writeEntry(agentDir, { name: "owned-a" });
+		await writeEntry(agentDir, { name: "foreign-a", ownerPaneId: "wOther:p0" });
+		await writeEntry(agentDir, { name: "legacy-a" }, { includeOwner: false });
+		setEnv("FAKE_HERDR_PANE_CURRENT_FAIL", "1");
+		const pi = makeFakePi();
+		activePi = pi;
+		registerTestWidget(pi);
+
+		pi.dispatch("session_start", makeContext("/workspace"));
+
+		await vi.waitFor(
+			() => {
+				const lines = lastWidgetLines(pi.widgetCalls);
+				expect(lines?.some((line) => line.includes("owned-a"))).toBe(true);
+				expect(lines?.some((line) => line.includes("foreign-a"))).toBe(true);
+				expect(lines?.some((line) => line.includes("legacy-a"))).toBe(true);
 			},
 			{ timeout: 1_000, interval: 10 },
 		);
@@ -246,7 +316,7 @@ describe("herdr subagent overview widget poller", () => {
 
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		await writeFile(statusSequence, "working\nworking\n", "utf8");
-		await expectRenderedLine(pi, "working");
+		await expectRenderedLine(pi, "● review-a");
 
 		setEnv("FAKE_HERDR_AGENT_STATUS", "blocked");
 		await writeFile(statusSequence, "blocked\nblocked\n", "utf8");
@@ -292,7 +362,7 @@ describe("herdr subagent overview widget poller", () => {
 		registerTestWidget(pi);
 
 		pi.dispatch("session_start", makeContext("/workspace"));
-		await expectRenderedLine(pi, "working");
+		await expectRenderedLine(pi, "● worker-a");
 		const renderedBeforeFailure = lastWidgetLines(pi.widgetCalls);
 
 		setEnv("FAKE_HERDR_AGENT_LIST_FAIL", "1");
@@ -301,6 +371,6 @@ describe("herdr subagent overview widget poller", () => {
 
 		setEnv("FAKE_HERDR_AGENT_LIST_FAIL", undefined);
 		setEnv("FAKE_HERDR_AGENT_STATUS", "idle");
-		await expectRenderedLine(pi, "idle");
+		await expectRenderedLine(pi, "○ worker-a");
 	});
 });

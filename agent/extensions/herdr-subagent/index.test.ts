@@ -13,10 +13,12 @@ import {
 	makeTempRoot,
 	readHerdrCalls,
 	runCommandFromCalls,
+	runHerdrSubagentEffect,
 	setEnv,
 	setSubagentSession,
 	writeAgent,
 } from "./test-harness";
+import { decodeRegistryEntry } from "./schemas";
 
 afterEach(cleanupHarness);
 
@@ -140,6 +142,29 @@ describe("herdr_subagent extension", () => {
 		);
 
 		expect(result.content[0]?.text).toContain("Spawned child-a");
+	});
+
+	test("spawn records the current pane as the registry owner", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Owned task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		const registryText = await readFile(
+			path.join(agentDir, "herdr-subagents", "registry", "worker-a.json"),
+			"utf8",
+		);
+		expect(registryText).toContain('"ownerPaneId": "wTest:p0"');
 	});
 
 	test("spawn allowSpawn parameter controls the child recursion grant env", async () => {
@@ -846,6 +871,21 @@ describe("herdr_subagent extension", () => {
 		expect(files.filter((name) => name === "worker-a.json")).toHaveLength(1);
 		const registryText = await readFile(path.join(registryDir, "worker-a.json"), "utf8");
 		expect(registryText).toContain('"name": "worker-a"');
+	});
+
+	test("legacy registry entries without an owner pane still decode", async () => {
+		const decoded = await runHerdrSubagentEffect(
+			decodeRegistryEntry({
+				name: "legacy",
+				cwd: "/workspace",
+				label: "agent: legacy",
+				taskFile: "/tmp/task-legacy.md",
+				createdAt: "2026-01-01T00:00:00.000Z",
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			}),
+		);
+
+		expect(decoded.ownerPaneId).toBeUndefined();
 	});
 
 	test("corrupt registry entries are ignored without wiping valid entries", async () => {

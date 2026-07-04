@@ -17,7 +17,6 @@ export interface OverviewRow {
 	readonly name: string;
 	readonly kind: OverviewRowKind;
 	readonly elapsedMs?: number;
-	readonly paneId?: string;
 }
 
 /** Overview model consumed by the widget renderer. */
@@ -25,6 +24,55 @@ export interface Overview {
 	readonly rows: ReadonlyArray<OverviewRow>;
 	readonly counts: Readonly<Record<OverviewRowKind, number>>;
 }
+
+/**
+ * Theme roles the overview renderer paints with.
+ *
+ * A subset of pi's full `ThemeColor` palette, kept narrow so the renderer only
+ * depends on the roles it actually uses and tests can pass a tagging fake.
+ */
+export type OverviewThemeRole =
+	| "text"
+	| "accent"
+	| "muted"
+	| "dim"
+	| "success"
+	| "error"
+	| "warning";
+
+/**
+ * Minimal theme surface the overview renderer needs.
+ *
+ * pi's `Theme` satisfies this structurally, so the widget can pass the live
+ * theme directly while tests pass a fake that tags text with its color role.
+ */
+export interface OverviewTheme {
+	/** Paint `text` with the foreground color for `role`. */
+	fg(role: OverviewThemeRole, text: string): string;
+	/** Render `text` bold. */
+	bold(text: string): string;
+}
+
+/** Visual treatment for a row kind: glyph, color roles, and whether it demands attention. */
+interface KindStyle {
+	readonly glyph: string;
+	/** Color role for the glyph (and the header count chip). */
+	readonly glyphRole: OverviewThemeRole;
+	/** Color role for the subagent name; may de-emphasize relative to the glyph. */
+	readonly nameRole: OverviewThemeRole;
+	/** Whether the glyph and name are bolded to pull the eye. */
+	readonly bold: boolean;
+}
+
+const KIND_STYLES: Readonly<Record<OverviewRowKind, KindStyle>> = {
+	blocked: { glyph: "⚠", glyphRole: "warning", nameRole: "warning", bold: true },
+	working: { glyph: "●", glyphRole: "accent", nameRole: "accent", bold: false },
+	spawning: { glyph: "◌", glyphRole: "dim", nameRole: "dim", bold: false },
+	done: { glyph: "✓", glyphRole: "success", nameRole: "muted", bold: false },
+	idle: { glyph: "○", glyphRole: "muted", nameRole: "muted", bold: false },
+	unknown: { glyph: "?", glyphRole: "dim", nameRole: "dim", bold: false },
+	missing: { glyph: "✗", glyphRole: "error", nameRole: "error", bold: false },
+};
 
 const OVERVIEW_KIND_ORDER: ReadonlyArray<OverviewRowKind> = [
 	"blocked",
@@ -36,25 +84,9 @@ const OVERVIEW_KIND_ORDER: ReadonlyArray<OverviewRowKind> = [
 	"missing",
 ];
 
-const ROW_SORT_ORDER: ReadonlyArray<OverviewRowKind> = [
-	"blocked",
-	"working",
-	"spawning",
-	"done",
-	"idle",
-	"unknown",
-	"missing",
-];
+const ROW_SORT_ORDER: ReadonlyArray<OverviewRowKind> = OVERVIEW_KIND_ORDER;
 
-const GLYPHS: Readonly<Record<OverviewRowKind, string>> = {
-	working: "⚙",
-	blocked: "⚠",
-	spawning: "…",
-	done: "✓",
-	idle: "○",
-	unknown: "?",
-	missing: "✗",
-};
+const NAME_MAX_WIDTH = 22;
 
 const emptyCounts = (): Record<OverviewRowKind, number> => ({
 	working: 0,
@@ -109,14 +141,15 @@ const formatElapsed = (elapsedMs: number | undefined): string => {
 	return `${hours}h${String(minutes).padStart(2, "0")}m`;
 };
 
-const formatName = (name: string): string =>
-	(name.length > 20 ? `${name.slice(0, 19)}…` : name).padEnd(20);
+const truncateName = (name: string): string =>
+	name.length > NAME_MAX_WIDTH ? `${name.slice(0, NAME_MAX_WIDTH - 1)}…` : name;
 
-const formatElapsedColumn = (elapsedMs: number | undefined): string =>
-	formatElapsed(elapsedMs).padEnd(6);
-
-const renderRow = (row: OverviewRow): string =>
-	`  ${GLYPHS[row.kind]} ${formatName(row.name)} ${row.kind.padEnd(8)} ${formatElapsedColumn(row.elapsedMs)} ${row.paneId ?? ""}`.trimEnd();
+const paint = (
+	theme: OverviewTheme,
+	role: OverviewThemeRole,
+	bold: boolean,
+	text: string,
+): string => theme.fg(role, bold ? theme.bold(text) : text);
 
 /**
  * Build the pure overview model for registry-owned subagents.
@@ -146,7 +179,6 @@ export const buildOverview = (
 			name: entry.name,
 			kind,
 			elapsedMs: elapsedSinceCreated(entry, nowMs),
-			paneId: match.agent?.pane_id,
 		});
 	}
 
@@ -154,31 +186,56 @@ export const buildOverview = (
 };
 
 /**
- * Render an overview model as plain widget lines.
+ * Render an overview model as themed widget lines.
+ *
+ * Colors are computed from `theme` on every call rather than pre-baked, so
+ * theme switches take effect when the widget re-renders. The layout leans on
+ * colored glyphs to carry state at a glance; only `blocked` is also spelled
+ * out because it demands action.
  *
  * @param overview - Overview model returned by {@link buildOverview}.
+ * @param theme - Theme surface used to color glyphs, names, counts, and metadata.
  * @param maxRows - Maximum number of subagent rows to show before truncating.
- * @returns Plain text widget lines, or an empty array when there are no rows.
+ * @returns Themed widget lines, or an empty array when there are no rows.
  */
-export const renderOverviewLines = (overview: Overview, maxRows = 6): string[] => {
+export const renderOverview = (overview: Overview, theme: OverviewTheme, maxRows = 6): string[] => {
 	if (overview.rows.length === 0) {
 		return [];
 	}
 
-	const summary = OVERVIEW_KIND_ORDER.flatMap((kind) => {
+	const chips = OVERVIEW_KIND_ORDER.flatMap((kind) => {
 		const count = overview.counts[kind];
-		return count > 0 ? [`${count} ${kind}`] : [];
-	}).join(" · ");
+		if (count === 0) {
+			return [];
+		}
+		const style = KIND_STYLES[kind];
+		return [paint(theme, style.glyphRole, style.bold, `${style.glyph} ${count}`)];
+	});
+	const header = `${theme.fg("dim", "subagents")}  ${chips.join("  ")}`;
+
 	const sortedRows = [...overview.rows].sort(
 		(left, right) =>
 			sortRank(left.kind) - sortRank(right.kind) || left.name.localeCompare(right.name),
 	);
-	const visibleRowCount = Math.max(0, maxRows);
-	const visibleRows = sortedRows.slice(0, visibleRowCount);
+	const visibleRows = sortedRows.slice(0, Math.max(0, maxRows));
+	const nameWidth = visibleRows.reduce(
+		(widest, row) => Math.max(widest, truncateName(row.name).length),
+		0,
+	);
+
+	const lines = [header];
+	for (const row of visibleRows) {
+		const style = KIND_STYLES[row.kind];
+		const glyph = paint(theme, style.glyphRole, style.bold, style.glyph);
+		const name = paint(theme, style.nameRole, style.bold, truncateName(row.name).padEnd(nameWidth));
+		const elapsed = theme.fg("dim", formatElapsed(row.elapsedMs));
+		const suffix = row.kind === "blocked" ? `  ${paint(theme, "warning", true, "blocked")}` : "";
+		lines.push(`  ${glyph} ${name}  ${elapsed}${suffix}`);
+	}
+
 	const moreCount = sortedRows.length - visibleRows.length;
-	const lines = [`subagents: ${summary}`, ...visibleRows.map(renderRow)];
 	if (moreCount > 0) {
-		lines.push(`  +${moreCount} more (use herdr_subagent status)`);
+		lines.push(`  ${theme.fg("dim", `+${moreCount} more · herdr_subagent status`)}`);
 	}
 	return lines;
 };

@@ -282,10 +282,13 @@ const commandSpawn: (
 		const cwd = params.cwd ?? pane?.foreground_cwd ?? pane?.cwd ?? ctx.cwd;
 		const label = params.label ?? `agent: ${name}`;
 		const allowSpawn = params.allowSpawn ?? agent?.allowSpawn ?? false;
+		const ownerPaneId = pane?.pane_id;
+		const ownerFields = ownerPaneId ? { ownerPaneId } : {};
 		const reservedAt = yield* nowIso;
 		const reservation: RegistryEntry = {
 			name,
 			phase: "reserved",
+			...ownerFields,
 			cwd,
 			label,
 			agentType: params.agentType,
@@ -367,6 +370,7 @@ const commandSpawn: (
 			const entry: RegistryEntry = {
 				name,
 				phase: "active",
+				...ownerFields,
 				target: terminalId ?? paneId,
 				paneId,
 				tabId,
