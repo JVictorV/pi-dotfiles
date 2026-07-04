@@ -1,6 +1,3 @@
-// oxlint-disable effect/no-vitest-import -- Project tests use Vitest directly.
-// oxlint-disable effect/no-process-env -- Tests isolate pi/herdr environment variables per case.
-// oxlint-disable effect/no-raw-throw -- Test setup fails fast when extension wiring is broken.
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -46,6 +43,8 @@ const originalEnv = {
 	FAKE_HERDR_TAB_GET_FAIL: process.env.FAKE_HERDR_TAB_GET_FAIL,
 	FAKE_HERDR_WAIT_HANG: process.env.FAKE_HERDR_WAIT_HANG,
 	FAKE_HERDR_AGENT_STATUS: process.env.FAKE_HERDR_AGENT_STATUS,
+	FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE: process.env.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
+	FAKE_HERDR_PANE_RUN_FAIL: process.env.FAKE_HERDR_PANE_RUN_FAIL,
 };
 
 const restoreEnv = (): void => {
@@ -57,6 +56,11 @@ const restoreEnv = (): void => {
 	setEnv("FAKE_HERDR_TAB_GET_FAIL", originalEnv.FAKE_HERDR_TAB_GET_FAIL);
 	setEnv("FAKE_HERDR_WAIT_HANG", originalEnv.FAKE_HERDR_WAIT_HANG);
 	setEnv("FAKE_HERDR_AGENT_STATUS", originalEnv.FAKE_HERDR_AGENT_STATUS);
+	setEnv(
+		"FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE",
+		originalEnv.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
+	);
+	setEnv("FAKE_HERDR_PANE_RUN_FAIL", originalEnv.FAKE_HERDR_PANE_RUN_FAIL);
 };
 
 const setEnv = (name: string, value: string | undefined): void => {
@@ -158,6 +162,10 @@ if (args[0] === "tab" && args[1] === "create") {
   writeJson({ result: { root_pane: { pane_id: "wTest:p1", terminal_id: "term-subagent", tab_id: "wTest:t2", workspace_id: workspace, cwd, foreground_cwd: cwd }, tab: { tab_id: "wTest:t2", workspace_id: workspace, label } } });
   process.exit(0);
 }
+if (args[0] === "pane" && args[1] === "run" && process.env.FAKE_HERDR_PANE_RUN_FAIL === "1") {
+  process.stderr.write("pane run failed");
+  process.exit(1);
+}
 if (args[0] === "pane" && (args[1] === "rename" || args[1] === "run" || args[1] === "close")) process.exit(0);
 if (args[0] === "tab" && args[1] === "close") {
   if (process.env.FAKE_HERDR_TAB_CLOSE_FAIL === "1") {
@@ -175,7 +183,15 @@ if (args[0] === "tab" && args[1] === "get") {
   process.exit(0);
 }
 if (args[0] === "agent" && args[1] === "get") {
-  const agentStatus = process.env.FAKE_HERDR_AGENT_STATUS || "idle";
+  let agentStatus = process.env.FAKE_HERDR_AGENT_STATUS || "idle";
+  const sequenceFile = process.env.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE;
+  if (sequenceFile && fs.existsSync(sequenceFile)) {
+    const statuses = fs.readFileSync(sequenceFile, "utf8").split(/\r?\n/).filter(Boolean);
+    if (statuses.length > 0) {
+      agentStatus = statuses.shift();
+      fs.writeFileSync(sequenceFile, statuses.length > 0 ? statuses.join("\n") + "\n" : "");
+    }
+  }
   writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: args[2], tab_id: "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" } } });
   process.exit(0);
 }
@@ -301,6 +317,26 @@ describe("herdr_subagent extension", () => {
 		const command = runCommandFromCalls(await readHerdrCalls(log));
 		expect(command).toContain("anthropic/claude-opus-4-8");
 		expect(command).not.toContain("openai-codex/gpt-5.5");
+	});
+
+	test("agent discovery skips unreadable md-shaped directory entries", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await mkdir(path.join(agentDir, "agents", "not-an-agent.md"));
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		const result = await tool.execute(
+			"tool-call",
+			{ action: "agent-types" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(result.content[0]?.text).toContain("worker");
 	});
 
 	test("close removes a stale registry entry when the tab is already gone, unblocking the name", async () => {
@@ -574,5 +610,142 @@ describe("herdr_subagent extension", () => {
 				makeContext("/workspace"),
 			),
 		).rejects.toThrow(/already registered/);
+	});
+
+	test("wait ignores transient startup idle before working", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "idle\nidle\nidle\nworking\ndone\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
+		const tool = await loadTool(agentDir);
+
+		const result = await tool.execute(
+			"tool-call",
+			{ action: "wait", target: "wTest:p1", timeoutMs: 5_000 },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(result.details).toEqual(expect.objectContaining({ observed: "done" }));
+		expect(result.content[0]?.text).not.toContain("reported idle");
+	}, 8_000);
+
+	test("only one same-name concurrent spawn succeeds", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		const results = await Promise.allSettled([
+			tool.execute(
+				"tool-call-a",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+			tool.execute(
+				"tool-call-b",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task B." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		]);
+
+		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+		const rejected = results.find((result) => result.status === "rejected");
+		expect(rejected?.reason).toEqual(
+			expect.objectContaining({ message: expect.stringMatching(/already registered/) }),
+		);
+		const calls = await readHerdrCalls(log);
+		expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(1);
+		const registryText = await readFile(
+			path.join(agentDir, "herdr-subagents", "registry.json"),
+			"utf8",
+		);
+		expect(registryText).toContain('"worker-a"');
+		expect(registryText).toContain('"name": "worker-a"');
+	});
+
+	test("corrupt registry entries are dropped without wiping valid entries", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const registryDir = path.join(agentDir, "herdr-subagents");
+		await mkdir(registryDir, { recursive: true });
+		await writeFile(
+			path.join(registryDir, "registry.json"),
+			JSON.stringify(
+				{
+					version: 1,
+					entries: {
+						kept: {
+							name: "kept",
+							target: "term-kept",
+							paneId: "wTest:p9",
+							cwd: "/workspace",
+							label: "agent: kept",
+							taskFile: "/tmp/task-kept.md",
+							createdAt: "2026-01-01T00:00:00.000Z",
+							updatedAt: "2026-01-01T00:00:00.000Z",
+						},
+						bad: { name: "bad" },
+					},
+				},
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const tool = await loadTool(agentDir);
+
+		const status = await tool.execute(
+			"tool-call-status",
+			{ action: "status" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(status.content[0]?.text).toContain("kept");
+		const registryText = await readFile(path.join(registryDir, "registry.json"), "utf8");
+		expect(registryText).toContain('"kept"');
+		expect(registryText).not.toContain('"bad"');
+	});
+
+	test("spawn pane run failure closes the created tab and clears the reservation", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_PANE_RUN_FAIL", "1");
+		const tool = await loadTool(agentDir);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/herdr exited with code 1/);
+
+		const calls = await readHerdrCalls(log);
+		expect(calls).toContainEqual(["tab", "close", "wTest:t2"]);
+		const registryText = await readFile(
+			path.join(agentDir, "herdr-subagents", "registry.json"),
+			"utf8",
+		);
+		expect(registryText).not.toContain('"worker-a"');
 	});
 });

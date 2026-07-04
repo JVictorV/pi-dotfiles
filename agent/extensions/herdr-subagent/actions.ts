@@ -1,0 +1,636 @@
+import { Clock, Effect, Result } from "effect";
+import type { FileSystem } from "effect/FileSystem";
+import type { Path } from "effect/Path";
+import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+
+import { buildTaskPrompt, discoverAgents, formatAgentTypes } from "./agents";
+import {
+	failAction,
+	HerdrCommandFailed,
+	HerdrNotAvailable,
+	type HerdrSubagentError,
+	HerdrSubagentToolError,
+	SpawnRejected,
+	toToolError,
+	WaitTimedOut,
+} from "./errors";
+import {
+	currentPane,
+	decodeHerdrJson,
+	isRunningInsideHerdr,
+	liveAgent,
+	runHerdr,
+	tabExists,
+} from "./herdr-cli";
+import { requireTarget, resolvePane } from "./pane";
+import { textContent, truncateForModel } from "./output";
+import { casesHandled } from "./prelude";
+import {
+	finalizeRegistryEntry,
+	findRegistryEntry,
+	mutateRegistry,
+	nowIso,
+	readRegistry,
+	removeRegistryEntry,
+	reserveRegistryEntry,
+} from "./registry";
+import { deleteRuntimeFiles, writeRuntimeFile } from "./runtime-files";
+import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
+import type {
+	AgentDefinition,
+	HerdrSubagentParams,
+	PiToolContext,
+	RegistryEntry,
+	ResolvedPane,
+	ToolResult,
+} from "./types";
+
+type HerdrActionRequirements = ChildProcessSpawner | FileSystem | Path;
+
+const DEFAULT_INSPECT_LINES = 120;
+const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
+const WAIT_POLL_INTERVAL_MS = 2_000;
+const WAIT_IDLE_CONFIRMATIONS = 2;
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
+const isRegistryReservation = (entry: RegistryEntry): boolean =>
+	entry.taskFile.length === 0 &&
+	entry.target.startsWith("reserved:") &&
+	entry.paneId.startsWith("reserved:");
+
+const commandStatus: Effect.Effect<
+	ToolResult,
+	HerdrCommandFailed | HerdrSubagentError,
+	HerdrActionRequirements
+> = Effect.gen(function* () {
+	const registry = yield* readRegistry;
+	const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
+	const liveAgents = response.result.agents;
+	const nextEntries: Record<string, RegistryEntry> = { ...registry.entries };
+	const liveUpdates: Record<string, RegistryEntry> = {};
+	const seenNames = new Set<string>();
+	const rows: string[] = [];
+
+	for (const agent of liveAgents) {
+		const terminalId = agent.terminal_id;
+		const paneId = agent.pane_id;
+		const tabId = agent.tab_id;
+		const matched = Object.values(nextEntries).find(
+			(entry) =>
+				entry.target === terminalId ||
+				entry.terminalId === terminalId ||
+				entry.paneId === paneId ||
+				entry.tabId === tabId,
+		);
+		if (matched && paneId) {
+			seenNames.add(matched.name);
+			const updated: RegistryEntry = {
+				...matched,
+				target: terminalId ?? paneId,
+				terminalId: terminalId ?? matched.terminalId,
+				paneId,
+				tabId: tabId ?? matched.tabId,
+				workspaceId: agent.workspace_id ?? matched.workspaceId,
+				updatedAt: yield* nowIso,
+			};
+			nextEntries[matched.name] = updated;
+			liveUpdates[matched.name] = updated;
+		}
+		const name = matched?.name ?? "-";
+		const status = agent.agent_status ?? "unknown";
+		const focus = agent.focused ? "*" : " ";
+		const cwd = agent.foreground_cwd ?? agent.cwd ?? "";
+		rows.push(
+			`${focus} ${name.padEnd(22)} ${status.padEnd(8)} ${(paneId ?? "").padEnd(12)} ${cwd}`,
+		);
+	}
+
+	for (const entry of Object.values(nextEntries)) {
+		if (!seenNames.has(entry.name) && !isRegistryReservation(entry)) {
+			rows.push(`  ${entry.name.padEnd(22)} missing  ${entry.paneId.padEnd(12)} ${entry.cwd}`);
+		}
+	}
+
+	yield* mutateRegistry((entries) => {
+		for (const [name, updated] of Object.entries(liveUpdates)) {
+			if (entries[name]) {
+				entries[name] = updated;
+			}
+		}
+		return entries;
+	});
+	const text =
+		rows.length > 0
+			? `F NAME                   STATUS   PANE         CWD\n${rows.join("\n")}`
+			: "No herdr agents found.";
+	return {
+		content: [textContent(text)],
+		details: { action: "status", registry: { version: 1, entries: nextEntries } },
+	};
+});
+
+const commandAgentTypes: (
+	params: HerdrSubagentParams,
+	ctxCwd: string,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params, ctxCwd) {
+		const discovery = yield* discoverAgents(ctxCwd, params.agentScope ?? "user");
+		return {
+			content: [textContent(formatAgentTypes(discovery))],
+			details: {
+				action: "agent-types",
+				projectAgentsDir: discovery.projectAgentsDir,
+				agents: discovery.agents,
+			},
+		};
+	},
+);
+
+const confirmProjectAgent = (
+	agent: AgentDefinition,
+	ctx: PiToolContext,
+): Effect.Effect<boolean, SpawnRejected> =>
+	Effect.tryPromise({
+		try: () =>
+			ctx.ui.confirm(
+				"Run project-local herdr subagent?",
+				`Agent: ${agent.name}\nSource: ${agent.filePath}\n\nProject agents are repo-controlled prompts. Only continue for trusted repositories.`,
+			),
+		catch: (cause) =>
+			new SpawnRejected({
+				message: "Could not confirm project-local agent approval.",
+				cause,
+			}),
+	});
+
+const cleanupFailedSpawn: (
+	name: string,
+	tabId: string | undefined,
+	filePaths: ReadonlyArray<string | undefined>,
+) => Effect.Effect<void, never, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (name, tabId, filePaths) {
+		if (tabId) {
+			yield* runHerdr(["tab", "close", tabId]).pipe(Effect.catch(() => Effect.void));
+		}
+		yield* deleteRuntimeFiles(filePaths);
+		yield* removeRegistryEntry(name).pipe(Effect.catch(() => Effect.void));
+	},
+);
+
+const commandSpawn: (
+	params: HerdrSubagentParams,
+	ctx: PiToolContext,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params, ctx) {
+		const name = params.name;
+		const task = params.task;
+		if (!name || !task) {
+			return yield* failAction("spawn requires both name and task.");
+		}
+
+		const registry = yield* readRegistry;
+		if (registry.entries[name]) {
+			return yield* failAction(
+				`A subagent named ${name} is already registered. Use close first, or pick a different name.`,
+			);
+		}
+
+		const discovery = yield* discoverAgents(ctx.cwd, params.agentScope ?? "user");
+		const agent = params.agentType
+			? discovery.agents.find((candidate) => candidate.name === params.agentType)
+			: undefined;
+		if (params.agentType && !agent) {
+			return yield* failAction(
+				`Unknown agentType ${params.agentType}.\n\n${formatAgentTypes(discovery)}`,
+			);
+		}
+
+		if (agent?.source === "project" && (params.confirmProjectAgents ?? true)) {
+			if (!ctx.hasUI) {
+				return yield* failAction(
+					`Project-local agent ${agent.name} requires confirmation, but this pi session has no UI. Pass confirmProjectAgents: false only for trusted repositories.`,
+				);
+			}
+			const ok = yield* confirmProjectAgent(agent, ctx);
+			if (!ok) {
+				return {
+					content: [textContent("Canceled: project-local agent was not approved.")],
+					details: { action: "spawn", projectAgentsDir: discovery.projectAgentsDir },
+				};
+			}
+		}
+
+		const pane = yield* currentPane().pipe(
+			Effect.catch((error) => (params.workspace ? Effect.succeed(undefined) : Effect.fail(error))),
+		);
+		const workspaceId = params.workspace ?? pane?.workspace_id;
+		if (!workspaceId) {
+			return yield* failAction("Could not determine herdr workspace. Pass workspace explicitly.");
+		}
+		const spawnWorkspaceId = workspaceId;
+		const cwd = params.cwd ?? pane?.foreground_cwd ?? pane?.cwd ?? ctx.cwd;
+		const label = params.label ?? `agent: ${name}`;
+		const reservedAt = yield* nowIso;
+		const reservation: RegistryEntry = {
+			name,
+			target: `reserved:${name}`,
+			paneId: `reserved:${name}`,
+			cwd,
+			label,
+			agentType: params.agentType,
+			model: params.model ?? agent?.model,
+			taskFile: "",
+			createdAt: reservedAt,
+			updatedAt: reservedAt,
+		};
+		yield* reserveRegistryEntry(reservation);
+
+		const runtimeFiles: Array<string | undefined> = [];
+		let createdTabId: string | undefined;
+		const spawnAfterReservation: Effect.Effect<
+			ToolResult,
+			HerdrSubagentError,
+			HerdrActionRequirements
+		> = Effect.gen(function* () {
+			const createArgs = [
+				"tab",
+				"create",
+				"--workspace",
+				spawnWorkspaceId,
+				"--cwd",
+				cwd,
+				"--label",
+				label,
+				"--env",
+				`HERDR_SUBAGENT_NAME=${name}`,
+				"--no-focus",
+			];
+			const created = yield* decodeHerdrJson(createArgs, decodeTabCreateResponse);
+			const rootPane = created.result.root_pane ?? created.result.pane;
+			const tab = created.result.tab;
+			const tabId = tab?.tab_id ?? rootPane?.tab_id;
+			createdTabId = tabId;
+			const paneId = rootPane?.pane_id;
+			if (!paneId) {
+				return yield* failAction(
+					`Could not find root pane in herdr response:\n${JSON.stringify(created, null, 2)}`,
+				);
+			}
+			const terminalId = rootPane?.terminal_id;
+			yield* runHerdr(["pane", "rename", paneId, label]).pipe(Effect.catch(() => Effect.void));
+
+			const taskFile = yield* writeRuntimeFile(
+				"task",
+				name,
+				buildTaskPrompt(name, task, params.agentType),
+			);
+			runtimeFiles.push(taskFile);
+			const systemPromptFile = agent?.systemPrompt
+				? yield* writeRuntimeFile("system", name, agent.systemPrompt)
+				: undefined;
+			runtimeFiles.push(systemPromptFile);
+			const model = params.model ?? agent?.model;
+			const thinking = params.thinking ?? agent?.thinking;
+			const tools = params.tools ?? agent?.tools;
+			const commandParts = ["pi", "--name", `subagent: ${name}`];
+			if (model) {
+				commandParts.push("--model", model);
+			}
+			if (thinking) {
+				commandParts.push("--thinking", thinking);
+			}
+			if (tools && tools.length > 0) {
+				commandParts.push("--tools", tools.join(","));
+			}
+			if (systemPromptFile) {
+				commandParts.push("--append-system-prompt", systemPromptFile);
+			}
+			commandParts.push(`@${taskFile}`);
+			const command = commandParts.map(shellQuote).join(" ");
+			yield* runHerdr(["pane", "run", paneId, command]);
+
+			const createdAt = yield* nowIso;
+			const updatedAt = yield* nowIso;
+			const entry: RegistryEntry = {
+				name,
+				target: terminalId ?? paneId,
+				paneId,
+				tabId,
+				workspaceId: spawnWorkspaceId,
+				terminalId,
+				cwd,
+				label,
+				agentType: params.agentType,
+				model,
+				taskFile,
+				systemPromptFile,
+				createdAt,
+				updatedAt,
+			};
+			const nextRegistry = yield* finalizeRegistryEntry(entry);
+
+			return {
+				content: [
+					textContent(
+						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${cwd}\n\nNext: inspect ${name} or wait for status done.`,
+					),
+				],
+				details: { action: "spawn", entry, registry: nextRegistry },
+			};
+		});
+
+		return yield* spawnAfterReservation.pipe(
+			Effect.onError(() => cleanupFailedSpawn(name, createdTabId, runtimeFiles)),
+		);
+	},
+);
+
+const commandInspect: (
+	params: HerdrSubagentParams,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params) {
+		const target = requireTarget(params);
+		if (!target) {
+			return yield* failAction("inspect requires target or name.");
+		}
+		const registry = yield* readRegistry;
+		const resolved = yield* resolvePane(target, registry);
+		const lines = params.lines ?? DEFAULT_INSPECT_LINES;
+		const source = params.source ?? "recent-unwrapped";
+		const outcome = yield* runHerdr([
+			"pane",
+			"read",
+			resolved.paneId,
+			"--source",
+			source,
+			"--lines",
+			String(lines),
+		]);
+		const truncated = truncateForModel(outcome.stdout, lines);
+		return {
+			content: [textContent(truncated.text)],
+			details: {
+				action: "inspect",
+				target,
+				resolved,
+				source,
+				lines,
+				truncated: truncated.truncated,
+			},
+		};
+	},
+);
+
+const commandSend: (
+	params: HerdrSubagentParams,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params) {
+		const target = requireTarget(params);
+		if (!target || !params.message) {
+			return yield* failAction("send requires target/name and message.");
+		}
+		const registry = yield* readRegistry;
+		const resolved = yield* resolvePane(target, registry);
+		yield* runHerdr(["pane", "run", resolved.paneId, params.message]);
+		return {
+			content: [textContent(`Sent message to ${resolved.name} (${resolved.paneId}).`)],
+			details: { action: "send", resolved },
+		};
+	},
+);
+
+/**
+ * Wait until a subagent has finished its turn.
+ *
+ * Herdr's `done` agent status means "finished and not yet viewed": pi only ever
+ * reports `working`/`blocked`/`idle`, and herdr synthesizes `done` for an idle
+ * pane nobody has looked at. A finished pane that is visible or already viewed
+ * reports `idle` directly, so `herdr wait agent-status --status done` can block
+ * for the full timeout even though the subagent finished long ago. Poll the
+ * agent status instead and accept either `done` or a stable `idle`.
+ *
+ * `idle` must be observed on {@link WAIT_IDLE_CONFIRMATIONS} consecutive polls
+ * because pi publishes a transient `idle` at session start, before the spawned
+ * task begins working.
+ */
+const startupIdleStabilityMs = (timeoutMs: number): number =>
+	Math.min(10_000, Math.max(0, Math.floor(timeoutMs * 0.6)));
+
+const waitForFinished: (
+	resolved: ResolvedPane,
+	timeoutMs: number,
+) => Effect.Effect<{ readonly observed: "done" | "idle" }, WaitTimedOut, HerdrActionRequirements> =
+	Effect.fnUntraced(function* (resolved, timeoutMs) {
+		const startedAt = yield* Clock.currentTimeMillis;
+		// Scale the poll interval down for short timeouts so a quick wait can still
+		// confirm consecutive idle polls before the deadline.
+		const pollMs = Math.max(100, Math.min(WAIT_POLL_INTERVAL_MS, Math.floor(timeoutMs / 5)));
+		const neverWorkedIdleMs = startupIdleStabilityMs(timeoutMs);
+		let consecutiveIdle = 0;
+		let firstIdleAt: number | undefined;
+		let observedWorking = false;
+		let lastStatus = "unknown";
+		const poll: Effect.Effect<
+			{ readonly observed: "done" | "idle" },
+			WaitTimedOut,
+			HerdrActionRequirements
+		> = Effect.suspend(() =>
+			Effect.gen(function* () {
+				const agent = yield* liveAgent(resolved.paneId);
+				lastStatus = agent?.agent_status ?? "unknown";
+				if (lastStatus === "done") {
+					return { observed: "done" };
+				}
+				if (lastStatus === "working") {
+					observedWorking = true;
+				}
+				if (lastStatus === "idle") {
+					const now = yield* Clock.currentTimeMillis;
+					firstIdleAt ??= now;
+					consecutiveIdle += 1;
+					if (observedWorking) {
+						if (consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS) {
+							return { observed: "idle" };
+						}
+					} else if (
+						consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS &&
+						now - firstIdleAt >= neverWorkedIdleMs
+					) {
+						return { observed: "idle" };
+					}
+				} else {
+					consecutiveIdle = 0;
+					firstIdleAt = undefined;
+				}
+				const now = yield* Clock.currentTimeMillis;
+				const elapsed = now - startedAt;
+				const remaining = timeoutMs - elapsed;
+				if (remaining <= 0) {
+					return yield* new WaitTimedOut({
+						message: `wait timed out after ${timeoutMs}ms; last agent status: ${lastStatus}. Inspect ${resolved.name} to check progress, then re-wait.`,
+					});
+				}
+				yield* Effect.sleep(Math.min(pollMs, remaining));
+				return yield* poll;
+			}),
+		);
+		return yield* poll;
+	});
+
+const commandWait: (
+	params: HerdrSubagentParams,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params) {
+		const target = requireTarget(params);
+		if (!target) {
+			return yield* failAction("wait requires target or name.");
+		}
+		const registry = yield* readRegistry;
+		const resolved = yield* resolvePane(target, registry);
+		const status = params.status ?? "done";
+		const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+		if (status === "done") {
+			const outcome = yield* waitForFinished(resolved, timeoutMs);
+			const viaIdle =
+				outcome.observed === "idle"
+					? " (reported idle: the pane was already viewed or finished before the wait)"
+					: "";
+			return {
+				content: [
+					textContent(
+						`${resolved.name} finished${viaIdle}. Inspect the panel before trusting the result.`,
+					),
+				],
+				details: { action: "wait", resolved, status, observed: outcome.observed },
+			};
+		}
+		yield* runHerdr(
+			["wait", "agent-status", resolved.paneId, "--status", status, "--timeout", String(timeoutMs)],
+			timeoutMs + 1_000,
+		);
+		return {
+			content: [
+				textContent(
+					`${resolved.name} reached ${status}. Inspect the panel before trusting the result.`,
+				),
+			],
+			details: { action: "wait", resolved, status },
+		};
+	},
+);
+
+const commandFocus: (
+	params: HerdrSubagentParams,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params) {
+		const target = requireTarget(params);
+		if (!target) {
+			return yield* failAction("focus requires target or name.");
+		}
+		const registry = yield* readRegistry;
+		const entry = registry.entries[target];
+		const focusTarget = entry?.target ?? target;
+		yield* runHerdr(["agent", "focus", focusTarget]);
+		return {
+			content: [textContent(`Focused ${target}.`)],
+			details: { action: "focus", target: focusTarget },
+		};
+	},
+);
+
+const commandClose: (
+	params: HerdrSubagentParams,
+) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params) {
+		const target = requireTarget(params);
+		if (!target) {
+			return yield* failAction("close requires target or name.");
+		}
+		const registry = yield* readRegistry;
+		const entry = findRegistryEntry(registry, target);
+		if (entry?.tabId) {
+			const closeResult = yield* runHerdr(["tab", "close", entry.tabId]).pipe(Effect.result);
+			const closeFailure = Result.isFailure(closeResult) ? closeResult.failure : undefined;
+			if (closeFailure) {
+				// The tab may already be gone (for example, closed manually in herdr's UI).
+				// Keeping the entry would block the name forever, so only surface the
+				// failure when the tab still exists; otherwise clean up the stale entry.
+				if (yield* tabExists(entry.tabId)) {
+					return yield* Effect.fail(closeFailure);
+				}
+				yield* removeRegistryEntry(entry.name);
+				yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
+				return {
+					content: [
+						textContent(
+							`Tab ${entry.tabId} for ${entry.name} was already gone; removed the stale registry entry.`,
+						),
+					],
+					details: { action: "close", entry, stale: true },
+				};
+			}
+			yield* removeRegistryEntry(entry.name);
+			yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
+			return {
+				content: [textContent(`Closed tab ${entry.tabId} for ${entry.name}.`)],
+				details: { action: "close", entry },
+			};
+		}
+		const resolved = yield* resolvePane(target, registry);
+		yield* runHerdr(["pane", "close", resolved.paneId]);
+		// A registry entry without a tabId can still reference this pane; clean it up
+		// so the closed pane does not leave a permanently "missing" name behind.
+		const paneEntry = entry ?? findRegistryEntry(registry, resolved.paneId);
+		if (paneEntry) {
+			yield* removeRegistryEntry(paneEntry.name);
+			yield* deleteRuntimeFiles([paneEntry.taskFile, paneEntry.systemPromptFile]);
+		}
+		return {
+			content: [textContent(`Closed pane ${resolved.paneId}.`)],
+			details: { action: "close", resolved },
+		};
+	},
+);
+
+const runAction = (
+	params: HerdrSubagentParams,
+	ctx: PiToolContext,
+): Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> => {
+	switch (params.action) {
+		case "status":
+			return commandStatus;
+		case "agent-types":
+			return commandAgentTypes(params, ctx.cwd);
+		case "spawn":
+			return commandSpawn(params, ctx);
+		case "inspect":
+			return commandInspect(params);
+		case "send":
+			return commandSend(params);
+		case "wait":
+			return commandWait(params);
+		case "focus":
+			return commandFocus(params);
+		case "close":
+			return commandClose(params);
+		default:
+			return casesHandled(params.action);
+	}
+};
+
+export const executeAction: (
+	params: HerdrSubagentParams,
+	ctx: PiToolContext,
+) => Effect.Effect<ToolResult, HerdrSubagentToolError, HerdrActionRequirements> = Effect.fnUntraced(
+	function* (params, ctx) {
+		if (!isRunningInsideHerdr()) {
+			return yield* new HerdrNotAvailable({
+				message:
+					"HERDR_ENV is not 1; herdr_subagent can only inspect or control panels from inside herdr.",
+			});
+		}
+		return yield* runAction(params, ctx);
+	},
+	Effect.mapError(toToolError),
+);
