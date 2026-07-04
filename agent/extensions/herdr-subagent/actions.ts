@@ -26,15 +26,19 @@ import { requireTarget, resolvePane } from "./pane";
 import { textContent, truncateForModel } from "./output";
 import { casesHandled } from "./prelude";
 import {
-	finalizeRegistryEntry,
-	findRegistryEntry,
-	mutateRegistry,
+	entryPhase,
+	finalizeEntry,
+	findEntry,
+	listEntries,
 	nowIso,
-	readRegistry,
-	removeRegistryEntry,
-	reserveRegistryEntry,
-} from "./registry";
+	readEntry,
+	removeEntry,
+	reserveEntry,
+	RESERVATION_STALE_MS,
+	updateEntryHints,
+} from "./store";
 import { deleteRuntimeFiles, writeRuntimeFile } from "./runtime-files";
+import * as SubagentName from "./subagent-name";
 import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
 import type {
 	AgentDefinition,
@@ -54,39 +58,47 @@ const WAIT_IDLE_CONFIRMATIONS = 2;
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-const isRegistryReservation = (entry: RegistryEntry): boolean =>
-	entry.taskFile.length === 0 &&
-	entry.target.startsWith("reserved:") &&
-	entry.paneId.startsWith("reserved:");
+const isRegistryReservation = (entry: RegistryEntry): boolean => entryPhase(entry) === "reserved";
 
 const commandStatus: Effect.Effect<
 	ToolResult,
 	HerdrCommandFailed | HerdrSubagentError,
 	HerdrActionRequirements
 > = Effect.gen(function* () {
-	const registry = yield* readRegistry;
+	const entries = [...(yield* listEntries)];
 	const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
 	const liveAgents = response.result.agents;
-	const nextEntries: Record<string, RegistryEntry> = { ...registry.entries };
-	const liveUpdates: Record<string, RegistryEntry> = {};
 	const seenNames = new Set<string>();
 	const rows: string[] = [];
+
+	const replaceEntry = (updated: RegistryEntry): void => {
+		const index = entries.findIndex((entry) => entry.name === updated.name);
+		if (index >= 0) {
+			entries[index] = updated;
+		}
+	};
 
 	for (const agent of liveAgents) {
 		const terminalId = agent.terminal_id;
 		const paneId = agent.pane_id;
 		const tabId = agent.tab_id;
-		const matched = Object.values(nextEntries).find(
-			(entry) =>
-				entry.target === terminalId ||
-				entry.terminalId === terminalId ||
-				entry.paneId === paneId ||
-				entry.tabId === tabId,
-		);
+		const matchedByTerminal = terminalId
+			? entries.find((entry) => entry.terminalId === terminalId)
+			: undefined;
+		const matched =
+			matchedByTerminal ??
+			entries.find(
+				(entry) =>
+					!entry.terminalId &&
+					((terminalId !== undefined && entry.target === terminalId) ||
+						(paneId !== undefined && entry.paneId === paneId) ||
+						(tabId !== undefined && entry.tabId === tabId)),
+			);
 		if (matched && paneId) {
 			seenNames.add(matched.name);
 			const updated: RegistryEntry = {
 				...matched,
+				phase: "active",
 				target: terminalId ?? paneId,
 				terminalId: terminalId ?? matched.terminalId,
 				paneId,
@@ -94,8 +106,8 @@ const commandStatus: Effect.Effect<
 				workspaceId: agent.workspace_id ?? matched.workspaceId,
 				updatedAt: yield* nowIso,
 			};
-			nextEntries[matched.name] = updated;
-			liveUpdates[matched.name] = updated;
+			replaceEntry(updated);
+			yield* updateEntryHints(updated);
 		}
 		const name = matched?.name ?? "-";
 		const status = agent.agent_status ?? "unknown";
@@ -106,27 +118,21 @@ const commandStatus: Effect.Effect<
 		);
 	}
 
-	for (const entry of Object.values(nextEntries)) {
+	for (const entry of entries) {
 		if (!seenNames.has(entry.name) && !isRegistryReservation(entry)) {
-			rows.push(`  ${entry.name.padEnd(22)} missing  ${entry.paneId.padEnd(12)} ${entry.cwd}`);
+			rows.push(
+				`  ${entry.name.padEnd(22)} missing  ${(entry.paneId ?? "").padEnd(12)} ${entry.cwd}`,
+			);
 		}
 	}
 
-	yield* mutateRegistry((entries) => {
-		for (const [name, updated] of Object.entries(liveUpdates)) {
-			if (entries[name]) {
-				entries[name] = updated;
-			}
-		}
-		return entries;
-	});
 	const text =
 		rows.length > 0
 			? `F NAME                   STATUS   PANE         CWD\n${rows.join("\n")}`
 			: "No herdr agents found.";
 	return {
 		content: [textContent(text)],
-		details: { action: "status", registry: { version: 1, entries: nextEntries } },
+		details: { action: "status", entries },
 	};
 });
 
@@ -174,7 +180,7 @@ const cleanupFailedSpawn: (
 			yield* runHerdr(["tab", "close", tabId]).pipe(Effect.catch(() => Effect.void));
 		}
 		yield* deleteRuntimeFiles(filePaths);
-		yield* removeRegistryEntry(name).pipe(Effect.catch(() => Effect.void));
+		yield* removeEntry(name).pipe(Effect.catch(() => Effect.void));
 	},
 );
 
@@ -183,17 +189,30 @@ const commandSpawn: (
 	ctx: PiToolContext,
 ) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params, ctx) {
-		const name = params.name;
+		const rawName = params.name;
 		const task = params.task;
-		if (!name || !task) {
+		if (!rawName || !task) {
 			return yield* failAction("spawn requires both name and task.");
 		}
+		const parsedName = SubagentName.parse(rawName);
+		if (Result.isFailure(parsedName)) {
+			return yield* Effect.fail(parsedName.failure);
+		}
+		const name = parsedName.success;
 
-		const registry = yield* readRegistry;
-		if (registry.entries[name]) {
-			return yield* failAction(
-				`A subagent named ${name} is already registered. Use close first, or pick a different name.`,
-			);
+		const existing = yield* readEntry(name);
+		if (existing) {
+			const now = yield* Clock.currentTimeMillis;
+			const updatedAt = Date.parse(existing.updatedAt);
+			const staleReservation =
+				entryPhase(existing) === "reserved" &&
+				Number.isFinite(updatedAt) &&
+				now - updatedAt > RESERVATION_STALE_MS;
+			if (!staleReservation) {
+				return yield* failAction(
+					`A subagent named ${name} is already registered. Use close first, or pick a different name.`,
+				);
+			}
 		}
 
 		const discovery = yield* discoverAgents(ctx.cwd, params.agentScope ?? "user");
@@ -234,8 +253,7 @@ const commandSpawn: (
 		const reservedAt = yield* nowIso;
 		const reservation: RegistryEntry = {
 			name,
-			target: `reserved:${name}`,
-			paneId: `reserved:${name}`,
+			phase: "reserved",
 			cwd,
 			label,
 			agentType: params.agentType,
@@ -244,7 +262,7 @@ const commandSpawn: (
 			createdAt: reservedAt,
 			updatedAt: reservedAt,
 		};
-		yield* reserveRegistryEntry(reservation);
+		yield* reserveEntry(reservation);
 
 		const runtimeFiles: Array<string | undefined> = [];
 		let createdTabId: string | undefined;
@@ -314,6 +332,7 @@ const commandSpawn: (
 			const updatedAt = yield* nowIso;
 			const entry: RegistryEntry = {
 				name,
+				phase: "active",
 				target: terminalId ?? paneId,
 				paneId,
 				tabId,
@@ -328,7 +347,7 @@ const commandSpawn: (
 				createdAt,
 				updatedAt,
 			};
-			const nextRegistry = yield* finalizeRegistryEntry(entry);
+			yield* finalizeEntry(entry);
 
 			return {
 				content: [
@@ -336,7 +355,7 @@ const commandSpawn: (
 						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${cwd}\n\nNext: inspect ${name} or wait for status done.`,
 					),
 				],
-				details: { action: "spawn", entry, registry: nextRegistry },
+				details: { action: "spawn", entry },
 			};
 		});
 
@@ -354,8 +373,8 @@ const commandInspect: (
 		if (!target) {
 			return yield* failAction("inspect requires target or name.");
 		}
-		const registry = yield* readRegistry;
-		const resolved = yield* resolvePane(target, registry);
+		const entries = yield* listEntries;
+		const resolved = yield* resolvePane(target, entries);
 		const lines = params.lines ?? DEFAULT_INSPECT_LINES;
 		const source = params.source ?? "recent-unwrapped";
 		const outcome = yield* runHerdr([
@@ -390,8 +409,8 @@ const commandSend: (
 		if (!target || !params.message) {
 			return yield* failAction("send requires target/name and message.");
 		}
-		const registry = yield* readRegistry;
-		const resolved = yield* resolvePane(target, registry);
+		const entries = yield* listEntries;
+		const resolved = yield* resolvePane(target, entries);
 		yield* runHerdr(["pane", "run", resolved.paneId, params.message]);
 		return {
 			content: [textContent(`Sent message to ${resolved.name} (${resolved.paneId}).`)],
@@ -486,8 +505,8 @@ const commandWait: (
 		if (!target) {
 			return yield* failAction("wait requires target or name.");
 		}
-		const registry = yield* readRegistry;
-		const resolved = yield* resolvePane(target, registry);
+		const entries = yield* listEntries;
+		const resolved = yield* resolvePane(target, entries);
 		const status = params.status ?? "done";
 		const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
 		if (status === "done") {
@@ -528,9 +547,10 @@ const commandFocus: (
 		if (!target) {
 			return yield* failAction("focus requires target or name.");
 		}
-		const registry = yield* readRegistry;
-		const entry = registry.entries[target];
-		const focusTarget = entry?.target ?? target;
+		const namedEntry = yield* readEntry(target);
+		const entries = namedEntry ? undefined : yield* listEntries;
+		const entry = namedEntry ?? findEntry(entries ?? [], target);
+		const focusTarget = entry?.target ?? entry?.terminalId ?? target;
 		yield* runHerdr(["agent", "focus", focusTarget]);
 		return {
 			content: [textContent(`Focused ${target}.`)],
@@ -547,8 +567,8 @@ const commandClose: (
 		if (!target) {
 			return yield* failAction("close requires target or name.");
 		}
-		const registry = yield* readRegistry;
-		const entry = findRegistryEntry(registry, target);
+		const entries = yield* listEntries;
+		const entry = findEntry(entries, target);
 		if (entry?.tabId) {
 			const closeResult = yield* runHerdr(["tab", "close", entry.tabId]).pipe(Effect.result);
 			const closeFailure = Result.isFailure(closeResult) ? closeResult.failure : undefined;
@@ -559,7 +579,7 @@ const commandClose: (
 				if (yield* tabExists(entry.tabId)) {
 					return yield* Effect.fail(closeFailure);
 				}
-				yield* removeRegistryEntry(entry.name);
+				yield* removeEntry(entry.name);
 				yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
 				return {
 					content: [
@@ -570,20 +590,20 @@ const commandClose: (
 					details: { action: "close", entry, stale: true },
 				};
 			}
-			yield* removeRegistryEntry(entry.name);
+			yield* removeEntry(entry.name);
 			yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
 			return {
 				content: [textContent(`Closed tab ${entry.tabId} for ${entry.name}.`)],
 				details: { action: "close", entry },
 			};
 		}
-		const resolved = yield* resolvePane(target, registry);
+		const resolved = yield* resolvePane(target, entries);
 		yield* runHerdr(["pane", "close", resolved.paneId]);
 		// A registry entry without a tabId can still reference this pane; clean it up
 		// so the closed pane does not leave a permanently "missing" name behind.
-		const paneEntry = entry ?? findRegistryEntry(registry, resolved.paneId);
+		const paneEntry = entry ?? findEntry(entries, resolved.paneId);
 		if (paneEntry) {
-			yield* removeRegistryEntry(paneEntry.name);
+			yield* removeEntry(paneEntry.name);
 			yield* deleteRuntimeFiles([paneEntry.taskFile, paneEntry.systemPromptFile]);
 		}
 		return {

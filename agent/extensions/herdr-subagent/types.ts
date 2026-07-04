@@ -1,7 +1,7 @@
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { Schema } from "effect";
 
-import type { HerdrAgent, RegistryEntrySchema, RegistrySchema } from "./schemas";
+import type { HerdrAgent, RegistryEntrySchema } from "./schemas";
 
 export type HerdrSubagentAction =
 	| "status"
@@ -63,8 +63,6 @@ export interface CommandSuccess {
 }
 
 export type RegistryEntry = Schema.Schema.Type<typeof RegistryEntrySchema>;
-
-export type Registry = Schema.Schema.Type<typeof RegistrySchema>;
 
 export interface AgentDefinition {
 	readonly name: string;

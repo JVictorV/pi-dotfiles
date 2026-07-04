@@ -10,8 +10,6 @@ import { fsFailure, type HerdrFileSystemFailed } from "./errors";
 // Keep node:path for deterministic path math only; filesystem effects use the Effect FileSystem service.
 export const getRuntimeDir = (): string => path.join(getAgentDir(), "herdr-subagents");
 
-export const getRegistryPath = (): string => path.join(getRuntimeDir(), "registry.json");
-
 export const platformCause = (error: PlatformError): unknown => error.reason.cause ?? error;
 
 const isNotFound = (error: PlatformError): boolean => Predicate.isTagged(error.reason, "NotFound");

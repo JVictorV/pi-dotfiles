@@ -2,8 +2,9 @@ import { Schema } from "effect";
 
 export const RegistryEntrySchema = Schema.Struct({
 	name: Schema.String,
-	target: Schema.String,
-	paneId: Schema.String,
+	phase: Schema.optional(Schema.Literals(["reserved", "active"])),
+	target: Schema.optional(Schema.String),
+	paneId: Schema.optional(Schema.String),
 	tabId: Schema.optional(Schema.String),
 	workspaceId: Schema.optional(Schema.String),
 	terminalId: Schema.optional(Schema.String),
@@ -15,11 +16,6 @@ export const RegistryEntrySchema = Schema.Struct({
 	systemPromptFile: Schema.optional(Schema.String),
 	createdAt: Schema.String,
 	updatedAt: Schema.String,
-});
-
-export const RegistrySchema = Schema.Struct({
-	version: Schema.Literal(1),
-	entries: Schema.Record(Schema.String, RegistryEntrySchema),
 });
 
 const HerdrAgentSchema = Schema.Struct({

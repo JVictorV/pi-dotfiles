@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -666,39 +666,33 @@ describe("herdr_subagent extension", () => {
 		);
 		const calls = await readHerdrCalls(log);
 		expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(1);
-		const registryText = await readFile(
-			path.join(agentDir, "herdr-subagents", "registry.json"),
-			"utf8",
-		);
-		expect(registryText).toContain('"worker-a"');
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
+		const files = await readdir(registryDir);
+		expect(files.filter((name) => name === "worker-a.json")).toHaveLength(1);
+		const registryText = await readFile(path.join(registryDir, "worker-a.json"), "utf8");
 		expect(registryText).toContain('"name": "worker-a"');
 	});
 
-	test("corrupt registry entries are dropped without wiping valid entries", async () => {
+	test("corrupt registry entries are ignored without wiping valid entries", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
-		const registryDir = path.join(agentDir, "herdr-subagents");
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
 		await mkdir(registryDir, { recursive: true });
+		await writeFile(path.join(registryDir, "bad.json"), "not-json", "utf8");
 		await writeFile(
-			path.join(registryDir, "registry.json"),
+			path.join(registryDir, "kept.json"),
 			JSON.stringify(
 				{
-					version: 1,
-					entries: {
-						kept: {
-							name: "kept",
-							target: "term-kept",
-							paneId: "wTest:p9",
-							cwd: "/workspace",
-							label: "agent: kept",
-							taskFile: "/tmp/task-kept.md",
-							createdAt: "2026-01-01T00:00:00.000Z",
-							updatedAt: "2026-01-01T00:00:00.000Z",
-						},
-						bad: { name: "bad" },
-					},
+					name: "kept",
+					target: "term-kept",
+					paneId: "wTest:p9",
+					cwd: "/workspace",
+					label: "agent: kept",
+					taskFile: "/tmp/task-kept.md",
+					createdAt: "2026-01-01T00:00:00.000Z",
+					updatedAt: "2026-01-01T00:00:00.000Z",
 				},
 				null,
 				2,
@@ -716,9 +710,256 @@ describe("herdr_subagent extension", () => {
 		);
 
 		expect(status.content[0]?.text).toContain("kept");
-		const registryText = await readFile(path.join(registryDir, "registry.json"), "utf8");
-		expect(registryText).toContain('"kept"');
-		expect(registryText).not.toContain('"bad"');
+		expect(await readFile(path.join(registryDir, "bad.json"), "utf8")).toBe("not-json");
+		expect(await readFile(path.join(registryDir, "kept.json"), "utf8")).toContain('"name": "kept"');
+
+		const spawned = await tool.execute(
+			"tool-call-spawn",
+			{ action: "spawn", name: "other", task: "Unrelated task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		expect(spawned.content[0]?.text).toContain("Spawned other");
+		expect(await readFile(path.join(registryDir, "bad.json"), "utf8")).toBe("not-json");
+	});
+
+	test("migrates a legacy registry.json on status", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const runtimeDir = path.join(agentDir, "herdr-subagents");
+		await mkdir(runtimeDir, { recursive: true });
+		await writeFile(
+			path.join(runtimeDir, "registry.json"),
+			JSON.stringify(
+				{
+					version: 1,
+					entries: {
+						legacy: {
+							name: "legacy",
+							target: "term-legacy",
+							paneId: "wTest:p9",
+							cwd: "/workspace",
+							label: "agent: legacy",
+							taskFile: "/tmp/task-legacy.md",
+							createdAt: "2026-01-01T00:00:00.000Z",
+							updatedAt: "2026-01-01T00:00:00.000Z",
+						},
+					},
+				},
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const tool = await loadTool(agentDir);
+
+		const status = await tool.execute(
+			"tool-call-status",
+			{ action: "status" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(status.content[0]?.text).toContain("legacy");
+		expect(await readFile(path.join(runtimeDir, "registry", "legacy.json"), "utf8")).toContain(
+			'"name": "legacy"',
+		);
+		expect(await readFile(path.join(runtimeDir, "registry.json.migrated"), "utf8")).toContain(
+			'"legacy"',
+		);
+	});
+
+	test("reserve treats a corrupt same-name entry as already registered without changing it", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
+		await mkdir(registryDir, { recursive: true });
+		const corruptPath = path.join(registryDir, "worker-a.json");
+		const corruptBytes = "{ not valid json";
+		await writeFile(corruptPath, corruptBytes, "utf8");
+		const tool = await loadTool(agentDir);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{ action: "spawn", name: "worker-a", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/already registered/);
+		expect(await readFile(corruptPath, "utf8")).toBe(corruptBytes);
+	});
+
+	test("stale reservations can be taken over by spawn", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
+		await mkdir(registryDir, { recursive: true });
+		const staleAt = "2000-01-01T00:00:00.000Z";
+		await writeFile(
+			path.join(registryDir, "worker-a.json"),
+			JSON.stringify(
+				{
+					name: "worker-a",
+					phase: "reserved",
+					cwd: "/workspace",
+					label: "agent: worker-a",
+					agentType: "worker",
+					model: "openai-codex/gpt-5.5",
+					taskFile: "",
+					createdAt: staleAt,
+					updatedAt: staleAt,
+				},
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const tool = await loadTool(agentDir);
+
+		const spawned = await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		expect(spawned.content[0]?.text).toContain("Spawned worker-a");
+		expect(await readFile(path.join(registryDir, "worker-a.json"), "utf8")).toContain(
+			'"phase": "active"',
+		);
+	});
+
+	test("only one concurrent spawn takes over a stale reservation", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
+		await mkdir(registryDir, { recursive: true });
+		const staleAt = "2000-01-01T00:00:00.000Z";
+		await writeFile(
+			path.join(registryDir, "worker-a.json"),
+			JSON.stringify(
+				{
+					name: "worker-a",
+					phase: "reserved",
+					cwd: "/workspace",
+					label: "agent: worker-a",
+					agentType: "worker",
+					model: "openai-codex/gpt-5.5",
+					taskFile: "",
+					createdAt: staleAt,
+					updatedAt: staleAt,
+				},
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const tool = await loadTool(agentDir);
+
+		const results = await Promise.allSettled([
+			tool.execute(
+				"tool-call-a",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+			tool.execute(
+				"tool-call-b",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task B." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		]);
+
+		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+		const rejected = results.find((result) => result.status === "rejected");
+		expect(rejected?.reason).toEqual(
+			expect.objectContaining({ message: expect.stringMatching(/already registered/) }),
+		);
+		const calls = await readHerdrCalls(log);
+		expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(1);
+		expect(await readFile(path.join(registryDir, "worker-a.json"), "utf8")).toContain(
+			'"phase": "active"',
+		);
+	});
+
+	test("fresh reservations block spawn with the same name", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
+		await mkdir(registryDir, { recursive: true });
+		const now = "2999-01-01T00:00:00.000Z";
+		await writeFile(
+			path.join(registryDir, "worker-a.json"),
+			JSON.stringify(
+				{
+					name: "worker-a",
+					phase: "reserved",
+					cwd: "/workspace",
+					label: "agent: worker-a",
+					agentType: "worker",
+					model: "openai-codex/gpt-5.5",
+					taskFile: "",
+					createdAt: now,
+					updatedAt: now,
+				},
+				null,
+				2,
+			),
+			"utf8",
+		);
+		const tool = await loadTool(agentDir);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/already registered/);
+	});
+
+	test("invalid spawn names fail before running herdr commands", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{ action: "spawn", name: "bad/name", task: "Task A." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(
+			/Invalid subagent name bad\/name: use 1-64 characters of letters, digits, dot, underscore, or hyphen\./,
+		);
+		expect(await readHerdrCalls(log)).toEqual([]);
 	});
 
 	test("spawn pane run failure closes the created tab and clears the reservation", async () => {
@@ -742,10 +983,8 @@ describe("herdr_subagent extension", () => {
 
 		const calls = await readHerdrCalls(log);
 		expect(calls).toContainEqual(["tab", "close", "wTest:t2"]);
-		const registryText = await readFile(
-			path.join(agentDir, "herdr-subagents", "registry.json"),
-			"utf8",
-		);
-		expect(registryText).not.toContain('"worker-a"');
+		await expect(
+			readFile(path.join(agentDir, "herdr-subagents", "registry", "worker-a.json"), "utf8"),
+		).rejects.toThrow();
 	});
 });
