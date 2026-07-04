@@ -84,27 +84,41 @@ export interface OverviewWidgetOptions {
 	readonly idlePollMs?: number;
 }
 
+/** Handle for nudging the registered overview widget outside its poll cadence. */
+export interface OverviewWidgetHandle {
+	/**
+	 * Refresh the widget immediately instead of waiting for the next poll.
+	 *
+	 * Called after registry-mutating tool actions (spawn/send/close) so the
+	 * widget appears without waiting out the 15s idle cadence. No-op when no
+	 * widget session is active.
+	 */
+	poke(): void;
+}
+
 /**
  * Register the ambient herdr subagent overview widget for orchestrator TUI sessions.
  *
  * @param pi - Extension API used for lifecycle hooks and widget updates.
  * @param runPromise - Runtime runner with the herdr_subagent Node layers already provided.
- * @param options - Optional poll interval overrides; defaults to 2s active and 15s idle/error.
+ * @param options - Optional poll interval overrides; defaults to 1s active and 15s idle/error.
+ * @returns A handle for immediate refreshes after registry mutations.
  */
 export const registerOverviewWidget = (
 	pi: ExtensionAPI,
 	runPromise: RunPromise,
 	options?: OverviewWidgetOptions,
-): void => {
+): OverviewWidgetHandle => {
 	const pollMs = options?.pollMs ?? DEFAULT_ACTIVE_POLL_MS;
 	const idlePollMs = options?.idlePollMs ?? DEFAULT_IDLE_POLL_MS;
 	if (typeof pi.on !== "function") {
-		return;
+		return { poke() {} };
 	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let currentToken: object | undefined;
 	let clearWidget: (() => void) | undefined;
+	let pokeActive: (() => void) | undefined;
 	const previousKinds = new Map<string, string>();
 
 	const stopTimer = (): void => {
@@ -130,8 +144,13 @@ export const registerOverviewWidget = (
 			),
 		).catch(() => undefined);
 
-		const schedule = (delayMs: number): void => {
-			if (currentToken !== token) {
+		// Epoch guard: a poke restarts the loop immediately; bumping the epoch
+		// turns any in-flight tick's trailing schedule() into a no-op so two
+		// timer chains never run concurrently.
+		let epoch = 0;
+
+		const schedule = (delayMs: number, tickEpoch: number): void => {
+			if (currentToken !== token || tickEpoch !== epoch) {
 				return;
 			}
 			timer = setTimeout(() => {
@@ -144,6 +163,7 @@ export const registerOverviewWidget = (
 			if (currentToken !== token) {
 				return;
 			}
+			const tickEpoch = epoch;
 			ownerPaneId
 				.then((sessionOwnerPaneId) =>
 					runPromise(
@@ -184,7 +204,16 @@ export const registerOverviewWidget = (
 					return pollMs;
 				})
 				.catch(() => idlePollMs)
-				.then(schedule);
+				.then((delayMs) => schedule(delayMs, tickEpoch));
+		};
+
+		pokeActive = () => {
+			if (currentToken !== token) {
+				return;
+			}
+			epoch += 1;
+			stopTimer();
+			tick();
 		};
 
 		stopTimer();
@@ -194,8 +223,15 @@ export const registerOverviewWidget = (
 	pi.on("session_shutdown", () => {
 		currentToken = undefined;
 		stopTimer();
+		pokeActive = undefined;
 		previousKinds.clear();
 		clearWidget?.();
 		clearWidget = undefined;
 	});
+
+	return {
+		poke() {
+			pokeActive?.();
+		},
+	};
 };

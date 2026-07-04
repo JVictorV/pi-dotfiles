@@ -122,7 +122,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 	let rpcServer: SubagentRpcServer | undefined;
 	let rpcServerStarting = false;
 	let resultSocketPath: string | undefined;
-	registerOverviewWidget(pi, (effect) => nodeRuntime.runPromise(effect));
+	const overviewWidget = registerOverviewWidget(pi, (effect) => nodeRuntime.runPromise(effect));
 	if (typeof pi.on === "function") {
 		pi.on("session_start", () => {
 			if (!isRunningInsideHerdr() || isHerdrSubagentSession() || rpcServer || rpcServerStarting) {
@@ -322,6 +322,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 						notifications.cancel(
 							details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
 						);
+					}
+					if (
+						details?.action === "spawn" ||
+						details?.action === "send" ||
+						details?.action === "close"
+					) {
+						// Registry just changed; refresh the widget immediately instead of
+						// waiting out the idle poll cadence.
+						overviewWidget.poke();
 					}
 					return result;
 				});

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { OverviewWidgetTheme } from "./overview-widget";
+import type { OverviewWidgetHandle, OverviewWidgetTheme } from "./overview-widget";
 import { registerOverviewWidget, type OverviewWidgetOptions } from "./overview-widget";
 import {
 	cleanupHarness,
@@ -113,13 +113,15 @@ const makeContext = (
 	};
 };
 
-const registerTestWidget = (pi: FakeWidgetPi, options: OverviewWidgetOptions = {}): void => {
+const registerTestWidget = (
+	pi: FakeWidgetPi,
+	options: OverviewWidgetOptions = {},
+): OverviewWidgetHandle =>
 	registerOverviewWidget(pi.pi, runHerdrSubagentEffect, {
 		pollMs: POLL_MS,
 		idlePollMs: IDLE_POLL_MS,
 		...options,
 	});
-};
 
 const sleep = async (millis: number): Promise<void> => {
 	await new Promise<void>((resolve) => {
@@ -207,6 +209,32 @@ describe("herdr subagent overview widget poller", () => {
 		await sleep(POLL_MS * 3 + 30);
 
 		expect(pi.widgetCalls).toEqual([]);
+	});
+
+	test("poke refreshes immediately instead of waiting out the idle poll", async () => {
+		const { agentDir } = await startHarness();
+		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const pi = makeFakePi();
+		activePi = pi;
+		// Idle poll far beyond the test horizon: only a poke can surface the widget.
+		const widget = registerTestWidget(pi, { idlePollMs: 60_000 });
+
+		pi.dispatch("session_start", makeContext("/workspace"));
+		// First tick sees an empty registry and parks on the long idle interval.
+		await sleep(POLL_MS + 30);
+		expect(lastWidgetLines(pi.widgetCalls)).toBeUndefined();
+
+		await writeEntry(agentDir, { name: "worker-a", terminalId: "term-subagent" });
+		widget.poke();
+
+		await vi.waitFor(
+			() => {
+				const lines = lastWidgetLines(pi.widgetCalls);
+				expect(lines?.some((line) => line.includes("● worker-a"))).toBe(true);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
 	});
 
 	test("renders active registry entries matched to fake herdr agents", async () => {
