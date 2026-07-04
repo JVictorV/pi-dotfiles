@@ -23,6 +23,20 @@ export interface OverviewRow {
 export interface Overview {
 	readonly rows: ReadonlyArray<OverviewRow>;
 	readonly counts: Readonly<Record<OverviewRowKind, number>>;
+	/** Wall-clock time the snapshot was taken; lets renderers age elapsed times. */
+	readonly atMs: number;
+}
+
+/** Rendering options for {@link renderOverview}. */
+export interface RenderOverviewOptions {
+	/**
+	 * Wall-clock time of the render. Elapsed times are aged by the difference
+	 * from the snapshot's `atMs`, so a stale snapshot still shows a live clock.
+	 * Defaults to the snapshot time (no aging).
+	 */
+	readonly nowMs?: number;
+	/** Maximum number of subagent rows to show before truncating. Default 6. */
+	readonly maxRows?: number;
 }
 
 /**
@@ -66,7 +80,9 @@ interface KindStyle {
 
 const KIND_STYLES: Readonly<Record<OverviewRowKind, KindStyle>> = {
 	blocked: { glyph: "⚠", glyphRole: "warning", nameRole: "warning", bold: true },
-	working: { glyph: "●", glyphRole: "accent", nameRole: "accent", bold: false },
+	// The name stays in plain text: the accent glyph alone carries the state, so
+	// rows keep contrast between marker and label instead of washing into one hue.
+	working: { glyph: "●", glyphRole: "accent", nameRole: "text", bold: false },
 	spawning: { glyph: "◌", glyphRole: "dim", nameRole: "dim", bold: false },
 	done: { glyph: "✓", glyphRole: "success", nameRole: "muted", bold: false },
 	idle: { glyph: "○", glyphRole: "muted", nameRole: "muted", bold: false },
@@ -182,7 +198,7 @@ export const buildOverview = (
 		});
 	}
 
-	return { rows, counts };
+	return { rows, counts, atMs: nowMs };
 };
 
 /**
@@ -195,13 +211,19 @@ export const buildOverview = (
  *
  * @param overview - Overview model returned by {@link buildOverview}.
  * @param theme - Theme surface used to color glyphs, names, counts, and metadata.
- * @param maxRows - Maximum number of subagent rows to show before truncating.
+ * @param options - Render-time clock and row truncation overrides.
  * @returns Themed widget lines, or an empty array when there are no rows.
  */
-export const renderOverview = (overview: Overview, theme: OverviewTheme, maxRows = 6): string[] => {
+export const renderOverview = (
+	overview: Overview,
+	theme: OverviewTheme,
+	options?: RenderOverviewOptions,
+): string[] => {
 	if (overview.rows.length === 0) {
 		return [];
 	}
+	const maxRows = options?.maxRows ?? 6;
+	const ageMs = Math.max(0, (options?.nowMs ?? overview.atMs) - overview.atMs);
 
 	const chips = OVERVIEW_KIND_ORDER.flatMap((kind) => {
 		const count = overview.counts[kind];
@@ -228,14 +250,17 @@ export const renderOverview = (overview: Overview, theme: OverviewTheme, maxRows
 		const style = KIND_STYLES[row.kind];
 		const glyph = paint(theme, style.glyphRole, style.bold, style.glyph);
 		const name = paint(theme, style.nameRole, style.bold, truncateName(row.name).padEnd(nameWidth));
-		const elapsed = theme.fg("dim", formatElapsed(row.elapsedMs));
+		const elapsed = theme.fg(
+			"dim",
+			formatElapsed(row.elapsedMs === undefined ? undefined : row.elapsedMs + ageMs),
+		);
 		const suffix = row.kind === "blocked" ? `  ${paint(theme, "warning", true, "blocked")}` : "";
 		lines.push(`  ${glyph} ${name}  ${elapsed}${suffix}`);
 	}
 
 	const moreCount = sortedRows.length - visibleRows.length;
 	if (moreCount > 0) {
-		lines.push(`  ${theme.fg("dim", `+${moreCount} more · herdr_subagent status`)}`);
+		lines.push(`  ${theme.fg("dim", `+${moreCount} more`)}`);
 	}
 	return lines;
 };

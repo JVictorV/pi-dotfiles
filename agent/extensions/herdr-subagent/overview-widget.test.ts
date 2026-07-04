@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { OverviewTheme } from "./overview";
+import type { OverviewWidgetTheme } from "./overview-widget";
 import { registerOverviewWidget, type OverviewWidgetOptions } from "./overview-widget";
 import {
 	cleanupHarness,
@@ -22,15 +22,19 @@ const IDLE_POLL_MS = 100;
 type SessionEvent = "session_start" | "session_shutdown";
 type WidgetLines = ReadonlyArray<string> | undefined;
 type WidgetComponent = { render(width: number): string[]; invalidate(): void };
-type WidgetFactory = (tui: unknown, theme: OverviewTheme) => WidgetComponent;
+type WidgetFactory = (tui: unknown, theme: OverviewWidgetTheme) => WidgetComponent;
 type WidgetContent = ReadonlyArray<string> | WidgetFactory | undefined;
 type WidgetCall = { readonly id: string; readonly lines: WidgetLines };
 type NotifyCall = { readonly message: string; readonly level: string };
 
-/** Pass-through theme so the fake widget captures plain, uncolored layout lines. */
-const plainTheme: OverviewTheme = {
+/**
+ * Pass-through foreground theme so layout assertions see plain text, with a
+ * tagging `bg` so tests can assert the widget paints a full-width background.
+ */
+const plainTheme: OverviewWidgetTheme = {
 	fg: (_role, text) => text,
 	bold: (text) => text,
+	bg: (role, text) => `[${role}]${text}[/${role}]`,
 };
 
 /** Resolve either a plain line array or a component factory into rendered lines. */
@@ -219,9 +223,20 @@ describe("herdr subagent overview widget poller", () => {
 		await vi.waitFor(
 			() => {
 				const lines = lastWidgetLines(pi.widgetCalls);
-				expect(lines?.[0]).toContain("subagents");
-				expect(lines?.[0]).toContain("● 1");
+				// Blank padding lines above and below make the background a card.
+				expect(lines?.at(0)).toBe(`[customMessageBg]${" ".repeat(80)}[/customMessageBg]`);
+				expect(lines?.at(-1)).toBe(`[customMessageBg]${" ".repeat(80)}[/customMessageBg]`);
+				expect(lines?.[1]).toContain("subagents");
+				expect(lines?.[1]).toContain("● 1");
 				expect(lines?.some((line) => line.includes("● worker-a"))).toBe(true);
+				// Every line is painted with the widget background, horizontally inset,
+				// and padded to the render width so the background forms a solid block.
+				for (const line of lines ?? []) {
+					expect(line).toMatch(/^\[customMessageBg\].*\[\/customMessageBg\]$/);
+					const inner = line.slice("[customMessageBg]".length, -"[/customMessageBg]".length);
+					expect(inner.length).toBe(80);
+					expect(inner.startsWith(" ")).toBe(true);
+				}
 			},
 			{ timeout: 1_000, interval: 10 },
 		);

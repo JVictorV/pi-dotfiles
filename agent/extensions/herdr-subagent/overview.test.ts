@@ -47,7 +47,7 @@ const overview = (rows: ReadonlyArray<OverviewRow>): Overview => {
 	for (const row of rows) {
 		counts[row.kind] += 1;
 	}
-	return { rows, counts };
+	return { rows, counts, atMs: BASE_TIME };
 };
 
 describe("matchEntriesToAgents", () => {
@@ -197,7 +197,7 @@ describe("renderOverview", () => {
 				{ name: "lost", kind: "missing", elapsedMs: 45_000 },
 			]),
 			tagTheme,
-			10,
+			{ maxRows: 10 },
 		);
 		const body = lines.slice(1).join("\n");
 
@@ -205,9 +205,9 @@ describe("renderOverview", () => {
 		expect(lines[1]).toContain("[warning]<b>⚠</b>[/warning]");
 		expect(lines[1]).toContain("[warning]<b>block");
 		expect(lines[1]).toContain("[warning]<b>blocked</b>[/warning]");
-		// Working sorts next and is accent.
+		// Working sorts next: accent glyph, plain-text name for contrast.
 		expect(lines[2]).toContain("[accent]●[/accent]");
-		expect(lines[2]).toContain("[accent]work");
+		expect(lines[2]).toContain("[text]work");
 		// Done keeps a success glyph but a de-emphasized (muted) name.
 		expect(body).toContain("[success]✓[/success]");
 		expect(body).toContain("[muted]finished");
@@ -234,7 +234,7 @@ describe("renderOverview", () => {
 				{ name: "busy", kind: "working", elapsedMs: 45_000 },
 			]),
 			tagTheme,
-			10,
+			{ maxRows: 10 },
 		);
 
 		expect(lines[1]).toContain("[dim]45s[/dim]");
@@ -261,11 +261,11 @@ describe("renderOverview", () => {
 				{ name: "d", kind: "working" },
 			]),
 			tagTheme,
-			2,
+			{ maxRows: 2 },
 		);
 
 		expect(lines).toHaveLength(4);
-		expect(lines.at(-1)).toBe("  [dim]+2 more · herdr_subagent status[/dim]");
+		expect(lines.at(-1)).toBe("  [dim]+2 more[/dim]");
 	});
 
 	test("humanizes elapsed durations", () => {
@@ -277,7 +277,7 @@ describe("renderOverview", () => {
 				{ name: "none", kind: "working" },
 			]),
 			tagTheme,
-			10,
+			{ maxRows: 10 },
 		).join("\n");
 
 		expect(body).toContain("[dim]45s[/dim]");

@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Effect } from "effect";
 import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
@@ -17,6 +18,9 @@ import type { RegistryEntry } from "./types";
 
 const WIDGET_ID = "herdr-subagents";
 
+/** Columns of horizontal inset between the background edge and the content. */
+const WIDGET_PAD_X = 1;
+
 /** Minimal widget component shape returned to `ctx.ui.setWidget`. */
 interface WidgetComponent {
 	render(width: number): string[];
@@ -24,29 +28,43 @@ interface WidgetComponent {
 }
 
 /**
+ * Theme surface for the widget chrome: overview foreground roles plus the
+ * background paint used to give the widget a card-like block, matching the
+ * backgrounds pi draws behind tool calls and custom messages.
+ *
+ * pi's `Theme` satisfies this structurally.
+ */
+export interface OverviewWidgetTheme extends OverviewTheme {
+	/** Paint `text` with the background color for `role`. */
+	bg(role: "customMessageBg", text: string): string;
+}
+
+/**
  * Build a themed widget component factory for an overview snapshot.
  *
- * Lines are computed inside `render` from the live theme (and cached until
- * `invalidate`), so theme switches recolor the widget without a fresh poll.
+ * `render` is stateless: lines are computed on every call from the live theme
+ * and the current wall clock, so theme switches recolor immediately and
+ * elapsed times age between polls on any TUI repaint.
  *
  * @param overview - Overview snapshot to render.
  * @returns A factory suitable for the component form of `ctx.ui.setWidget`.
  */
 const overviewWidget =
 	(overview: Overview) =>
-	(_tui: unknown, theme: OverviewTheme): WidgetComponent => {
-		let cache: string[] | undefined;
-		return {
-			render() {
-				cache ??= renderOverview(overview, theme);
-				return cache;
-			},
-			invalidate() {
-				cache = undefined;
-			},
-		};
-	};
-const DEFAULT_ACTIVE_POLL_MS = 2_000;
+	(_tui: unknown, theme: OverviewWidgetTheme): WidgetComponent => ({
+		render(width) {
+			const inset = " ".repeat(WIDGET_PAD_X);
+			const blank = theme.bg("customMessageBg", " ".repeat(width));
+			const body = renderOverview(overview, theme, { nowMs: Date.now() }).map((line) => {
+				const clipped = truncateToWidth(inset + line, width);
+				const padded = clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+				return theme.bg("customMessageBg", padded);
+			});
+			return [blank, ...body, blank];
+		},
+		invalidate() {},
+	});
+const DEFAULT_ACTIVE_POLL_MS = 1_000;
 const DEFAULT_IDLE_POLL_MS = 15_000;
 
 type OverviewWidgetRequirements = ChildProcessSpawner | FileSystem | Path;
