@@ -3,13 +3,14 @@ import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
 import * as path from "node:path";
 
 import { NodeSocket, NodeSocketServer } from "@effect/platform-node";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, References, Schema } from "effect";
 import { Rpc, RpcClient, RpcGroup, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { Socket } from "effect/unstable/socket";
 
 import { getRuntimeDir, safeFilePart } from "./runtime-files";
 
-const RPC_TIMEOUT = "250 millis";
+const RPC_OPEN_TIMEOUT = "250 millis";
+const RPC_TIMEOUT = "1 second";
 const RPC_DIRECTORY_MODE = 0o700;
 const RPC_SOCKET_MODE = 0o600;
 const STALE_SOCKET_MS = 60 * 60 * 1_000;
@@ -141,6 +142,11 @@ const serverLayer = (
 		Layer.provideMerge(RpcServer.layerProtocolSocketServer),
 		Layer.provideMerge(NodeSocketServer.layer({ path: socketPath })),
 		Layer.provide(RpcSerialization.layerNdjson),
+		// This side channel degrades to pane polling by design, so its internal
+		// connection errors (e.g. EPIPE/ECONNRESET from clients that vanish after
+		// notifying) are operational noise, not actionable failures. Suppress the
+		// RPC server's Effect.logError output for this runtime only.
+		Layer.provide(Layer.succeed(References.MinimumLogLevel, "None")),
 	);
 };
 
@@ -213,22 +219,21 @@ export const notifySubagentFinished = (
 ): Effect.Effect<void, never> => {
 	const socketLayer = Layer.effect(
 		Socket.Socket,
-		NodeSocket.makeNet({ path: options.socketPath, openTimeout: RPC_TIMEOUT }),
+		NodeSocket.makeNet({ path: options.socketPath, openTimeout: RPC_OPEN_TIMEOUT }),
 	);
 	return Effect.scoped(
 		Effect.gen(function* () {
 			const client = yield* RpcClient.make(SubagentRpcs);
-			// `discard: true` still writes the request before the scoped socket is torn down;
-			// the surrounding scope is the flush boundary for this fire-and-forget handoff.
-			yield* client.SubagentFinished(
-				{
-					name: options.name,
-					status: options.status,
-					finalMessage: options.finalMessage.slice(0, MAX_FINAL_MESSAGE_WIRE_CHARS),
-					sentAtMs: options.sentAtMs,
-				},
-				{ discard: true },
-			);
+			// Await the server's ack before the scoped socket is torn down. Discarding
+			// the response and hanging up immediately made the server's ack write hit a
+			// closed connection, logging an EPIPE SocketError on every notification.
+			// The surrounding timeout keeps this effectively fire-and-forget.
+			yield* client.SubagentFinished({
+				name: options.name,
+				status: options.status,
+				finalMessage: options.finalMessage.slice(0, MAX_FINAL_MESSAGE_WIRE_CHARS),
+				sentAtMs: options.sentAtMs,
+			});
 		}).pipe(
 			Effect.provide(RpcClient.layerProtocolSocket({ retryTransientErrors: false })),
 			Effect.provide(socketLayer),
