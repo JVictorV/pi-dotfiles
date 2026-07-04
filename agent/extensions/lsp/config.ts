@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
-
-import { Effect, Option, Schema } from "effect";
+import { NodeFileSystem } from "@effect/platform-node";
+import { Effect, FileSystem, Option, Predicate, Schema } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 
 import { LspConfigError, lspErrorReason } from "./errors";
 import { configPath } from "./paths";
@@ -14,6 +14,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const NotFoundError = Schema.Struct({ code: Schema.Literal("ENOENT") });
 const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeNotFoundError = Schema.decodeUnknownOption(NotFoundError);
+
+const isNotFoundPlatformError = (error: PlatformError): boolean =>
+	Predicate.isTagged(error.reason, "NotFound");
+
+const platformCause = (error: PlatformError): unknown => error.reason.cause ?? error;
 
 const isNotFoundError = (error: unknown): boolean => Option.isSome(decodeNotFoundError(error));
 
@@ -121,17 +126,18 @@ const parseJson = (text: string): Effect.Effect<unknown, LspConfigError> =>
 
 const missingConfigReason = "agent/lsp.json not found";
 
-export const loadLspConfig = Effect.fn("loadLspConfig")(function* () {
+const loadLspConfigEffect = Effect.fn("loadLspConfig")(function* () {
 	const path = configPath();
-	const text = yield* Effect.tryPromise({
-		try: () => readFile(path, "utf8"),
-		catch: (error) =>
+	const fs = yield* FileSystem.FileSystem;
+	const text = yield* fs.readFileString(path, "utf8").pipe(
+		Effect.mapError((error) =>
 			LspConfigError.make({
-				reason: isNotFoundError(error)
-					? missingConfigReason
-					: lspErrorReason(error, "failed to read agent/lsp.json"),
+				reason:
+					isNotFoundPlatformError(error) || isNotFoundError(platformCause(error))
+						? missingConfigReason
+						: lspErrorReason(platformCause(error), "failed to read agent/lsp.json"),
 			}),
-	}).pipe(
+		),
 		Effect.catchTag("LspConfigError", (error) =>
 			error.reason === missingConfigReason ? Effect.succeed(undefined) : Effect.fail(error),
 		),
@@ -142,3 +148,5 @@ export const loadLspConfig = Effect.fn("loadLspConfig")(function* () {
 	const json = yield* parseJson(text);
 	return yield* parseConfig(json);
 });
+
+export const loadLspConfig = () => loadLspConfigEffect().pipe(Effect.provide(NodeFileSystem.layer));

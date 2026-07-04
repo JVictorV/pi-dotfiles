@@ -1,5 +1,6 @@
+import { NodeFileSystem } from "@effect/platform-node";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
+import { Effect, ManagedRuntime } from "effect";
 
 import { loadLspConfig } from "./config";
 import { findRepositoryRoot, formatPermission } from "./paths";
@@ -7,6 +8,10 @@ import { LspPermissionStore } from "./permissions";
 import { LspRuntime } from "./runtime";
 import { registerLspTool } from "./tool";
 import type { LspPermission } from "./types";
+
+// ExtensionAPI exposes session lifecycle hooks but no extension unload/reload teardown; this
+// stateless Node layer only allocates per-run Scope resources, so a /reload orphan is GC-reclaimable.
+const nodeFileSystemRuntime = ManagedRuntime.make(NodeFileSystem.layer);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,7 +100,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		runtime = new LspRuntime({
 			cwd: ctx.cwd,
-			config: await Effect.runPromise(loadLspConfig()),
+			config: await nodeFileSystemRuntime.runPromise(loadLspConfig()),
 			onStatusChange: () => emitStatus(pi, runtime),
 		});
 		emitStatus(pi, runtime);
@@ -105,7 +110,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 		const current = runtime;
 		runtime = undefined;
 		emitStatus(pi, runtime);
-		if (current !== undefined) await Effect.runPromise(current.shutdownProgram());
+		if (current !== undefined) await nodeFileSystemRuntime.runPromise(current.shutdownProgram());
 	});
 
 	registerLspTool(pi, () => runtime);
@@ -116,7 +121,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 			return;
 		const path = pathFromToolInput(event.input);
 		if (path === undefined) return;
-		await Effect.runPromise(runtime.touchRunningFileProgram(path));
+		await nodeFileSystemRuntime.runPromise(runtime.touchRunningFileProgram(path));
 	});
 
 	pi.registerCommand("lsp-status", {
@@ -129,7 +134,7 @@ export default function lspExtension(pi: ExtensionAPI) {
 	pi.registerCommand("lsp-permissions", {
 		description: "Show stored LSP spawn permissions for the current repository",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify(await Effect.runPromise(permissionSummary(ctx.cwd)), "info");
+			ctx.ui.notify(await nodeFileSystemRuntime.runPromise(permissionSummary(ctx.cwd)), "info");
 		},
 	});
 
@@ -141,7 +146,10 @@ export default function lspExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /lsp-allow <server>", "warning");
 				return;
 			}
-			ctx.ui.notify(await Effect.runPromise(setPermission(ctx.cwd, serverId, "allow")), "info");
+			ctx.ui.notify(
+				await nodeFileSystemRuntime.runPromise(setPermission(ctx.cwd, serverId, "allow")),
+				"info",
+			);
 		},
 	});
 
@@ -153,14 +161,17 @@ export default function lspExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /lsp-deny <server>", "warning");
 				return;
 			}
-			ctx.ui.notify(await Effect.runPromise(setPermission(ctx.cwd, serverId, "deny")), "info");
+			ctx.ui.notify(
+				await nodeFileSystemRuntime.runPromise(setPermission(ctx.cwd, serverId, "deny")),
+				"info",
+			);
 		},
 	});
 
 	pi.registerCommand("lsp-reset", {
 		description: "Reset LSP permission for this repository: /lsp-reset <server|all>",
 		handler: async (args, ctx) => {
-			ctx.ui.notify(await Effect.runPromise(resetPermission(ctx.cwd, args)), "info");
+			ctx.ui.notify(await nodeFileSystemRuntime.runPromise(resetPermission(ctx.cwd, args)), "info");
 		},
 	});
 
@@ -172,7 +183,9 @@ export default function lspExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const serverId = parseServerId(args);
-			await Effect.runPromise(runtime.restartProgram(serverId === "all" ? undefined : serverId));
+			await nodeFileSystemRuntime.runPromise(
+				runtime.restartProgram(serverId === "all" ? undefined : serverId),
+			);
 			emitStatus(pi, runtime);
 			ctx.ui.notify(
 				serverId === undefined || serverId === "all"

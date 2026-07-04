@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -10,7 +9,8 @@ import {
 	type MessageConnection,
 	type MessageWriter,
 } from "vscode-jsonrpc/node";
-import { Duration, Effect, Option, Result, Schema } from "effect";
+import { Duration, Effect, FileSystem, Option, Result, Schema } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 import type { Diagnostic } from "vscode-languageserver-types";
 
 import {
@@ -23,6 +23,8 @@ import {
 	type LspError,
 } from "./errors";
 import type { LspServerHandle } from "./server";
+
+const platformCause = (error: PlatformError): unknown => error.reason.cause ?? error;
 
 const INITIALIZE_TIMEOUT_MS = 45_000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -488,30 +490,33 @@ export class LspClient {
 		}
 	}
 
-	openEffect(file: string, waitForDiagnostics: boolean): Effect.Effect<void, LspError> {
-		// oxlint-disable-next-line typescript/no-this-alias
-		const client = this;
+	openEffect(
+		file: string,
+		waitForDiagnostics: boolean,
+	): Effect.Effect<void, LspError, FileSystem.FileSystem> {
+		const client = (): LspClient => this;
 		return Effect.gen(function* () {
-			const text = yield* Effect.tryPromise({
-				try: () => readFile(file, "utf8"),
-				catch: (error) =>
+			const fs = yield* FileSystem.FileSystem;
+			const text = yield* fs.readFileString(file, "utf8").pipe(
+				Effect.mapError((error) =>
 					LspFilesystemError.make({
 						operation: "read",
 						path: file,
-						reason: lspErrorReason(error, `failed to read ${file}`),
+						reason: lspErrorReason(platformCause(error), `failed to read ${file}`),
 					}),
-			});
-			if (!client.canSend()) {
-				client.broken = true;
+				),
+			);
+			if (!client().canSend()) {
+				client().broken = true;
 				return;
 			}
 
 			const uri = pathToFileURL(file).href;
-			const open = client.openDocuments.get(file);
+			const open = client().openDocuments.get(file);
 			if (open === undefined) {
-				client.openDocuments.set(file, { version: 1, text });
-				yield* client.notifyWatchedFileEffect(file, FILE_CHANGE_CREATED);
-				yield* client.notifyEffect("textDocument/didOpen", {
+				client().openDocuments.set(file, { version: 1, text });
+				yield* client().notifyWatchedFileEffect(file, FILE_CHANGE_CREATED);
+				yield* client().notifyEffect("textDocument/didOpen", {
 					textDocument: {
 						uri,
 						languageId: languageIdForPath(file),
@@ -519,33 +524,33 @@ export class LspClient {
 						text,
 					},
 				});
-				yield* client.notifySaveEffect(file, text);
+				yield* client().notifySaveEffect(file, text);
 			} else if (open.text !== text) {
 				const version = open.version + 1;
-				client.openDocuments.set(file, { version, text });
-				yield* client.notifyWatchedFileEffect(file, FILE_CHANGE_CHANGED);
-				yield* client.notifyEffect("textDocument/didChange", {
+				client().openDocuments.set(file, { version, text });
+				yield* client().notifyWatchedFileEffect(file, FILE_CHANGE_CHANGED);
+				yield* client().notifyEffect("textDocument/didChange", {
 					textDocument: { uri, version },
 					contentChanges:
-						syncKind(client.serverCapabilities) === TEXT_DOCUMENT_SYNC_INCREMENTAL
+						syncKind(client().serverCapabilities) === TEXT_DOCUMENT_SYNC_INCREMENTAL
 							? [{ range: { start: { line: 0, character: 0 }, end: endPosition(open.text) }, text }]
 							: [{ text }],
 				});
-				yield* client.notifySaveEffect(file, text);
+				yield* client().notifySaveEffect(file, text);
 			}
 
 			if (waitForDiagnostics) {
 				yield* Effect.forEach(
 					[
-						client.waitForPushDiagnosticsEffect(file, DIAGNOSTIC_WAIT_TIMEOUT_MS),
-						client
+						client().waitForPushDiagnosticsEffect(file, DIAGNOSTIC_WAIT_TIMEOUT_MS),
+						client()
 							.waitForDiagnosticRegistrationEffect(DIAGNOSTIC_WAIT_TIMEOUT_MS)
 							.pipe(
 								Effect.flatMap(() =>
 									Effect.forEach(
 										[
-											client.pullDocumentDiagnosticsEffect(file),
-											client.pullWorkspaceDiagnosticsEffect(),
+											client().pullDocumentDiagnosticsEffect(file),
+											client().pullWorkspaceDiagnosticsEffect(),
 										],
 										(effect) => effect,
 										{ concurrency: "unbounded", discard: true },
@@ -597,33 +602,34 @@ export class LspClient {
 
 	shutdownEffect(): Effect.Effect<void, LspError> {
 		if (this.disposed || this.closing) return Effect.succeed(undefined);
-		// oxlint-disable-next-line typescript/no-this-alias
-		const client = this;
+		const client = (): LspClient => this;
 		return Effect.gen(function* () {
-			yield* client.closeOpenDocumentsEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
-			client.closing = true;
+			yield* client()
+				.closeOpenDocumentsEffect()
+				.pipe(Effect.catch(() => Effect.succeed(undefined)));
+			client().closing = true;
 
-			if (!client.broken && streamCanAcceptWrites(client.handle.process.stdin)) {
+			if (!client().broken && streamCanAcceptWrites(client().handle.process.stdin)) {
 				yield* Effect.tryPromise({
-					try: () => client.connection.sendRequest("shutdown", null),
+					try: () => client().connection.sendRequest("shutdown", null),
 					catch: (error) =>
 						LspRequestError.make({
-							serverId: client.serverId,
+							serverId: client().serverId,
 							method: "shutdown",
-							reason: lspErrorReason(error, `${client.serverId} shutdown failed`),
+							reason: lspErrorReason(error, `${client().serverId} shutdown failed`),
 						}),
 				}).pipe(
 					Effect.timeout(Duration.millis(SHUTDOWN_TIMEOUT_MS)),
 					Effect.catch(() => Effect.succeed(undefined)),
 				);
-				yield* client.notifyEffect("exit", undefined);
+				yield* client().notifyEffect("exit", undefined);
 			}
 
-			client.disposed = true;
-			client.broken = true;
-			client.connection.dispose();
-			if (!client.handle.process.killed) {
-				client.handle.process.kill("SIGTERM");
+			client().disposed = true;
+			client().broken = true;
+			client().connection.dispose();
+			if (!client().handle.process.killed) {
+				client().handle.process.kill("SIGTERM");
 			}
 		});
 	}

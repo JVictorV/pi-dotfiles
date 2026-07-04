@@ -1,7 +1,8 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { Effect, Option, Schema, Semaphore } from "effect";
+import { NodeFileSystem } from "@effect/platform-node";
+import { Effect, FileSystem, Option, Predicate, Schema, Semaphore } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 
 import { LspPermissionFileError, lspErrorReason } from "./errors";
 import { permissionPath } from "./paths";
@@ -16,6 +17,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const NotFoundError = Schema.Struct({ code: Schema.Literal("ENOENT") });
 const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeNotFoundError = Schema.decodeUnknownOption(NotFoundError);
+
+const isNotFoundPlatformError = (error: PlatformError): boolean =>
+	Predicate.isTagged(error.reason, "NotFound");
+
+const platformCause = (error: PlatformError): unknown => error.reason.cause ?? error;
 
 const isNotFoundError = (error: unknown): boolean => Option.isSome(decodeNotFoundError(error));
 
@@ -74,15 +80,16 @@ const missingPermissionFileReason = "agent/lsp-permissions.json not found";
 
 const readPermissionFile = Effect.fn("readPermissionFile")(function* () {
 	const path = permissionPath();
-	const text = yield* Effect.tryPromise({
-		try: () => readFile(path, "utf8"),
-		catch: (error) =>
+	const fs = yield* FileSystem.FileSystem;
+	const text = yield* fs.readFileString(path, "utf8").pipe(
+		Effect.mapError((error) =>
 			LspPermissionFileError.make({
-				reason: isNotFoundError(error)
-					? missingPermissionFileReason
-					: lspErrorReason(error, "failed to read agent/lsp-permissions.json"),
+				reason:
+					isNotFoundPlatformError(error) || isNotFoundError(platformCause(error))
+						? missingPermissionFileReason
+						: lspErrorReason(platformCause(error), "failed to read agent/lsp-permissions.json"),
 			}),
-	}).pipe(
+		),
 		Effect.catchTag("LspPermissionFileError", (error) =>
 			error.reason === missingPermissionFileReason ? Effect.succeed(undefined) : Effect.fail(error),
 		),
@@ -96,28 +103,32 @@ const readPermissionFile = Effect.fn("readPermissionFile")(function* () {
 
 const writePermissionFile = Effect.fn("writePermissionFile")(function* (file: LspPermissionFile) {
 	const path = permissionPath();
-	yield* Effect.tryPromise({
-		try: () => mkdir(dirname(path), { recursive: true }),
-		catch: (error) =>
+	const fs = yield* FileSystem.FileSystem;
+	yield* fs.makeDirectory(dirname(path), { recursive: true }).pipe(
+		Effect.mapError((error) =>
 			LspPermissionFileError.make({
-				reason: lspErrorReason(error, "failed to create agent directory"),
+				reason: lspErrorReason(platformCause(error), "failed to create agent directory"),
 			}),
-	});
+		),
+	);
 	const tmpPath = `${path}.${process.pid}.${tempFileCounter++}.tmp`;
-	yield* Effect.tryPromise({
-		try: () => writeFile(tmpPath, `${JSON.stringify(file, null, "\t")}\n`, "utf8"),
-		catch: (error) =>
+	yield* fs.writeFileString(tmpPath, `${JSON.stringify(file, null, "\t")}\n`).pipe(
+		Effect.mapError((error) =>
 			LspPermissionFileError.make({
-				reason: lspErrorReason(error, "failed to write agent/lsp-permissions.json"),
+				reason: lspErrorReason(platformCause(error), "failed to write agent/lsp-permissions.json"),
 			}),
-	});
-	yield* Effect.tryPromise({
-		try: () => rename(tmpPath, path),
-		catch: (error) =>
+		),
+	);
+	yield* fs.rename(tmpPath, path).pipe(
+		Effect.mapError((error) =>
 			LspPermissionFileError.make({
-				reason: lspErrorReason(error, "failed to replace agent/lsp-permissions.json"),
+				reason: lspErrorReason(
+					platformCause(error),
+					"failed to replace agent/lsp-permissions.json",
+				),
 			}),
-	});
+		),
+	);
 });
 
 export class LspPermissionStore {
@@ -128,7 +139,10 @@ export class LspPermissionStore {
 	}
 
 	static load(): Effect.Effect<LspPermissionStore, LspPermissionFileError> {
-		return readPermissionFile().pipe(Effect.map((file) => new LspPermissionStore(file)));
+		return readPermissionFile().pipe(
+			Effect.map((file) => new LspPermissionStore(file)),
+			Effect.provide(NodeFileSystem.layer),
+		);
 	}
 
 	get(repoRoot: string, serverId: string): LspPermission | undefined {
@@ -149,45 +163,49 @@ export class LspPermissionStore {
 		const updateFile = (file: LspPermissionFile): void => {
 			this.file = file;
 		};
-		return permissionWriteLock.withPermit(
-			Effect.gen(function* () {
-				const file = yield* readPermissionFile();
-				file.repos[repoRoot] = {
-					...file.repos[repoRoot],
-					[serverId]: permission,
-				};
-				yield* writePermissionFile(file);
-				updateFile(file);
-			}),
-		);
+		return permissionWriteLock
+			.withPermit(
+				Effect.gen(function* () {
+					const file = yield* readPermissionFile();
+					file.repos[repoRoot] = {
+						...file.repos[repoRoot],
+						[serverId]: permission,
+					};
+					yield* writePermissionFile(file);
+					updateFile(file);
+				}),
+			)
+			.pipe(Effect.provide(NodeFileSystem.layer));
 	}
 
 	reset(repoRoot: string, serverId?: string): Effect.Effect<void, LspPermissionFileError> {
 		const updateFile = (file: LspPermissionFile): void => {
 			this.file = file;
 		};
-		return permissionWriteLock.withPermit(
-			Effect.gen(function* () {
-				const file = yield* readPermissionFile();
+		return permissionWriteLock
+			.withPermit(
+				Effect.gen(function* () {
+					const file = yield* readPermissionFile();
 
-				if (serverId === undefined) {
-					delete file.repos[repoRoot];
+					if (serverId === undefined) {
+						delete file.repos[repoRoot];
+						yield* writePermissionFile(file);
+						updateFile(file);
+						return;
+					}
+
+					const repo = file.repos[repoRoot];
+					if (repo !== undefined) {
+						delete repo[serverId];
+						if (Object.keys(repo).length === 0) {
+							delete file.repos[repoRoot];
+						}
+					}
+
 					yield* writePermissionFile(file);
 					updateFile(file);
-					return;
-				}
-
-				const repo = file.repos[repoRoot];
-				if (repo !== undefined) {
-					delete repo[serverId];
-					if (Object.keys(repo).length === 0) {
-						delete file.repos[repoRoot];
-					}
-				}
-
-				yield* writePermissionFile(file);
-				updateFile(file);
-			}),
-		);
+				}),
+			)
+			.pipe(Effect.provide(NodeFileSystem.layer));
 	}
 }

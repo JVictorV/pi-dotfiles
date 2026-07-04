@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-
+import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node";
 import { StringEnum, Type, type TextContent } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
@@ -9,11 +8,26 @@ import {
 	truncateTail,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { Effect, Schema } from "effect";
+import { Effect, Fiber, Layer, ManagedRuntime, Option, Schema, Stream } from "effect";
+import type { FileSystem } from "effect/FileSystem";
+import type { Path } from "effect/Path";
+import { ChildProcess } from "effect/unstable/process";
+import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
 const MAX_TIMEOUT_SECONDS = 900;
 const MAX_STREAM_BYTES = 1024 * 1024;
+const KILL_GRACE_MS = 2_000;
+
+type StackPlatformRequirements = ChildProcessSpawner | FileSystem | Path;
+
+const nodeLayer = Layer.provideMerge(
+	NodeChildProcessSpawner.layer,
+	Layer.mergeAll(NodeFileSystem.layer, NodePath.layer),
+);
+// ExtensionAPI exposes session lifecycle hooks but no extension unload/reload teardown; this
+// stateless Node layer only allocates per-run Scope resources, so a /reload orphan is GC-reclaimable.
+const nodeRuntime = ManagedRuntime.make(nodeLayer);
 
 type StackCommand =
 	| "status"
@@ -54,10 +68,19 @@ interface StackProcessResult {
 	stdout: CapturedStream;
 	stderr: CapturedStream;
 	code: number | null;
-	signal: NodeJS.Signals | null;
+	signal: string | null;
 	killed: boolean;
 	timedOut: boolean;
 }
+
+interface StackExitStatus {
+	readonly code: number | null;
+	readonly signal: string | null;
+}
+
+type StackWaitOutcome =
+	| { readonly timedOut: false; readonly exit: StackExitStatus }
+	| { readonly timedOut: true; readonly result: StackProcessResult };
 
 interface StackDetails {
 	command: string;
@@ -80,6 +103,12 @@ class StackToolError extends Schema.TaggedErrorClass<StackToolError>()("StackToo
 const stackToolError = (reason: string): StackToolError =>
 	StackToolError.make({ message: reason, reason });
 const textContent = (text: string): TextContent => ({ type: "text", text });
+const ErrorMessage = Schema.Struct({ message: Schema.String });
+const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
+// Matches the exact message NodeChildProcessSpawner puts on the exitCode PlatformError for
+// signal-terminated processes; the signal is not exposed as a structured field, and the
+// dependency is pinned to 4.0.0-beta.90. A non-match degrades to signal-less reporting.
+const EXIT_SIGNAL_PATTERN = /Process interrupted due to receipt of signal: '([^']+)'/;
 
 const clampTimeoutSeconds = (timeout: number | undefined): number => {
 	if (timeout === undefined || !Number.isFinite(timeout)) {
@@ -87,6 +116,12 @@ const clampTimeoutSeconds = (timeout: number | undefined): number => {
 	}
 
 	return Math.min(MAX_TIMEOUT_SECONDS, Math.max(1, timeout));
+};
+
+const exitSignalFromError = (error: unknown): string | null => {
+	const message = decodeErrorMessageOption(error);
+	if (Option.isNone(message)) return null;
+	return EXIT_SIGNAL_PATTERN.exec(message.value.message)?.[1] ?? null;
 };
 
 const captureChunk = (stream: CapturedStream, chunk: Buffer): CapturedStream => {
@@ -103,101 +138,111 @@ const captureChunk = (stream: CapturedStream, chunk: Buffer): CapturedStream => 
 	};
 };
 
-const runStack = Effect.fn("runStack")(function* (
+const runStack: (
 	cwd: string,
 	params: StackParams,
 	timeoutSeconds: number,
 	agentSignal: AbortSignal | undefined,
-) {
-	return yield* Effect.callback<StackProcessResult, StackToolError>((resume, effectSignal) => {
-		let stdout: CapturedStream = { text: "", bytes: 0, truncated: false };
-		let stderr: CapturedStream = { text: "", bytes: 0, truncated: false };
-		let settled = false;
+) => Effect.Effect<StackProcessResult, StackToolError, StackPlatformRequirements> = Effect.fn(
+	"runStack",
+)(function* (cwd, params, timeoutSeconds, agentSignal) {
+	let stdout: CapturedStream = { text: "", bytes: 0, truncated: false };
+	let stderr: CapturedStream = { text: "", bytes: 0, truncated: false };
+	const command = ChildProcess.make("stack", [params.command, ...(params.args ?? [])], {
+		cwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		detached: false,
+		killSignal: "SIGTERM",
+		forceKillAfter: KILL_GRACE_MS,
+	});
 
-		const child = spawn("stack", [params.command, ...(params.args ?? [])], {
-			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+	return yield* Effect.scoped(
+		Effect.gen(function* () {
+			const handle = yield* command.pipe(
+				Effect.mapError(() =>
+					stackToolError(
+						"Failed to start stack. Install it with: npm install -g @kitlangton/stack",
+					),
+				),
+			);
 
-		const cleanup = (): void => {
-			agentSignal?.removeEventListener("abort", abortHandler);
-			effectSignal.removeEventListener("abort", abortHandler);
-		};
-
-		const finish = (result: StackProcessResult): void => {
-			if (settled) {
-				return;
+			if (agentSignal?.aborted) {
+				yield* handle.kill({ killSignal: "SIGTERM", forceKillAfter: KILL_GRACE_MS }).pipe(
+					Effect.catch(() => Effect.void),
+					Effect.forkScoped,
+				);
 			}
-			settled = true;
-			cleanup();
-			resume(Effect.succeed(result));
-		};
 
-		const fail = (reason: string): void => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			cleanup();
-			resume(Effect.fail(stackToolError(reason)));
-		};
-
-		const stopChild = (): void => {
-			if (!child.killed) {
-				child.kill("SIGTERM");
-			}
-		};
-
-		const abortHandler = (): void => {
-			stopChild();
-		};
-
-		if (agentSignal?.aborted || effectSignal.aborted) {
-			abortHandler();
-		} else {
-			agentSignal?.addEventListener("abort", abortHandler, { once: true });
-			effectSignal.addEventListener("abort", abortHandler, { once: true });
-		}
-
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout = captureChunk(stdout, chunk);
-		});
-
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr = captureChunk(stderr, chunk);
-		});
-
-		child.on("error", () => {
-			fail("Failed to start stack. Install it with: npm install -g @kitlangton/stack");
-		});
-
-		child.on("close", (code, closeSignal) => {
-			finish({
-				stdout,
-				stderr,
-				code,
-				signal: closeSignal,
-				killed: child.killed || closeSignal !== null,
-				timedOut: false,
+			const stdoutFiber = yield* handle.stdout.pipe(
+				Stream.runForEach((chunk) =>
+					Effect.sync(() => {
+						stdout = captureChunk(stdout, Buffer.from(chunk));
+					}),
+				),
+				Effect.catch(() => Effect.void),
+				Effect.forkScoped,
+			);
+			const stderrFiber = yield* handle.stderr.pipe(
+				Stream.runForEach((chunk) =>
+					Effect.sync(() => {
+						stderr = captureChunk(stderr, Buffer.from(chunk));
+					}),
+				),
+				Effect.catch(() => Effect.void),
+				Effect.forkScoped,
+			);
+			const waitForOutput = Effect.all([Fiber.join(stdoutFiber), Fiber.join(stderrFiber)], {
+				discard: true,
 			});
-		});
-
-		return Effect.sync(() => {
-			cleanup();
-			stopChild();
-		});
-	}).pipe(
-		Effect.timeoutOrElse({
-			duration: `${timeoutSeconds} seconds`,
-			orElse: () =>
-				Effect.succeed({
+			const waitForExit = handle.exitCode.pipe(
+				Effect.map((code): StackExitStatus => ({ code: Number(code), signal: null })),
+				Effect.catch((error) =>
+					Effect.succeed<StackExitStatus>({ code: null, signal: exitSignalFromError(error) }),
+				),
+			);
+			const timedOutResult = Effect.gen(function* () {
+				yield* handle.kill({ killSignal: "SIGTERM", forceKillAfter: KILL_GRACE_MS }).pipe(
+					Effect.catch(() => Effect.void),
+					Effect.forkScoped,
+				);
+				yield* Effect.sleep(KILL_GRACE_MS);
+				const running = yield* handle.isRunning.pipe(Effect.catch(() => Effect.succeed(true)));
+				if (running) {
+					yield* handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.catch(() => Effect.void));
+				}
+				return {
 					stdout: { text: "", bytes: 0, truncated: false },
 					stderr: { text: "", bytes: 0, truncated: false },
 					code: 124,
 					signal: null,
 					killed: true,
 					timedOut: true,
+				};
+			});
+			const outcome = yield* waitForExit.pipe(
+				Effect.map((exit): StackWaitOutcome => ({ timedOut: false, exit })),
+				Effect.timeoutOrElse({
+					duration: `${timeoutSeconds} seconds`,
+					orElse: () =>
+						timedOutResult.pipe(
+							Effect.map((result): StackWaitOutcome => ({ timedOut: true, result })),
+						),
 				}),
+			);
+			if (outcome.timedOut) {
+				return outcome.result;
+			}
+			yield* waitForOutput;
+			return {
+				stdout,
+				stderr,
+				code: outcome.exit.code,
+				signal: outcome.exit.signal,
+				killed: outcome.exit.code === null || outcome.exit.signal !== null,
+				timedOut: false,
+			};
 		}),
 	);
 });
@@ -295,7 +340,7 @@ export default function stackExtension(pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params: StackParams, signal, _onUpdate, ctx) {
-			return await Effect.runPromise(executeStack(ctx.cwd, params, signal));
+			return await nodeRuntime.runPromise(executeStack(ctx.cwd, params, signal), { signal });
 		},
 	});
 

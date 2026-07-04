@@ -1,4 +1,3 @@
-import { readFile, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -11,7 +10,9 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
+import { NodeFileSystem } from "@effect/platform-node";
+import { Effect, FileSystem, ManagedRuntime } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 import type { Diagnostic } from "vscode-languageserver-types";
 
 import {
@@ -29,6 +30,8 @@ import {
 	type LspError,
 } from "./errors";
 import type { LspRuntime, LocatedClient } from "./runtime";
+
+const platformCause = (error: PlatformError): unknown => error.reason.cause ?? error;
 
 const OPERATIONS: readonly [
 	"definition",
@@ -660,26 +663,27 @@ const applyWorkspaceEdit = Effect.fn("applyWorkspaceEdit")(function* (
 				}),
 			);
 		}
-		const text = yield* Effect.tryPromise({
-			try: () => readFile(file, "utf8"),
-			catch: (error) =>
+		const fs = yield* FileSystem.FileSystem;
+		const text = yield* fs.readFileString(file, "utf8").pipe(
+			Effect.mapError((error) =>
 				LspFilesystemError.make({
 					operation: "read",
 					path: file,
-					reason: lspErrorReason(error, `failed to read ${file}`),
+					reason: lspErrorReason(platformCause(error), `failed to read ${file}`),
 				}),
-		});
+			),
+		);
 		const next = yield* applyTextEdits(operation, text, edits);
 		if (next !== text) {
-			yield* Effect.tryPromise({
-				try: () => writeFile(file, next, "utf8"),
-				catch: (error) =>
+			yield* fs.writeFileString(file, next).pipe(
+				Effect.mapError((error) =>
 					LspFilesystemError.make({
 						operation: "write",
 						path: file,
-						reason: lspErrorReason(error, `failed to write ${file}`),
+						reason: lspErrorReason(platformCause(error), `failed to write ${file}`),
 					}),
-			});
+				),
+			);
 			changedFiles.push(formatPath(cwd, file));
 		}
 	}
@@ -722,16 +726,18 @@ const touchChangedFiles = (
 		discard: true,
 	});
 
-const fullDocumentRange = (file: string): Effect.Effect<LspRange, LspError> =>
-	Effect.tryPromise({
-		try: () => readFile(file, "utf8"),
-		catch: (error) =>
+const fullDocumentRange = (
+	file: string,
+): Effect.Effect<LspRange, LspError, FileSystem.FileSystem> =>
+	FileSystem.FileSystem.pipe(
+		Effect.flatMap((fs) => fs.readFileString(file, "utf8")),
+		Effect.mapError((error) =>
 			LspFilesystemError.make({
 				operation: "read",
 				path: file,
-				reason: lspErrorReason(error, `failed to read ${file}`),
+				reason: lspErrorReason(platformCause(error), `failed to read ${file}`),
 			}),
-	}).pipe(
+		),
 		Effect.map((text) => ({
 			start: { line: 0, character: 0 },
 			end: endPosition(text),
@@ -741,7 +747,7 @@ const fullDocumentRange = (file: string): Effect.Effect<LspRange, LspError> =>
 const codeActionRequestParams = (
 	file: string,
 	kind?: string,
-): Effect.Effect<Record<string, unknown>, LspError> =>
+): Effect.Effect<Record<string, unknown>, LspError, FileSystem.FileSystem> =>
 	fullDocumentRange(file).pipe(
 		Effect.map((range) => ({
 			textDocument: { uri: pathToFileURL(file).href },
@@ -766,6 +772,10 @@ const firstMutationClient = (
 	return Effect.succeed(client);
 };
 
+// ExtensionAPI exposes session lifecycle hooks but no extension unload/reload teardown; this
+// stateless Node layer only allocates per-run Scope resources, so a /reload orphan is GC-reclaimable.
+const nodeFileSystemRuntime = ManagedRuntime.make(NodeFileSystem.layer);
+
 export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime | undefined) => {
 	pi.registerTool({
 		name: "lsp",
@@ -780,7 +790,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 		],
 		parameters: paramsSchema,
 		async execute(_toolCallId, params: LspParams, signal, _onUpdate, ctx) {
-			return await Effect.runPromise(
+			return await nodeFileSystemRuntime.runPromise(
 				Effect.gen(function* () {
 					const runtime = getRuntime();
 					if (runtime === undefined) {

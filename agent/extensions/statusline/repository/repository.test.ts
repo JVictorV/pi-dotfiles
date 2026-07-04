@@ -1,4 +1,3 @@
-// oxlint-disable effect/no-vitest-import -- Project tests use Vitest directly.
 import { describe, expect, test } from "vitest";
 
 import {

@@ -1,11 +1,11 @@
+import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
-import { constants } from "node:fs";
 import { env } from "node:process";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
+import { Effect, FileSystem } from "effect";
 
 import { LspSpawnError, lspErrorReason, type LspError } from "./errors";
 import type { LspConfig, ServerCapabilities, UserServerConfig } from "./types";
@@ -26,7 +26,9 @@ export interface LspServerDefinition {
 	strictRoot: boolean;
 	capabilities: ServerCapabilities;
 	installHint: string;
-	spawn: (input: ServerSpawnInput) => Effect.Effect<LspSpawnSpec | undefined, LspError>;
+	spawn: (
+		input: ServerSpawnInput,
+	) => Effect.Effect<LspSpawnSpec | undefined, LspError, FileSystem.FileSystem>;
 }
 
 export interface ServerSpawnInput {
@@ -45,6 +47,7 @@ export interface LspServerHandle {
 const executableExtensions = process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
 
 const canExecute = (path: string): Effect.Effect<boolean> =>
+	// FileSystem.access does not expose execute-bit checks; keep Node access for X_OK semantics.
 	Effect.tryPromise(() => access(path, constants.X_OK)).pipe(
 		Effect.as(true),
 		Effect.catch(() => Effect.succeed(false)),
@@ -119,7 +122,8 @@ export const resolveNodeModuleFile = Effect.fn("resolveNodeModuleFile")(function
 	let current = root;
 	while (isWithin(current, cwd)) {
 		const candidate = join(current, "node_modules", ...modulePath.split("/"));
-		const exists = yield* Effect.tryPromise(() => access(candidate, constants.F_OK)).pipe(
+		const exists = yield* FileSystem.FileSystem.pipe(
+			Effect.flatMap((fs) => fs.access(candidate, { ok: true })),
 			Effect.as(true),
 			Effect.catch(() => Effect.succeed(false)),
 		);
@@ -144,7 +148,11 @@ const commandServer = (input: {
 	installHint: string;
 	initializationOptions?: (
 		input: ServerSpawnInput,
-	) => Effect.Effect<Readonly<Record<string, unknown>> | undefined, LspError>;
+	) => Effect.Effect<
+		Readonly<Record<string, unknown>> | undefined,
+		LspError,
+		FileSystem.FileSystem
+	>;
 }): LspServerDefinition => ({
 	id: input.id,
 	label: input.label,
@@ -450,7 +458,8 @@ export const findServerRoot = Effect.fn("findServerRoot")(function* (
 	while (isWithin(current, stop)) {
 		for (const marker of definition.rootMarkers) {
 			const markerPath = join(current, marker);
-			const exists = yield* Effect.tryPromise(() => access(markerPath, constants.F_OK)).pipe(
+			const exists = yield* FileSystem.FileSystem.pipe(
+				Effect.flatMap((fs) => fs.access(markerPath, { ok: true })),
 				Effect.as(true),
 				Effect.catch(() => Effect.succeed(false)),
 			);
@@ -479,6 +488,7 @@ export const spawnServer = Effect.fn("spawnServer")(function* (
 	const spec = yield* definition.spawn({ root, cwd, definition });
 	if (spec === undefined) return undefined;
 
+	// LSP server stdio is intentionally raw Node spawn: vscode-jsonrpc consumes Node streams directly.
 	return yield* Effect.try({
 		try: () => ({
 			definition,

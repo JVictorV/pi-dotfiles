@@ -1,8 +1,3 @@
-// oxlint-disable effect/no-vitest-import -- Project tests use Vitest directly.
-// oxlint-disable effect/no-timer-api-in-effect effect/no-raw-throw effect/no-try-catch -- Plain Vitest integration test, not Effect domain code.
-// oxlint-disable effect/no-type-casting -- SAFETY: This integration test builds focused
-// fakes for the subset of ExtensionAPI/ExtensionContext/Theme the status line uses and
-// casts them to the real types at the boundary; the extension only touches the faked members.
 import type {
 	ExtensionAPI,
 	ExtensionContext,

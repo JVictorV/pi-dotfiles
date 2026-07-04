@@ -80,22 +80,18 @@ function ensureObserverRegistry(): ObserverRegistry {
 }
 
 function readGlobalRegistry(): ObserverRegistry | undefined {
-	const candidate = globalThisWithObserverRegistry()[OBSERVER_REGISTRY_KEY];
+	const descriptor = Object.getOwnPropertyDescriptor(globalThis, OBSERVER_REGISTRY_KEY);
+	const candidate: unknown = descriptor?.value;
 	if (candidate === undefined) return undefined;
 	return isObserverRegistry(candidate) ? candidate : undefined;
 }
 
 function writeGlobalRegistry(registry: ObserverRegistry): void {
-	globalThisWithObserverRegistry()[OBSERVER_REGISTRY_KEY] = registry;
-}
-
-function globalThisWithObserverRegistry(): typeof globalThis & {
-	[OBSERVER_REGISTRY_KEY]?: unknown;
-} {
-	// SAFETY: Symbol-keyed global storage is used only by this extension. The runtime
-	// value is checked by isObserverRegistry before use.
-	// oxlint-disable-next-line effect/no-type-casting
-	return globalThis as typeof globalThis & { [OBSERVER_REGISTRY_KEY]?: unknown };
+	Object.defineProperty(globalThis, OBSERVER_REGISTRY_KEY, {
+		configurable: true,
+		value: registry,
+		writable: true,
+	});
 }
 
 function isObserverRegistry(candidate: unknown): candidate is ObserverRegistry {

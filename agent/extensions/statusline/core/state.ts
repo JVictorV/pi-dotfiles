@@ -19,7 +19,8 @@ export function makeStatusLineStateKey<A>(input: StatusLineStateKey<A>): StatusL
 export function getStatusLineState<A>(snapshot: StatusLineSnapshot, key: StatusLineStateKey<A>): A {
 	const value = snapshot.get(key.id);
 	if (value === undefined) return key.initial;
-	// oxlint-disable-next-line effect/no-type-casting -- SAFETY: StatusLineStateStore writes values through the same typed StatusLineStateKey id; missing values fall back to key.initial.
+	// SAFETY: StatusLineStateStore writes values through the same typed StatusLineStateKey id;
+	// missing values fall back to key.initial. TypeScript cannot express this invariant.
 	return value as A;
 }
 

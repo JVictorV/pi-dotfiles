@@ -1,5 +1,3 @@
-// oxlint-disable effect/no-vitest-import -- Project tests use Vitest directly.
-// oxlint-disable effect/no-type-casting -- SAFETY: Focused tests build the narrow render context needed by the fable segment and cast it at the boundary.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Option } from "effect";
 import { describe, expect, test } from "vitest";

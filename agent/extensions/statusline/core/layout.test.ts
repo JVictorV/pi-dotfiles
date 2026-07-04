@@ -1,4 +1,3 @@
-// oxlint-disable effect/no-vitest-import -- Project tests use Vitest directly.
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { describe, expect, test } from "vitest";
 

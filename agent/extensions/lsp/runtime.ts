@@ -1,7 +1,8 @@
 import { extname, resolve } from "node:path";
 
+import { NodeFileSystem } from "@effect/platform-node";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect, Layer, ManagedRuntime, SynchronizedRef } from "effect";
+import { Deferred, Effect, FileSystem, Layer, ManagedRuntime, SynchronizedRef } from "effect";
 
 import { LspClient } from "./client";
 import { LspRuntimeError, lspErrorReason, lspRuntimeShuttingDown, type LspError } from "./errors";
@@ -67,8 +68,11 @@ export class LspRuntime {
 					restart: (serverId) => this.restartEffect(serverId),
 					shutdown: this.shutdownEffect(),
 					clientsForFile: (filePath, capability, ctx, options) =>
-						this.clientsForFileEffect(filePath, capability, ctx, options),
-					touchRunningFile: (filePath) => this.touchRunningFileEffect(filePath),
+						this.clientsForFileEffect(filePath, capability, ctx, options).pipe(
+							Effect.provide(NodeFileSystem.layer),
+						),
+					touchRunningFile: (filePath) =>
+						this.touchRunningFileEffect(filePath).pipe(Effect.provide(NodeFileSystem.layer)),
 				}),
 			),
 		);
@@ -129,7 +133,9 @@ export class LspRuntime {
 	}
 
 	restartProgram(serverId?: string): Effect.Effect<void, LspError> {
-		return this.runOperationEffect(this.restartEffect(serverId));
+		return this.runOperationEffect(this.restartEffect(serverId)).pipe(
+			Effect.provide(NodeFileSystem.layer),
+		);
 	}
 
 	shutdownProgram(): Effect.Effect<void, LspError> {
@@ -150,15 +156,21 @@ export class LspRuntime {
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
 	): Effect.Effect<ClientResolution, LspError> {
-		return this.runOperationEffect(this.clientsForFileEffect(filePath, capability, ctx, options));
+		return this.runOperationEffect(
+			this.clientsForFileEffect(filePath, capability, ctx, options),
+		).pipe(Effect.provide(NodeFileSystem.layer));
 	}
 
 	touchRunningFileProgram(filePath: string): Effect.Effect<void, LspError> {
-		return this.runOperationEffect(this.touchRunningFileEffect(filePath));
+		return this.runOperationEffect(this.touchRunningFileEffect(filePath)).pipe(
+			Effect.provide(NodeFileSystem.layer),
+		);
 	}
 
-	private runOperationEffect<A>(effect: Effect.Effect<A, LspError>): Effect.Effect<A, LspError> {
-		return Effect.suspend((): Effect.Effect<A, LspError> => {
+	private runOperationEffect<A, R>(
+		effect: Effect.Effect<A, LspError, R>,
+	): Effect.Effect<A, LspError, R> {
+		return Effect.suspend((): Effect.Effect<A, LspError, R> => {
 			const state = this.currentState();
 			if (state.disposed) return Effect.fail(lspRuntimeShuttingDown());
 			state.activeOperations += 1;
@@ -302,31 +314,30 @@ export class LspRuntime {
 		capability: LspCapability,
 		ctx: ExtensionContext,
 		options: { prompt: boolean; waitForDiagnostics?: boolean },
-	): Effect.Effect<ClientResolution, LspError> {
-		// oxlint-disable-next-line typescript/no-this-alias
-		const runtime = this;
+	): Effect.Effect<ClientResolution, LspError, FileSystem.FileSystem> {
+		const runtime = (): LspRuntime => this;
 		return Effect.gen(function* () {
-			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			if (runtime().shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
 			const file = resolve(ctx.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
-			const matches = yield* runtime.matchingServersEffect(file, capability);
+			const matches = yield* runtime().matchingServersEffect(file, capability);
 			const clients: LocatedClient[] = [];
 			const unavailable: LspUnavailable[] = [];
 
 			for (const match of matches) {
 				const key = clientKey(match.root, match.definition.id);
-				const existing = runtime.clients.get(key);
+				const existing = runtime().clients.get(key);
 				if (existing !== undefined) {
 					if (isBrokenClient(existing)) {
 						const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-						runtime.markBroken(key, reason);
+						runtime().markBroken(key, reason);
 						unavailable.push({ serverId: match.definition.id, reason });
 						continue;
 					}
 
-					yield* runtime.openClientEffect(existing, file, options.waitForDiagnostics ?? false);
+					yield* runtime().openClientEffect(existing, file, options.waitForDiagnostics ?? false);
 					if (isBrokenClient(existing)) {
 						const reason = `${match.definition.label} server is broken. Use /lsp-restart ${match.definition.id} to retry.`;
-						runtime.markBroken(key, reason);
+						runtime().markBroken(key, reason);
 						unavailable.push({ serverId: match.definition.id, reason });
 						continue;
 					}
@@ -334,24 +345,24 @@ export class LspRuntime {
 					continue;
 				}
 
-				const brokenReason = runtime.broken.get(key);
+				const brokenReason = runtime().broken.get(key);
 				if (brokenReason !== undefined) {
 					unavailable.push({ serverId: match.definition.id, reason: brokenReason });
 					continue;
 				}
 
-				const inflight = runtime.spawning.get(key);
+				const inflight = runtime().spawning.get(key);
 				if (inflight !== undefined) {
 					const client = yield* Deferred.await(inflight);
-					if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+					if (runtime().shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
 					if (client === undefined) {
 						const reason =
-							runtime.broken.get(key) ??
+							runtime().broken.get(key) ??
 							`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
 						unavailable.push({ serverId: match.definition.id, reason });
 						continue;
 					}
-					yield* runtime.openClientEffect(client, file, options.waitForDiagnostics ?? false);
+					yield* runtime().openClientEffect(client, file, options.waitForDiagnostics ?? false);
 					clients.push({ client, definition: match.definition });
 					continue;
 				}
@@ -359,17 +370,19 @@ export class LspRuntime {
 				if (!options.prompt) continue;
 
 				const deferred = Deferred.makeUnsafe<LspClient | undefined, LspError>();
-				runtime.spawning.set(key, deferred);
-				const spawned = yield* runtime.spawnForMatchEffect(match, key, file, ctx, deferred).pipe(
-					Effect.ensuring(
-						Effect.sync(() => {
-							if (runtime.spawning.get(key) === deferred) runtime.spawning.delete(key);
-						}),
-					),
-				);
+				runtime().spawning.set(key, deferred);
+				const spawned = yield* runtime()
+					.spawnForMatchEffect(match, key, file, ctx, deferred)
+					.pipe(
+						Effect.ensuring(
+							Effect.sync(() => {
+								if (runtime().spawning.get(key) === deferred) runtime().spawning.delete(key);
+							}),
+						),
+					);
 				if (spawned === undefined) {
 					const reason =
-						runtime.broken.get(key) ??
+						runtime().broken.get(key) ??
 						`No ${match.definition.label} server binary found. ${match.definition.installHint}`;
 					unavailable.push({ serverId: match.definition.id, reason });
 					continue;
@@ -381,7 +394,11 @@ export class LspRuntime {
 					});
 					continue;
 				}
-				yield* runtime.openClientEffect(spawned.client, file, options.waitForDiagnostics ?? false);
+				yield* runtime().openClientEffect(
+					spawned.client,
+					file,
+					options.waitForDiagnostics ?? false,
+				);
 				clients.push({ client: spawned.client, definition: match.definition });
 			}
 
@@ -389,7 +406,9 @@ export class LspRuntime {
 		});
 	}
 
-	private touchRunningFileEffect(filePath: string): Effect.Effect<void, LspError> {
+	private touchRunningFileEffect(
+		filePath: string,
+	): Effect.Effect<void, LspError, FileSystem.FileSystem> {
 		return Effect.suspend(() => {
 			const file = resolve(this.cwd, filePath.startsWith("@") ? filePath.slice(1) : filePath);
 			return Effect.forEach(
@@ -418,16 +437,19 @@ export class LspRuntime {
 	private matchingServersEffect(
 		file: string,
 		capability: LspCapability,
-	): Effect.Effect<ReadonlyArray<{ definition: LspServerDefinition; root: string }>, LspError> {
-		// oxlint-disable-next-line typescript/no-this-alias
-		const runtime = this;
+	): Effect.Effect<
+		ReadonlyArray<{ definition: LspServerDefinition; root: string }>,
+		LspError,
+		FileSystem.FileSystem
+	> {
+		const runtime = (): LspRuntime => this;
 		return Effect.gen(function* () {
 			if (extname(file) === "") return [];
 			const matches: Array<{ definition: LspServerDefinition; root: string }> = [];
-			for (const definition of runtime.registry.values()) {
+			for (const definition of runtime().registry.values()) {
 				if (!definition.capabilities[capability]) continue;
 				if (!matchesExtension(definition, file)) continue;
-				const root = yield* findServerRoot(file, runtime.cwd, definition);
+				const root = yield* findServerRoot(file, runtime().cwd, definition);
 				if (root === undefined) continue;
 				matches.push({ definition, root });
 			}
@@ -439,7 +461,7 @@ export class LspRuntime {
 		definition: LspServerDefinition,
 		root: string,
 		ctx: ExtensionContext,
-	): Effect.Effect<LspPermission, LspError> {
+	): Effect.Effect<LspPermission, LspError, FileSystem.FileSystem> {
 		return Effect.gen(function* () {
 			const repoRoot = yield* findRepositoryRoot(root);
 			const store = yield* LspPermissionStore.load();
@@ -485,20 +507,20 @@ export class LspRuntime {
 		| { readonly client: LspClient; readonly permissionDenied?: never }
 		| { readonly client?: never; readonly permissionDenied: LspPermission }
 		| undefined,
-		LspError
+		LspError,
+		FileSystem.FileSystem
 	> {
-		// oxlint-disable-next-line typescript/no-this-alias
-		const runtime = this;
+		const runtime = (): LspRuntime => this;
 		return Effect.gen(function* () {
-			const permission = yield* runtime.permissionForEffect(match.definition, match.root, ctx);
-			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			const permission = yield* runtime().permissionForEffect(match.definition, match.root, ctx);
+			if (runtime().shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
 			if (permission !== "allow") {
 				yield* Deferred.succeed(deferred, undefined);
 				return { permissionDenied: permission };
 			}
 
-			const client = yield* runtime.spawnClientEffect(match.definition, match.root, file);
-			if (runtime.shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
+			const client = yield* runtime().spawnClientEffect(match.definition, match.root, file);
+			if (runtime().shuttingDown) return yield* Effect.fail(lspRuntimeShuttingDown());
 			yield* Deferred.succeed(deferred, client);
 			return client === undefined ? undefined : { client };
 		}).pipe(
@@ -512,7 +534,7 @@ export class LspRuntime {
 		client: LspClient,
 		file: string,
 		waitForDiagnostics: boolean,
-	): Effect.Effect<void, LspError> {
+	): Effect.Effect<void, LspError, FileSystem.FileSystem> {
 		return client
 			.openEffect(file, waitForDiagnostics)
 			.pipe(Effect.catch(() => Effect.succeed(undefined)));
@@ -522,15 +544,14 @@ export class LspRuntime {
 		definition: LspServerDefinition,
 		root: string,
 		file: string,
-	): Effect.Effect<LspClient | undefined, LspError> {
-		// oxlint-disable-next-line typescript/no-this-alias
-		const runtime = this;
+	): Effect.Effect<LspClient | undefined, LspError, FileSystem.FileSystem> {
+		const runtime = (): LspRuntime => this;
 		return Effect.gen(function* () {
 			const key = clientKey(root, definition.id);
-			const handle = yield* spawnServer(definition, root, runtime.cwd).pipe(
+			const handle = yield* spawnServer(definition, root, runtime().cwd).pipe(
 				Effect.catch((error) => {
 					const reason = lspErrorReason(error, `Failed to start ${definition.id}`);
-					runtime.markBroken(key, `${reason} (${file})`);
+					runtime().markBroken(key, `${reason} (${file})`);
 					return Effect.succeed(undefined);
 				}),
 			);
@@ -540,18 +561,18 @@ export class LspRuntime {
 				Effect.catch((error) => {
 					if (!handle.process.killed) handle.process.kill("SIGTERM");
 					const reason = lspErrorReason(error, `Failed to start ${definition.id}`);
-					runtime.markBroken(key, `${reason} (${file})`);
+					runtime().markBroken(key, `${reason} (${file})`);
 					return Effect.succeed(undefined);
 				}),
 			);
 			if (client === undefined) return undefined;
-			if (runtime.shuttingDown) {
+			if (runtime().shuttingDown) {
 				yield* client.shutdownEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
 				return undefined;
 			}
-			runtime.clients.set(key, client);
-			runtime.clientDefinitions.set(key, definition);
-			runtime.notifyStatusChange();
+			runtime().clients.set(key, client);
+			runtime().clientDefinitions.set(key, definition);
+			runtime().notifyStatusChange();
 			return client;
 		});
 	}
