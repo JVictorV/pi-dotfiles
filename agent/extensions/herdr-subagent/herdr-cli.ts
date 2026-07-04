@@ -17,7 +17,12 @@ import type { CommandSuccess } from "./types";
 export const HERDR_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 2_000;
 
+/** Return whether this process is running inside a herdr-managed session. */
 export const isRunningInsideHerdr = (): boolean => globalThis.process?.env["HERDR_ENV"] === "1";
+
+/** Return whether this pi process is itself a spawned herdr subagent. */
+export const isHerdrSubagentSession = (): boolean =>
+	globalThis.process?.env["HERDR_SUBAGENT_NAME"] !== undefined;
 
 type HerdrProcessRequirements = ChildProcessSpawner | FileSystem | Path;
 

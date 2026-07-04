@@ -15,6 +15,7 @@ import {
 	writeTextFile,
 } from "./runtime-files";
 import { decodeJsonString, decodeRegistryEntry } from "./schemas";
+import type { HerdrAgent } from "./schemas";
 import { isSubagentName } from "./subagent-name";
 import type { RegistryEntry } from "./types";
 
@@ -308,6 +309,72 @@ export const findEntry = (
 	return entries.find(
 		(entry) => entry.target === target || entry.paneId === target || entry.tabId === target,
 	);
+};
+
+/** One matched or unmatched registry/live-agent pair. */
+export interface MatchedRegistryAgent {
+	/** Registry entry attached to the live agent, or an unmatched registry entry. */
+	readonly entry?: RegistryEntry;
+	/** Live herdr agent attached to the registry entry, or an unmatched foreign live agent. */
+	readonly agent?: HerdrAgent;
+}
+
+/**
+ * Match registry entries to live herdr agents using the status command's legacy priority.
+ *
+ * Terminal id equality is tried first for every live agent. Pane, tab, and target hints are only
+ * used for legacy entries that do not have a durable terminal id. Each registry entry is attached
+ * to at most one live agent; unmatched live agents and unmatched entries are preserved in order.
+ * This deliberately tightens the old inline status logic: legacy terminal-id-less entries sharing a
+ * tab id spread across live agents instead of letting one entry be double-counted.
+ *
+ * @param entries - Registry entries owned by the herdr_subagent tool.
+ * @param agents - Live herdr agents reported by `herdr agent list`.
+ * @returns Live-agent matches followed by entries with no matching live agent.
+ */
+export const matchEntriesToAgents = (
+	entries: ReadonlyArray<RegistryEntry>,
+	agents: ReadonlyArray<HerdrAgent>,
+): ReadonlyArray<MatchedRegistryAgent> => {
+	const matchedEntryIndexes = new Set<number>();
+	const matches: MatchedRegistryAgent[] = [];
+
+	for (const agent of agents) {
+		const terminalId = agent.terminal_id;
+		const paneId = agent.pane_id;
+		const tabId = agent.tab_id;
+		let matchedIndex = terminalId
+			? entries.findIndex(
+					(entry, index) => !matchedEntryIndexes.has(index) && entry.terminalId === terminalId,
+				)
+			: -1;
+
+		if (matchedIndex < 0) {
+			matchedIndex = entries.findIndex(
+				(entry, index) =>
+					!matchedEntryIndexes.has(index) &&
+					!entry.terminalId &&
+					((terminalId !== undefined && entry.target === terminalId) ||
+						(paneId !== undefined && entry.paneId === paneId) ||
+						(tabId !== undefined && entry.tabId === tabId)),
+			);
+		}
+
+		if (matchedIndex >= 0) {
+			matchedEntryIndexes.add(matchedIndex);
+			matches.push({ entry: entries[matchedIndex], agent });
+		} else {
+			matches.push({ agent });
+		}
+	}
+
+	entries.forEach((entry, index) => {
+		if (!matchedEntryIndexes.has(index)) {
+			matches.push({ entry });
+		}
+	});
+
+	return matches;
 };
 
 /** Best-effort one-time migration from the legacy registry.json file into per-name entry files. */

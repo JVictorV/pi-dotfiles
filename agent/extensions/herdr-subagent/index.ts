@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Layer, ManagedRuntime } from "effect";
 
 import { executeAction } from "./actions";
+import { registerOverviewWidget } from "./overview-widget";
 import { ACTIONS, AGENT_SCOPES, SOURCES, WAIT_STATUSES, type HerdrSubagentParams } from "./types";
 
 const nodeLayer = Layer.provideMerge(
@@ -16,6 +17,7 @@ const nodeRuntime = ManagedRuntime.make(nodeLayer);
 
 /** Register herdr-backed pi subagent orchestration tools. */
 export default function herdrSubagentExtension(pi: ExtensionAPI) {
+	registerOverviewWidget(pi, (effect) => nodeRuntime.runPromise(effect));
 	pi.registerTool({
 		name: "herdr_subagent",
 		label: "Herdr Subagent",

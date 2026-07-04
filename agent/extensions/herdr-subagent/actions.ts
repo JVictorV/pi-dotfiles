@@ -30,6 +30,7 @@ import {
 	finalizeEntry,
 	findEntry,
 	listEntries,
+	matchEntriesToAgents,
 	nowIso,
 	readEntry,
 	removeEntry,
@@ -78,22 +79,15 @@ const commandStatus: Effect.Effect<
 		}
 	};
 
-	for (const agent of liveAgents) {
+	for (const match of matchEntriesToAgents(entries, liveAgents)) {
+		const agent = match.agent;
+		if (!agent) {
+			continue;
+		}
 		const terminalId = agent.terminal_id;
 		const paneId = agent.pane_id;
 		const tabId = agent.tab_id;
-		const matchedByTerminal = terminalId
-			? entries.find((entry) => entry.terminalId === terminalId)
-			: undefined;
-		const matched =
-			matchedByTerminal ??
-			entries.find(
-				(entry) =>
-					!entry.terminalId &&
-					((terminalId !== undefined && entry.target === terminalId) ||
-						(paneId !== undefined && entry.paneId === paneId) ||
-						(tabId !== undefined && entry.tabId === tabId)),
-			);
+		const matched = match.entry;
 		if (matched && paneId) {
 			seenNames.add(matched.name);
 			const updated: RegistryEntry = {
