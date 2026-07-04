@@ -179,6 +179,8 @@ Preferred default roles:
 - `planner` — read-only implementation planning; defaults to `anthropic/claude-opus-4-8`.
 - `reviewer` — read-only code review with P0-P3 findings; defaults to `anthropic/claude-opus-4-8`.
 - `worker` — general implementation worker; defaults to `openai-codex/gpt-5.5`.
+- `researcher` — read-only web research (docs, changelogs, dependency comparisons) with cited findings; defaults to `openai-codex/gpt-5.5`.
+- `test-writer` — writes tests through real seams; edits test files only, never production code; defaults to `openai-codex/gpt-5.5`.
 - `debugger` — root-cause diagnosis with temporary instrumentation; defaults to `anthropic/claude-opus-4-8`.
 - `critic` — high-taste critique of UI/copy/API/design alternatives; defaults to `anthropic/claude-fable-5`. This is the one legitimate reason to spawn Fable.
 
