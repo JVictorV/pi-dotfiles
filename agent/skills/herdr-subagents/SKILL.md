@@ -1,6 +1,6 @@
 ---
 name: herdr-subagents
-description: Orchestrate pi subagents as real herdr panels/tabs using the herdr_subagent tool. Use when spawning subagents, inspecting their panels, sending follow-ups, waiting for completion, or coordinating multi-agent work in herdr.
+description: Orchestrate pi subagents as real herdr panels/tabs using the herdr_subagent tool. Use proactively (inside herdr) whenever a task would benefit from delegation or parallelism — multi-part or parallelizable work, broad codebase research, long-running independent tasks, investigate-then-implement pipelines, or pre-ship reviews — and when spawning subagents, inspecting panels, sending follow-ups, or coordinating multi-agent work.
 compatibility: Requires running inside herdr (HERDR_ENV=1), the herdr_subagent extension tool, the herdr CLI, and the pi CLI.
 ---
 
@@ -19,6 +19,19 @@ This only works inside herdr: the `herdr_subagent` tool refuses every action whe
 - Extra split panes (logs, tests, servers) are outside this tool; use the raw herdr CLI or the `herdr` skill for those.
 
 This keeps herdr useful: workspace = project, tab = subagent, pane = terminal.
+
+## Be proactive
+
+Do not wait for the user to say "spawn a subagent". When running inside herdr, treat orchestration as the default way to handle work that is bigger than one focused change. Offer or just do it (matching the user's autonomy preferences) when:
+
+- The task splits into independent parts that can run in parallel (research several areas, fix unrelated failures, migrate many call sites).
+- A broad codebase investigation would pollute the orchestrator's context — send a `scout` instead of grepping for 20 turns yourself.
+- A long-running task (test suite fixes, large migration, data analysis) can proceed unattended while the conversation continues.
+- The task is investigate-then-implement: scout first, then one `worker` with the findings.
+- Something is about to ship: spawn a `reviewer` on the diff before declaring it done.
+- The user asks for comparisons of alternatives: run them as parallel subagents rather than sequentially in-context.
+
+Stay in-context (no subagents) when the task is a small focused edit, a quick question, or when the overhead of briefing a subagent exceeds doing the work directly. Proactivity means choosing delegation when it genuinely wins, not spawning for everything.
 
 ## Model selection
 
