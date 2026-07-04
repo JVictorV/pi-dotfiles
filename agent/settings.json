@@ -3,7 +3,7 @@
 	"theme": "light",
 	"defaultProvider": "anthropic",
 	"defaultModel": "claude-fable-5",
-	"defaultThinkingLevel": "xhigh",
+	"defaultThinkingLevel": "high",
 	"httpIdleTimeoutMs": 60000,
 	"enabledModels": [
 		"openai-codex/gpt-5.5",
