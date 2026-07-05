@@ -9,3 +9,6 @@ tmux
 ui
 
 stack
+herdr-subagents
+lsp
+review
