@@ -129,40 +129,37 @@ const waitForNotificationState: (
 	notification: ArmedNotification,
 ) => Effect.Effect<ObservedState, never, NotificationRequirements> = Effect.fnUntraced(
 	function* (notification) {
-		let consecutiveIdle = 0;
-		let firstIdleAt: number | undefined;
+		let consecutiveSettled = 0;
+		let firstSettledAt: number | undefined;
 		let observedWorking = false;
 
 		const poll: Effect.Effect<ObservedState, never, NotificationRequirements> = Effect.suspend(() =>
 			Effect.gen(function* () {
 				const agent = yield* liveAgent(notification.paneId);
 				const status = agent?.agent_status ?? "unknown";
-				if (status === "blocked") {
-					return "blocked";
-				}
-				if (status === "done") {
-					return "done";
-				}
 				if (status === "working") {
 					observedWorking = true;
-				}
-				if (status === "idle") {
+					consecutiveSettled = 0;
+					firstSettledAt = undefined;
+				} else if (status === "done" || status === "blocked" || status === "idle") {
+					// A settled status seen before any working phase is suspect right after arming: on a
+					// send re-arm the pane still reports the PREVIOUS turn's terminal status until the
+					// subagent picks the new message up, so an instant `done` here delivers a stale
+					// notification with the old result. Trust settled statuses only after an observed
+					// working phase, or after they hold through the startup-stability window.
 					const now = yield* Clock.currentTimeMillis;
-					firstIdleAt ??= now;
-					consecutiveIdle += 1;
-					if (observedWorking && consecutiveIdle >= WATCH_IDLE_CONFIRMATIONS) {
-						return "idle";
-					}
-					if (
-						!observedWorking &&
-						consecutiveIdle >= WATCH_IDLE_CONFIRMATIONS &&
-						now - firstIdleAt >= WATCH_STARTUP_IDLE_STABILITY_MS
-					) {
-						return "idle";
+					firstSettledAt ??= now;
+					consecutiveSettled += 1;
+					const trusted = observedWorking
+						? status !== "idle" || consecutiveSettled >= WATCH_IDLE_CONFIRMATIONS
+						: consecutiveSettled >= WATCH_IDLE_CONFIRMATIONS &&
+							now - firstSettledAt >= WATCH_STARTUP_IDLE_STABILITY_MS;
+					if (trusted) {
+						return status;
 					}
 				} else {
-					consecutiveIdle = 0;
-					firstIdleAt = undefined;
+					consecutiveSettled = 0;
+					firstSettledAt = undefined;
 				}
 				yield* Effect.sleep(WATCH_POLL_INTERVAL_MS);
 				return yield* poll;
@@ -246,6 +243,10 @@ export const createSubagentNotificationManager = (
 	runPromise: RunPromise,
 ): SubagentNotificationManager => {
 	const watchers = new Map<string, WatcherSlot>();
+	// Content fingerprints of already-delivered external results, per subagent name. A subagent
+	// process can re-emit agent_end with an unchanged final message after a re-arm (fresh
+	// sentAtMs defeats the armedAtMs guard); identical redelivery is always stale.
+	const deliveredExternal = new Map<string, string>();
 
 	const cancelKey = (key: string): void => {
 		const existing = watchers.get(key);
@@ -293,6 +294,13 @@ export const createSubagentNotificationManager = (
 			if (result.sentAtMs < slot.armedAtMs) {
 				return;
 			}
+			const fingerprint = `${result.status}:${result.finalMessage}`;
+			if (deliveredExternal.get(name) === fingerprint) {
+				// Duplicate of an already-delivered result: drop it WITHOUT consuming the watcher, so
+				// the genuinely-new completion of the current turn can still notify.
+				return;
+			}
+			deliveredExternal.set(name, fingerprint);
 			slot.controller.abort();
 			watchers.delete(key);
 			Effect.runSync(

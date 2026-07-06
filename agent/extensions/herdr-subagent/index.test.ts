@@ -285,6 +285,10 @@ describe("herdr_subagent extension", () => {
 		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
+		// Realistic pickup: the watcher must observe a working phase before trusting done.
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "working\ndone\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
 		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
 		const loaded = await loadToolWithFakePi(agentDir);
 
@@ -305,7 +309,7 @@ describe("herdr_subagent extension", () => {
 			() => {
 				expect(loaded.sentMessages).toHaveLength(1);
 			},
-			{ timeout: 1_000, interval: 10 },
+			{ timeout: 6_000, interval: 50 },
 		);
 		const delivered = loaded.sentMessages[0];
 		const content = firstMessageContent(delivered?.message);
@@ -326,6 +330,10 @@ describe("herdr_subagent extension", () => {
 		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
+		// Realistic pickup: working phase first, then the blocked state is trusted immediately.
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "working\nblocked\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
 		setEnv("FAKE_HERDR_AGENT_STATUS", "blocked");
 		const loaded = await loadToolWithFakePi(agentDir);
 
@@ -341,7 +349,7 @@ describe("herdr_subagent extension", () => {
 			() => {
 				expect(loaded.sentMessages).toHaveLength(1);
 			},
-			{ timeout: 1_000, interval: 10 },
+			{ timeout: 6_000, interval: 50 },
 		);
 		const content = firstMessageContent(loaded.sentMessages[0]?.message);
 		expect(content).toContain('state="blocked"');
@@ -425,6 +433,12 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
+		// Realistic post-send pickup: the re-armed watcher sees the new turn working, then done.
+		// Padded with a second working entry because the about-to-be-replaced spawn watcher may
+		// legitimately consume one sequence entry before the send re-arms.
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "working\nworking\ndone\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
 		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
 		await loaded.tool.execute(
 			"tool-call-send",
@@ -438,7 +452,7 @@ describe("herdr_subagent extension", () => {
 			() => {
 				expect(loaded.sentMessages).toHaveLength(1);
 			},
-			{ timeout: 1_000, interval: 10 },
+			{ timeout: 6_000, interval: 50 },
 		);
 		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
 			"Follow-up after spawn.",
@@ -447,7 +461,42 @@ describe("herdr_subagent extension", () => {
 			setTimeout(resolve, 2_200);
 		});
 		expect(loaded.sentMessages).toHaveLength(1);
-	}, 8_000);
+	}, 12_000);
+
+	test("send re-arm distrusts the previous turn's leftover done status", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Initial task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		// The production race: after a send, the pane still reports the PREVIOUS turn's done
+		// because the subagent has not picked the message up yet. The re-armed watcher must not
+		// deliver a stale notification from that leftover status.
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		await loaded.tool.execute(
+			"tool-call-send",
+			{ action: "send", target: "worker-a", message: "Follow-up after spawn." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		// Well inside the startup-stability window: nothing may fire on the leftover done.
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 5_000);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
+	}, 10_000);
 
 	test("session shutdown cancels pending watchers", async () => {
 		const root = await makeTempRoot();
