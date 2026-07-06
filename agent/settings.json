@@ -10,7 +10,7 @@
 		"anthropic/claude-opus-4-8",
 		"anthropic/claude-fable-5"
 	],
-	"skills": ["!**/.agents/skills/**"],
+	"skills": ["!**/.agents/skills/**", "~/.local/share/pi-skills"],
 	"hideThinkingBlock": true,
 	"quietStartup": true,
 	"packages": ["npm:pi-mcp-adapter", "npm:@ygncode/pi-web"]

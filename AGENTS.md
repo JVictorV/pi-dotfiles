@@ -26,6 +26,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 | Add/edit an extension            | `agent/extensions/*.ts` (auto-discovered on start / `/reload`)            |
 | Change model/theme/thinking      | `agent/settings.json`                                                     |
 | Add a skill                      | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
+| Add a private/work skill         | symlink into `~/.local/share/pi-skills/` (see CONVENTIONS)                |
 | Sync Pocock skills from upstream | invoke `sync-pocock-skills` skill ("sync skills")                         |
 | Extension type defs              | `tsconfig.json` resolves `@earendil-works/pi-*`                           |
 
@@ -34,10 +35,12 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 - Extension deps resolve by walking up from `agent/extensions/*.ts` to root `node_modules/`. New runtime deps go in root `package.json`.
 - `@earendil-works/pi-*` are `devDependencies` (types only — pi supplies them at runtime). Import as `import type` where possible.
 - pi skips `node_modules/` during extension/skill discovery, so root `node_modules` is safe.
+- **Private/work skills** load via a proxy dir: `settings.json` `skills` includes `~/.local/share/pi-skills/` (neutral path, safe to commit). That dir lives outside this repo and holds symlinks to skills in cloned work repos, e.g. `experiment-sdk-implementation -> ~/coding/<company>/<experts-repo>/.../skills/main`. Adding a work skill = one `ln -s` there; no settings edit, nothing identifying committed. Skill content stays in sync via `git pull` in the source repo. Discovery follows symlinks (an earlier "symlinks don't work" finding was a test artifact: `--no-tools` drops the skills block entirely).
 
 ## ANTI-PATTERNS
 
 - **Committing `agent/auth.json`** — contains provider API keys. Gitignored; keep it that way.
+- **Referencing employer/client paths in tracked files** — `settings.json` and `AGENTS.md` are committed; company names in paths leak. Route work skills through the `~/.local/share/pi-skills/` proxy dir instead.
 - **Editing `.gitmodules` / `.repos/` state by hand** — use `git submodule` commands.
 - **Adding extension deps to a nested `package.json`** — there is only the root one; nesting breaks resolution.
 - **Using `unknown` or generic `Error` on an Effect error channel** — model expected failures with domain-specific custom errors. When integrating with an external system whose error type is unknown, wrap it in a custom error instead of leaking `unknown`/`Error`.
