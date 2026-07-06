@@ -10,3 +10,6 @@
 [submodule ".repos/opencode"]
 	path = .repos/opencode
 	url = https://github.com/anomalyco/opencode
+[submodule ".repos/codex"]
+	path = .repos/codex
+	url = https://github.com/openai/codex.git

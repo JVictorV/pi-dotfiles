@@ -66,3 +66,4 @@ npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; 
   - `.repos/dmmulroy-dotfiles` tracks `dmmulroy/.dotfiles` (credited inspiration).
   - `.repos/edusantosbrito-pi-dotfiles` tracks `EduSantosBrito/pi-dotfiles` (credited inspiration).
   - `.repos/opencode` tracks `anomalyco/opencode` (reference for ported behavior).
+  - `.repos/codex` tracks `openai/codex` (inspiration reference).
