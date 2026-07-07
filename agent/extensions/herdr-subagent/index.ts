@@ -300,6 +300,14 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			),
 		}),
 		execute(_toolCallId, params: HerdrSubagentParams, signal, _onUpdate, ctx) {
+			const reservedSpawnName =
+				params.action === "spawn" && params.notify !== false && typeof params.name === "string"
+					? params.name
+					: undefined;
+			let spawnReservationArmed = false;
+			if (reservedSpawnName) {
+				notifications.beginBatchMember(reservedSpawnName);
+			}
 			return nodeRuntime
 				.runPromise(executeAction(params, ctx, { resultSocketPath }), { signal })
 				.then((result) => {
@@ -310,6 +318,9 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 							paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
 							summarySource: params.task ?? "spawned subagent task",
 						});
+						spawnReservationArmed = true;
+					} else if (reservedSpawnName) {
+						notifications.releaseBatchMember(reservedSpawnName);
 					}
 					if (details?.action === "send") {
 						if (params.notify === false) {
@@ -340,6 +351,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 						overviewWidget.poke();
 					}
 					return result;
+				})
+				.finally(() => {
+					if (reservedSpawnName && !spawnReservationArmed) {
+						notifications.releaseBatchMember(reservedSpawnName);
+					}
 				});
 		},
 	});

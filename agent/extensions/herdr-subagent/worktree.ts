@@ -24,9 +24,24 @@ export interface WorktreeCleanupResult {
 	readonly hasChanges: boolean;
 	/** Branch name containing preserved changes, when changes were found. */
 	readonly branch?: string;
-	/** Worktree path that was cleaned up. */
+	/** Worktree path that was cleaned up or deliberately preserved for manual recovery. */
 	readonly path?: string;
+	/** True when cleanup failed and the worktree was left on disk to avoid losing work. */
+	readonly preserved?: true;
+	/** Human-readable reason the preserved worktree needs manual attention. */
+	readonly reason?: string;
 }
+
+/** A git subprocess failed while managing an isolated worktree. */
+export class GitCommandFailed extends Schema.TaggedErrorClass<GitCommandFailed>()(
+	"GitCommandFailed",
+	{
+		message: Schema.String,
+		cwd: Schema.String,
+		args: Schema.Array(Schema.String),
+		cause: Schema.Defect(),
+	},
+) {}
 
 /** A git worktree isolation operation failed before a subagent could be safely spawned. */
 export class WorktreeIsolationFailed extends Schema.TaggedErrorClass<WorktreeIsolationFailed>()(
@@ -44,14 +59,22 @@ const git = (cwd: string, args: ReadonlyArray<string>, timeout: number): string 
 		.toString()
 		.trim();
 
+const gitFailure = (cwd: string, args: ReadonlyArray<string>, cause: unknown): GitCommandFailed =>
+	new GitCommandFailed({
+		cwd,
+		args: [...args],
+		message: `Git command failed in ${cwd}: git ${args.join(" ")}`,
+		cause,
+	});
+
 const gitEffect = (
 	cwd: string,
 	args: ReadonlyArray<string>,
 	timeout: number,
-): Effect.Effect<string, unknown> =>
+): Effect.Effect<string, GitCommandFailed> =>
 	Effect.try({
 		try: () => git(cwd, args, timeout),
-		catch: (cause) => cause,
+		catch: (cause) => gitFailure(cwd, args, cause),
 	});
 
 const isolationFailure = (
@@ -61,6 +84,22 @@ const isolationFailure = (
 	cause: unknown,
 ): WorktreeIsolationFailed => new WorktreeIsolationFailed({ cwd, operation, message, cause });
 
+const cleanupFailureReason = (failure: GitCommandFailed): string => failure.message;
+
+/**
+ * Prune stale git worktree metadata for crash recovery.
+ *
+ * @param cwd - Cwd inside the source repository whose worktree metadata should be pruned.
+ * @returns Nothing; pruning failures are ignored because this is best-effort recovery.
+ */
+export const pruneWorktrees: (cwd: string) => Effect.Effect<void> = Effect.fnUntraced(
+	function* (cwd) {
+		yield* gitEffect(cwd, ["worktree", "prune"], 5_000).pipe(
+			Effect.catch(() => Effect.succeed("")),
+		);
+	},
+);
+
 /**
  * Create a temporary detached git worktree for an isolated subagent spawn.
  *
@@ -68,6 +107,10 @@ const isolationFailure = (
  * from a monorepo package does not silently widen the agent's working directory to the repository
  * root. Both the git toplevel and input cwd are realpathed before relative path calculation so
  * symlinked temp paths (for example `/tmp` on macOS) preserve the correct subdirectory.
+ *
+ * If the extension host dies before close-time cleanup, the temporary `pi-agent-*` directory can be
+ * left behind. `createWorktree` runs `git worktree prune` before creating a new worktree in the same
+ * repo so Git can reclaim stale metadata for manually deleted orphaned worktrees.
  *
  * @param cwd - Cwd requested for the subagent spawn.
  * @param agentId - Parsed subagent name used in the temporary path and preservation branch.
@@ -91,6 +134,8 @@ export const createWorktree: (
 				),
 			);
 		}
+
+		yield* pruneWorktrees(cwd);
 
 		const baseSha = yield* gitEffect(cwd, ["rev-parse", "HEAD"], 5_000).pipe(
 			Effect.mapError((cause) =>
@@ -145,8 +190,8 @@ export const createWorktree: (
  * Clean worktrees at their original `baseSha` are removed silently. Dirty worktrees are staged and
  * committed with `--no-verify`, then a branch is created at the worktree HEAD so both the agent's
  * own commits and any leftover uncommitted changes are preserved for the orchestrator to merge.
- * Cleanup is intentionally best-effort and mirrors the reference implementation: unexpected cleanup
- * failures do not make `close` fail.
+ * If cleanup fails, the worktree is deliberately left on disk and reported as preserved instead of
+ * force-removed, because force-removing after a git failure can destroy uncommitted work.
  *
  * @param cwd - Original spawn cwd in the source repository.
  * @param worktree - Worktree metadata recorded at spawn time.
@@ -167,8 +212,12 @@ export const cleanupWorktree: (
 		if (Result.isSuccess(cleanup)) {
 			return cleanup.success;
 		}
-		yield* removeWorktree(cwd, worktree.path);
-		return { hasChanges: false };
+		return {
+			hasChanges: false,
+			path: worktree.path,
+			preserved: true,
+			reason: cleanupFailureReason(cleanup.failure),
+		};
 	},
 );
 
@@ -185,9 +234,7 @@ export const removeWorktree: (cwd: string, worktreePath: string) => Effect.Effec
 			gitEffect(cwd, ["worktree", "remove", "--force", worktreePath], 10_000),
 		);
 		if (Result.isFailure(removed)) {
-			yield* gitEffect(cwd, ["worktree", "prune"], 5_000).pipe(
-				Effect.catch(() => Effect.succeed("")),
-			);
+			yield* pruneWorktrees(cwd);
 		}
 	});
 
@@ -195,7 +242,7 @@ const cleanupExistingWorktree: (
 	cwd: string,
 	worktree: WorktreeInfo,
 	agentDescription: string,
-) => Effect.Effect<WorktreeCleanupResult, unknown> = Effect.fnUntraced(
+) => Effect.Effect<WorktreeCleanupResult, GitCommandFailed> = Effect.fnUntraced(
 	function* (cwd, worktree, agentDescription) {
 		const status = yield* gitEffect(worktree.path, ["status", "--porcelain"], 10_000);
 		if (status) {
@@ -220,7 +267,7 @@ const cleanupExistingWorktree: (
 	},
 );
 
-const createBranch: (cwd: string, branch: string) => Effect.Effect<string, unknown> =
+const createBranch: (cwd: string, branch: string) => Effect.Effect<string, GitCommandFailed> =
 	Effect.fnUntraced(function* (cwd, branch) {
 		const created = yield* Effect.result(gitEffect(cwd, ["branch", branch], 5_000));
 		if (Result.isSuccess(created)) {

@@ -12,7 +12,7 @@ const WATCH_IDLE_CONFIRMATIONS = 2;
 const WATCH_STARTUP_IDLE_STABILITY_MS = 10_000;
 const NOTIFICATION_TAIL_LINES = 60;
 const CUSTOM_MESSAGE_TYPE = "herdr-subagent-result";
-const ARM_BATCH_WINDOW_MS = 0;
+const ARM_BATCH_WINDOW_MS = 150;
 const GROUP_JOIN_TIMEOUT_MS = 30_000;
 const GROUP_JOIN_STRAGGLER_TIMEOUT_MS = 15_000;
 
@@ -80,7 +80,7 @@ interface WatcherSlot {
 interface PendingArmBatch {
 	readonly id: string;
 	readonly keys: Set<string>;
-	readonly timeoutHandle: TimerHandle;
+	timeoutHandle: TimerHandle;
 }
 
 interface NotificationDelivery {
@@ -103,6 +103,10 @@ interface CompletionGroup {
 
 /** Lifecycle controls for background subagent completion notifications. */
 export interface SubagentNotificationManager {
+	/** Reserve one spawn in the current dispatch-time batch before asynchronous spawn I/O starts. */
+	beginBatchMember(name: string): void;
+	/** Release a dispatch-time batch reservation for a spawn that failed before arming. */
+	releaseBatchMember(name: string): void;
 	/** Arm or re-arm one notification watcher for a subagent turn. */
 	arm(notification: ArmedNotification): void;
 	/** Deliver an external RPC result if, and only if, the matching watcher is armed. */
@@ -484,19 +488,19 @@ export const createSubagentNotificationManager = (
 
 	const finalizeArmBatch = (batch: PendingArmBatch): void => {
 		clearBatch(batch);
-		const activeKeys = [...batch.keys].filter((key) => watchers.has(key));
-		if (activeKeys.length < 2) {
+		const batchKeys = [...batch.keys];
+		if (batchKeys.length < 2) {
 			return;
 		}
 		const group: CompletionGroup = {
 			id: batch.id,
-			memberKeys: new Set(activeKeys),
+			memberKeys: new Set(batchKeys),
 			completed: new Map(),
 			timeoutHandle: undefined,
 			isStraggler: false,
 		};
 		groups.set(group.id, group);
-		for (const key of activeKeys) {
+		for (const key of batchKeys) {
 			keyToGroup.set(key, group.id);
 		}
 	};
@@ -536,8 +540,13 @@ export const createSubagentNotificationManager = (
 			cleanupGroup(group.id);
 			return;
 		}
-		if (group.memberKeys.size === 1 && group.completed.size === 0) {
+		if (group.memberKeys.size === 1) {
+			const remainingKey = [...group.memberKeys][0];
+			const remainingDelivery = remainingKey ? group.completed.get(remainingKey) : undefined;
 			cleanupGroup(group.id);
+			if (remainingDelivery) {
+				Effect.runSync(deliverIndividualNotification(pi, remainingDelivery));
+			}
 			return;
 		}
 		maybeDeliverCompletedGroup(group);
@@ -553,6 +562,14 @@ export const createSubagentNotificationManager = (
 		removeKeyFromGroup(key);
 	};
 
+	const resetArmBatchTimer = (batch: PendingArmBatch): void => {
+		notificationClock.clearTimeout(batch.timeoutHandle);
+		batch.timeoutHandle = notificationClock.setTimeout(
+			() => finalizeArmBatch(batch),
+			armBatchWindowMs,
+		);
+	};
+
 	const ensureArmBatch = (): PendingArmBatch => {
 		if (currentArmBatch) {
 			return currentArmBatch;
@@ -562,10 +579,17 @@ export const createSubagentNotificationManager = (
 		const batch: PendingArmBatch = {
 			id,
 			keys: new Set(),
-			timeoutHandle: notificationClock.setTimeout(() => finalizeArmBatch(batch), armBatchWindowMs),
+			timeoutHandle: notificationClock.setTimeout(() => undefined, 0),
 		};
+		resetArmBatchTimer(batch);
 		currentArmBatch = batch;
 		return batch;
+	};
+
+	const addKeyToCurrentBatch = (key: string): void => {
+		const batch = ensureArmBatch();
+		batch.keys.add(key);
+		resetArmBatchTimer(batch);
 	};
 
 	const processCompletion = (delivery: NotificationDelivery): void => {
@@ -587,9 +611,28 @@ export const createSubagentNotificationManager = (
 	};
 
 	const manager: SubagentNotificationManager = {
+		beginBatchMember(name) {
+			addKeyToCurrentBatch(watcherKey(name));
+		},
+		releaseBatchMember(name) {
+			const key = watcherKey(name);
+			if (watchers.has(key)) {
+				return;
+			}
+			removeKeyFromCurrentBatch(key);
+			removeKeyFromGroup(key);
+		},
 		arm(notification) {
 			const key = watcherKey(notification.name);
-			cancelKey(key);
+			const reservedInCurrentBatch = currentArmBatch?.keys.has(key) ?? false;
+			const reservedInGroup = keyToGroup.has(key) && !watchers.has(key);
+			const existing = watchers.get(key);
+			if (existing) {
+				existing.controller.abort();
+				watchers.delete(key);
+				removeKeyFromCurrentBatch(key);
+				removeKeyFromGroup(key);
+			}
 			const controller = new AbortController();
 			const slot: WatcherSlot = {
 				key,
@@ -600,11 +643,14 @@ export const createSubagentNotificationManager = (
 				controller,
 			};
 			watchers.set(key, slot);
-			// Pi does not expose a stable model-turn id at the tool boundary. The grouping seam is
-			// therefore the arm batch: all watchers armed before the next macrotask (or before the
-			// first member completes) are treated as the same orchestrator turn. A single-member
-			// batch is left ungrouped so solo subagents notify exactly as before.
-			ensureArmBatch().keys.add(key);
+			// Pi does not expose a stable model-turn id at the tool boundary. Spawn calls reserve
+			// batch membership synchronously before asynchronous herdr I/O starts; this later arm
+			// attaches the pane id to that reservation. Sends, and direct manager users without a
+			// reservation, still batch by arm time. A single-member batch is left ungrouped so solo
+			// subagents notify exactly as before.
+			if (!reservedInCurrentBatch && !reservedInGroup) {
+				addKeyToCurrentBatch(key);
+			}
 			runPromise(watchSubagent(notification), { signal: controller.signal })
 				.then((watched) => {
 					if (watchers.get(key) !== slot) {
@@ -673,6 +719,7 @@ export const createSubagentNotificationManager = (
 			}
 			groups.clear();
 			keyToGroup.clear();
+			deliveredExternal.clear();
 		},
 	};
 

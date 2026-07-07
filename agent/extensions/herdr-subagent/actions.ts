@@ -232,6 +232,10 @@ const cleanupFailedSpawn: (
 );
 
 const worktreeCloseSuffix = (cleanup: WorktreeCleanupResult | undefined): string => {
+	if (cleanup?.preserved) {
+		const reason = cleanup.reason ? ` Reason: ${cleanup.reason}` : "";
+		return `\nWorktree cleanup could not safely complete; preserved ${cleanup.path} for manual attention.${reason}`;
+	}
 	if (!cleanup?.hasChanges || !cleanup.branch) {
 		return "";
 	}
