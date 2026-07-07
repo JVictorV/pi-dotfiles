@@ -54,6 +54,8 @@ const modeBits = (mode: number): number => mode & 0o777;
 const resultSocketArg = (args: ReadonlyArray<string> | undefined): string | undefined =>
 	args?.find((arg) => arg.startsWith("HERDR_SUBAGENT_RESULT_SOCK="));
 
+const neverResolvingRunPromise = <A>(): Promise<A> => new Promise<A>(() => {});
+
 describe("herdr_subagent extension", () => {
 	test("fails before touching herdr when not running inside herdr", async () => {
 		const root = await makeTempRoot();
@@ -548,6 +550,149 @@ describe("herdr_subagent extension", () => {
 			setTimeout(resolve, 150);
 		});
 		expect(loaded.sentMessages).toHaveLength(0);
+	});
+
+	test("solo RPC completion keeps the existing individual notification envelope", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "solo result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
+			expect(content).toContain("solo result");
+			expect(content).not.toContain("<subagent_result_group");
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("RPC completions armed in the same batch are joined into one group notification", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.arm({ name: "worker-b", paneId: "wTest:p2", summarySource: "Task B." });
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "result A",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.deliverExternal("worker-b", {
+				status: "blocked",
+				finalMessage: "result B",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain(
+				'<subagent_result_group state="complete" partial="false" delivered="2" pending="0">',
+			);
+			expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
+			expect(content).toContain(
+				'<subagent_result name="worker-b" state="blocked" pane="wTest:p2">',
+			);
+			expect(content).toContain("result A");
+			expect(content).toContain("result B");
+			expect(firstMessageOptions(sentMessages[0]?.options)).toEqual({
+				deliverAs: "followUp",
+				triggerTurn: true,
+			});
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("group join timeout sends partial batches and re-batches stragglers", () => {
+		vi.useFakeTimers();
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.arm({ name: "worker-b", paneId: "wTest:p2", summarySource: "Task B." });
+			manager.arm({ name: "worker-c", paneId: "wTest:p3", summarySource: "Task C." });
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "result A",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+			vi.advanceTimersByTime(29_999);
+			expect(sentMessages).toHaveLength(0);
+			vi.advanceTimersByTime(1);
+
+			expect(sentMessages).toHaveLength(1);
+			const firstContent = firstMessageContent(sentMessages[0]?.message);
+			expect(firstContent).toContain(
+				'<subagent_result_group state="partial" partial="true" delivered="1" pending="2">',
+			);
+			expect(firstContent).toContain("result A");
+			expect(firstContent).not.toContain("result B");
+
+			manager.deliverExternal("worker-b", {
+				status: "done",
+				finalMessage: "result B",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+			vi.advanceTimersByTime(14_999);
+			expect(sentMessages).toHaveLength(1);
+			vi.advanceTimersByTime(1);
+
+			expect(sentMessages).toHaveLength(2);
+			const secondContent = firstMessageContent(sentMessages[1]?.message);
+			expect(secondContent).toContain(
+				'<subagent_result_group state="partial" partial="true" delivered="1" pending="1">',
+			);
+			expect(secondContent).toContain("result B");
+			expect(secondContent).not.toContain("result C");
+
+			manager.deliverExternal("worker-c", {
+				status: "done",
+				finalMessage: "result C",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(3);
+			const thirdContent = firstMessageContent(sentMessages[2]?.message);
+			expect(thirdContent).toContain(
+				'<subagent_result_group state="complete" partial="false" delivered="1" pending="0">',
+			);
+			expect(thirdContent).toContain("result C");
+		} finally {
+			manager.cancelAll();
+			vi.useRealTimers();
+		}
 	});
 
 	test("stale RPC after re-arm is dropped and the fresh watcher remains armed", async () => {
