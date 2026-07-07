@@ -32,6 +32,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 
 ## CONVENTIONS
 
+- When a command can produce more than a screenful of output, redirect it to a real file first (for example `cmd > /tmp/pi-output.txt 2>&1`) and inspect that file with `read` in chunks. Do not rely on piping directly to `head`, `tail`, or truncated terminal output; it is too easy to miss the important lines and have to rerun the command.
 - Extension deps resolve by walking up from `agent/extensions/*.ts` to root `node_modules/`. New runtime deps go in root `package.json`.
 - `@earendil-works/pi-*` are `devDependencies` (types only — pi supplies them at runtime). Import as `import type` where possible.
 - pi skips `node_modules/` during extension/skill discovery, so root `node_modules` is safe.
