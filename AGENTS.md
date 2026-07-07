@@ -68,3 +68,4 @@ npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; 
   - `.repos/edusantosbrito-pi-dotfiles` tracks `EduSantosBrito/pi-dotfiles` (credited inspiration).
   - `.repos/opencode` tracks `anomalyco/opencode` (reference for ported behavior).
   - `.repos/codex` tracks `openai/codex` (inspiration reference).
+  - `.repos/pi-subagents` tracks `tintinweb/pi-subagents` (MIT; source of ported model-resolver, worktree-isolation, and group-join patterns in the herdr-subagent extension).

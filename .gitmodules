@@ -13,3 +13,6 @@
 [submodule ".repos/codex"]
 	path = .repos/codex
 	url = https://github.com/openai/codex.git
+[submodule ".repos/pi-subagents"]
+	path = .repos/pi-subagents
+	url = https://github.com/tintinweb/pi-subagents
