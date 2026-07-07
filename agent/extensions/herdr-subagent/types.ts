@@ -16,6 +16,7 @@ export type HerdrSubagentAction =
 export type PaneReadSource = "visible" | "recent" | "recent-unwrapped";
 export type WaitStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 export type AgentScope = "user" | "project" | "both";
+export type SpawnIsolation = "worktree";
 
 export const ACTIONS: ReadonlyArray<HerdrSubagentAction> = [
 	"status",
@@ -36,6 +37,7 @@ export const WAIT_STATUSES: ReadonlyArray<WaitStatus> = [
 	"unknown",
 ];
 export const AGENT_SCOPES: ReadonlyArray<AgentScope> = ["user", "project", "both"];
+export const SPAWN_ISOLATIONS: ReadonlyArray<SpawnIsolation> = ["worktree"];
 
 export interface HerdrSubagentParams {
 	readonly action: HerdrSubagentAction;
@@ -48,6 +50,7 @@ export interface HerdrSubagentParams {
 	readonly cwd?: string;
 	readonly workspace?: string;
 	readonly label?: string;
+	readonly isolation?: SpawnIsolation;
 	readonly model?: string;
 	readonly thinking?: string;
 	readonly tools?: ReadonlyArray<string>;

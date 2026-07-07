@@ -21,6 +21,7 @@ import {
 	ACTIONS,
 	AGENT_SCOPES,
 	SOURCES,
+	SPAWN_ISOLATIONS,
 	WAIT_STATUSES,
 	type HerdrSubagentParams,
 	type RegistryEntry,
@@ -194,7 +195,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 		name: "herdr_subagent",
 		label: "Herdr Subagent",
 		description:
-			"Spawn and control pi subagents as real herdr tabs/panels. Supports status, agent-types, spawn, inspect, send, wait, focus, and close. Requires HERDR_ENV=1 for panel control.",
+			'Spawn and control pi subagents as real herdr tabs/panels. Supports status, agent-types, spawn, inspect, send, wait, focus, and close. Spawn can opt into git worktree isolation with isolation: "worktree". Requires HERDR_ENV=1 for panel control.',
 		promptSnippet:
 			"Spawn, inspect, command, wait on, focus, and close pi subagents in herdr tabs/panels",
 		promptGuidelines: [
@@ -208,7 +209,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			"After herdr_subagent spawn or send, wait for the automatic subagent_result follow-up notification instead of polling wait; use wait only when explicitly blocking is necessary.",
 			"Spawned subagents cannot spawn their own subagents by default; orchestrators may grant recursive delegation with allowSpawn when genuinely needed.",
 			"Keep herdr_subagent fan-out to at most 12 concurrent subagents; start small and scale up only when the task genuinely benefits from parallelism.",
-			"For parallel code editing, avoid multiple herdr_subagent workers mutating the same worktree unless the user has explicitly isolated their worktrees.",
+			'For parallel code editing, pass isolation: "worktree" on spawn so implementation workers mutate isolated temporary git worktrees instead of the same checkout.',
 		],
 		parameters: Type.Object({
 			action: StringEnum([...ACTIONS], { description: "Operation to perform." }),
@@ -246,6 +247,12 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			),
 			label: Type.Optional(
 				Type.String({ description: "Herdr tab/pane label for spawn. Defaults to agent: <name>." }),
+			),
+			isolation: Type.Optional(
+				StringEnum([...SPAWN_ISOLATIONS], {
+					description:
+						"Opt-in spawn isolation. Use worktree to create a temporary detached git worktree and spawn the subagent inside its matching cwd; close preserves changes on branch pi-agent-<name>.",
+				}),
 			),
 			model: Type.Optional(
 				Type.String({
