@@ -43,6 +43,13 @@ import {
 } from "./store";
 import { deleteRuntimeFiles, writeRuntimeFile } from "./runtime-files";
 import * as SubagentName from "./subagent-name";
+import {
+	cleanupWorktree,
+	createWorktree,
+	removeWorktree,
+	type WorktreeCleanupResult,
+	type WorktreeInfo,
+} from "./worktree";
 import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
 import type {
 	AgentDefinition,
@@ -209,15 +216,35 @@ const cleanupFailedSpawn: (
 	name: string,
 	tabId: string | undefined,
 	filePaths: ReadonlyArray<string | undefined>,
+	worktree: { readonly cwd: string; readonly info: WorktreeInfo } | undefined,
 ) => Effect.Effect<void, never, HerdrActionRequirements> = Effect.fnUntraced(
-	function* (name, tabId, filePaths) {
+	function* (name, tabId, filePaths, worktree) {
 		if (tabId) {
 			yield* runHerdr(["tab", "close", tabId]).pipe(Effect.catch(() => Effect.void));
+		}
+		if (worktree) {
+			yield* removeWorktree(worktree.cwd, worktree.info.path);
 		}
 		yield* deleteRuntimeFiles(filePaths);
 		yield* removeEntry(name).pipe(Effect.catch(() => Effect.void));
 	},
 );
+
+const worktreeCloseSuffix = (cleanup: WorktreeCleanupResult | undefined): string => {
+	if (!cleanup?.hasChanges || !cleanup.branch) {
+		return "";
+	}
+	return `\nWorktree changes were preserved on branch ${cleanup.branch}. Merge or delete it when done.`;
+};
+
+const cleanupEntryWorktree: (
+	entry: RegistryEntry | undefined,
+) => Effect.Effect<WorktreeCleanupResult | undefined> = Effect.fnUntraced(function* (entry) {
+	if (!entry?.worktree) {
+		return undefined;
+	}
+	return yield* cleanupWorktree(entry.cwd, entry.worktree, entry.label);
+});
 
 const commandSpawn: (
 	params: HerdrSubagentParams,
@@ -307,11 +334,18 @@ const commandSpawn: (
 
 		const runtimeFiles: Array<string | undefined> = [];
 		let createdTabId: string | undefined;
+		let createdWorktree: { readonly cwd: string; readonly info: WorktreeInfo } | undefined;
 		const spawnAfterReservation: Effect.Effect<
 			ToolResult,
 			HerdrSubagentError,
 			HerdrActionRequirements
 		> = Effect.gen(function* () {
+			const worktree =
+				params.isolation === "worktree" ? yield* createWorktree(cwd, name) : undefined;
+			if (worktree) {
+				createdWorktree = { cwd, info: worktree };
+			}
+			const spawnCwd = worktree?.workPath ?? cwd;
 			const resultSocketEnv = environment.resultSocketPath
 				? ["--env", `HERDR_SUBAGENT_RESULT_SOCK=${environment.resultSocketPath}`]
 				: [];
@@ -321,7 +355,7 @@ const commandSpawn: (
 				"--workspace",
 				spawnWorkspaceId,
 				"--cwd",
-				cwd,
+				spawnCwd,
 				"--label",
 				label,
 				"--env",
@@ -377,10 +411,12 @@ const commandSpawn: (
 
 			const createdAt = yield* nowIso;
 			const updatedAt = yield* nowIso;
+			const worktreeFields = worktree ? { worktree } : {};
 			const entry: RegistryEntry = {
 				name,
 				phase: "active",
 				...ownerFields,
+				...worktreeFields,
 				target: terminalId ?? paneId,
 				paneId,
 				tabId,
@@ -401,7 +437,7 @@ const commandSpawn: (
 			return {
 				content: [
 					textContent(
-						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${cwd}\n\nNext: you will receive a subagent_result follow-up when ${name} finishes or blocks. Do not poll wait or duplicate the work; use wait only when you explicitly need to block.`,
+						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${spawnCwd}\n\nNext: you will receive a subagent_result follow-up when ${name} finishes or blocks. Do not poll wait or duplicate the work; use wait only when you explicitly need to block.`,
 					),
 				],
 				details: { action: "spawn", entry },
@@ -409,7 +445,7 @@ const commandSpawn: (
 		});
 
 		return yield* spawnAfterReservation.pipe(
-			Effect.onError(() => cleanupFailedSpawn(name, createdTabId, runtimeFiles)),
+			Effect.onError(() => cleanupFailedSpawn(name, createdTabId, runtimeFiles, createdWorktree)),
 		);
 	},
 );
@@ -628,22 +664,28 @@ const commandClose: (
 				if (yield* tabExists(entry.tabId)) {
 					return yield* Effect.fail(closeFailure);
 				}
+				const cleanup = yield* cleanupEntryWorktree(entry);
 				yield* removeEntry(entry.name);
 				yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
 				return {
 					content: [
 						textContent(
-							`Tab ${entry.tabId} for ${entry.name} was already gone; removed the stale registry entry.`,
+							`Tab ${entry.tabId} for ${entry.name} was already gone; removed the stale registry entry.${worktreeCloseSuffix(cleanup)}`,
 						),
 					],
-					details: { action: "close", entry, stale: true },
+					details: { action: "close", entry, stale: true, worktreeCleanup: cleanup },
 				};
 			}
+			const cleanup = yield* cleanupEntryWorktree(entry);
 			yield* removeEntry(entry.name);
 			yield* deleteRuntimeFiles([entry.taskFile, entry.systemPromptFile]);
 			return {
-				content: [textContent(`Closed tab ${entry.tabId} for ${entry.name}.`)],
-				details: { action: "close", entry },
+				content: [
+					textContent(
+						`Closed tab ${entry.tabId} for ${entry.name}.${worktreeCloseSuffix(cleanup)}`,
+					),
+				],
+				details: { action: "close", entry, worktreeCleanup: cleanup },
 			};
 		}
 		const resolved = yield* resolvePane(target, entries);
@@ -651,13 +693,14 @@ const commandClose: (
 		// A registry entry without a tabId can still reference this pane; clean it up
 		// so the closed pane does not leave a permanently "missing" name behind.
 		const paneEntry = entry ?? findEntry(entries, resolved.paneId);
+		const cleanup = yield* cleanupEntryWorktree(paneEntry);
 		if (paneEntry) {
 			yield* removeEntry(paneEntry.name);
 			yield* deleteRuntimeFiles([paneEntry.taskFile, paneEntry.systemPromptFile]);
 		}
 		return {
-			content: [textContent(`Closed pane ${resolved.paneId}.`)],
-			details: { action: "close", resolved },
+			content: [textContent(`Closed pane ${resolved.paneId}.${worktreeCloseSuffix(cleanup)}`)],
+			details: { action: "close", resolved, worktreeCleanup: cleanup },
 		};
 	},
 );

@@ -1,5 +1,12 @@
 import { Schema } from "effect";
 
+export const WorktreeInfoSchema = Schema.Struct({
+	path: Schema.String,
+	branch: Schema.String,
+	baseSha: Schema.String,
+	workPath: Schema.String,
+});
+
 export const RegistryEntrySchema = Schema.Struct({
 	name: Schema.String,
 	phase: Schema.optional(Schema.Literals(["reserved", "active"])),
@@ -11,6 +18,7 @@ export const RegistryEntrySchema = Schema.Struct({
 	terminalId: Schema.optional(Schema.String),
 	cwd: Schema.String,
 	label: Schema.String,
+	worktree: Schema.optional(WorktreeInfoSchema),
 	agentType: Schema.optional(Schema.String),
 	model: Schema.optional(Schema.String),
 	thinking: Schema.optional(Schema.String),

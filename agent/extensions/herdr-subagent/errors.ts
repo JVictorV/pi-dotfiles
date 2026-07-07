@@ -2,6 +2,7 @@ import { Effect, Predicate, Schema } from "effect";
 
 import { truncateForModel } from "./output";
 import { casesHandled } from "./prelude";
+import type { WorktreeIsolationFailed } from "./worktree";
 
 /** Expected failure of a herdr_subagent action, rejected at the tool boundary. */
 export class HerdrSubagentToolError extends Schema.TaggedErrorClass<HerdrSubagentToolError>()(
@@ -76,7 +77,8 @@ export type HerdrSubagentError =
 	| TargetNotResolved
 	| WaitTimedOut
 	| HerdrFileSystemFailed
-	| SpawnRejected;
+	| SpawnRejected
+	| WorktreeIsolationFailed;
 
 export const commandFailureText = (failure: HerdrCommandFailed): string => {
 	const output = [failure.stdout, failure.stderr]
@@ -118,6 +120,7 @@ export const toToolError = (failure: HerdrSubagentError): HerdrSubagentToolError
 			return new HerdrSubagentToolError({ message: failure.message });
 		case "HerdrFileSystemFailed":
 		case "SpawnRejected":
+		case "WorktreeIsolationFailed":
 			return new HerdrSubagentToolError({
 				message: messageWithCause(failure.message, failure.cause),
 			});
