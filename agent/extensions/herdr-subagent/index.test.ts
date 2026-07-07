@@ -596,7 +596,7 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
-	test("RPC completions armed in the same batch are joined into one group notification", () => {
+	test("RPC completions reserved in the same spawn dispatch batch are joined after async arm I/O", async () => {
 		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
 		const manager = createSubagentNotificationManager(
 			{
@@ -605,9 +605,18 @@ describe("herdr_subagent extension", () => {
 				},
 			},
 			neverResolvingRunPromise,
+			{ armBatchWindowMs: 1 },
 		);
 		try {
+			manager.beginBatchMember("worker-a");
+			manager.beginBatchMember("worker-b");
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 5);
+			});
 			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 5);
+			});
 			manager.arm({ name: "worker-b", paneId: "wTest:p2", summarySource: "Task B." });
 
 			manager.deliverExternal("worker-a", {
@@ -638,6 +647,74 @@ describe("herdr_subagent extension", () => {
 				deliverAs: "followUp",
 				triggerTurn: true,
 			});
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("spawn failure releases its batch reservation instead of waiting on a ghost member", () => {
+		vi.useFakeTimers();
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.beginBatchMember("worker-a");
+			manager.beginBatchMember("worker-b");
+			vi.advanceTimersByTime(150);
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "result A",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.releaseBatchMember("worker-b");
+
+			expect(sentMessages).toHaveLength(1);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
+			expect(content).toContain("result A");
+			expect(content).not.toContain("<subagent_result_group");
+		} finally {
+			manager.cancelAll();
+			vi.useRealTimers();
+		}
+	});
+
+	test("cancelAll clears duplicate RPC fingerprints for future sessions", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "same result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+			manager.cancelAll();
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task B." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "same result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(2);
 		} finally {
 			manager.cancelAll();
 		}

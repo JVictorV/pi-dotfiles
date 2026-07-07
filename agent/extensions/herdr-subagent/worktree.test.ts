@@ -18,7 +18,7 @@ import {
 	writeAgent,
 } from "./test-harness";
 import { decodeJsonString, decodeRegistryEntry } from "./schemas";
-import { cleanupWorktree, createWorktree } from "./worktree";
+import { cleanupWorktree, createWorktree, pruneWorktrees } from "./worktree";
 import type { RegistryEntry } from "./types";
 
 const repos: string[] = [];
@@ -90,6 +90,18 @@ describe("git worktree isolation", () => {
 		expect(existsSync(worktree.path)).toBe(false);
 	});
 
+	test("createWorktree prunes stale worktree metadata before creating a new worktree", async () => {
+		const repo = initGitRepo();
+		const orphaned = await runHerdrSubagentEffect(createWorktree(repo, "orphaned-a"));
+		rmSync(orphaned.path, { recursive: true, force: true });
+		expect(git(repo, ["worktree", "list", "--porcelain"])).toContain(orphaned.path);
+
+		const next = await runHerdrSubagentEffect(createWorktree(repo, "orphaned-b"));
+
+		expect(git(repo, ["worktree", "list", "--porcelain"])).not.toContain(orphaned.path);
+		await runHerdrSubagentEffect(cleanupWorktree(repo, next, "clean next"));
+	});
+
 	test("cleanupWorktree preserves an agent's own commit on a branch", async () => {
 		const repo = initGitRepo();
 		const worktree = await runHerdrSubagentEffect(createWorktree(repo, "committed-a"));
@@ -124,6 +136,38 @@ describe("git worktree isolation", () => {
 		expect(cleanup.branch).toBe("pi-agent-hooked-a");
 		expect(git(repo, ["show", "pi-agent-hooked-a:leftover.txt"])).toBe("agent wrote this");
 		expect(existsSync(worktree.path)).toBe(false);
+	});
+
+	test("cleanupWorktree preserves the worktree on git cleanup failure", async () => {
+		const repo = initGitRepo();
+		const worktree = await runHerdrSubagentEffect(createWorktree(repo, "preserve-a"));
+		try {
+			execFileSync("git", ["config", "commit.gpgsign", "true"], {
+				cwd: worktree.path,
+				stdio: "pipe",
+			});
+			execFileSync("git", ["config", "gpg.program", "false"], {
+				cwd: worktree.path,
+				stdio: "pipe",
+			});
+			writeFileSync(join(worktree.path, "leftover.txt"), "agent wrote this\n");
+
+			const cleanup = await runHerdrSubagentEffect(
+				cleanupWorktree(repo, worktree, "cleanup should fail"),
+			);
+
+			expect(cleanup).toMatchObject({
+				hasChanges: false,
+				path: worktree.path,
+				preserved: true,
+			});
+			expect(cleanup.reason).toContain("git commit --no-verify");
+			expect(existsSync(worktree.path)).toBe(true);
+			expect(git(worktree.path, ["status", "--porcelain"])).toContain("leftover.txt");
+		} finally {
+			rmSync(worktree.path, { recursive: true, force: true });
+			await runHerdrSubagentEffect(pruneWorktrees(repo));
+		}
 	});
 
 	test("spawn isolation uses the worktree workPath and close preserves changes", async () => {
@@ -185,6 +229,64 @@ describe("git worktree isolation", () => {
 		await expect(
 			access(join(agentDir, "herdr-subagents", "registry", "worker-a.json")),
 		).rejects.toThrow();
+	});
+
+	test("close reports a preserved worktree that needs manual cleanup", async () => {
+		const root = await makeTempRoot();
+		const agentDir = join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const repo = initGitRepo();
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-preserved",
+				agentType: "worker",
+				task: "Leave changes behind.",
+				cwd: repo,
+				isolation: "worktree",
+			},
+			undefined,
+			undefined,
+			makeContext(repo),
+		);
+		const entry = await readRegistryEntry(agentDir, "worker-preserved");
+		const worktree = entry.worktree;
+		expect(worktree).toBeDefined();
+		if (!worktree) {
+			throw new Error("expected worktree metadata");
+		}
+		try {
+			execFileSync("git", ["config", "commit.gpgsign", "true"], {
+				cwd: worktree.path,
+				stdio: "pipe",
+			});
+			execFileSync("git", ["config", "gpg.program", "false"], {
+				cwd: worktree.path,
+				stdio: "pipe",
+			});
+			await writeFile(join(worktree.path, "leftover.txt"), "manual cleanup needed\n", "utf8");
+
+			const closed = await tool.execute(
+				"tool-call-close",
+				{ action: "close", target: "worker-preserved" },
+				undefined,
+				undefined,
+				makeContext(repo),
+			);
+
+			expect(closed.content[0]?.text).toContain(
+				`Worktree cleanup could not safely complete; preserved ${worktree.path} for manual attention.`,
+			);
+			expect(existsSync(worktree.path)).toBe(true);
+		} finally {
+			rmSync(worktree.path, { recursive: true, force: true });
+			await runHerdrSubagentEffect(pruneWorktrees(repo));
+		}
 	});
 
 	test("spawn isolation rejects non-git cwd instead of spawning unisolated", async () => {
