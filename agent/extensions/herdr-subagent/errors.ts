@@ -43,6 +43,16 @@ export class SubagentRecursionDenied extends Schema.TaggedErrorClass<SubagentRec
 	},
 ) {}
 
+/** A requested spawn model could not be resolved to an available pi model. */
+export class ModelResolutionFailed extends Schema.TaggedErrorClass<ModelResolutionFailed>()(
+	"ModelResolutionFailed",
+	{
+		message: Schema.String,
+		input: Schema.String,
+		availableModels: Schema.Array(Schema.String),
+	},
+) {}
+
 /** A target name, terminal id, or pane id could not be resolved. */
 export class TargetNotResolved extends Schema.TaggedErrorClass<TargetNotResolved>()(
 	"TargetNotResolved",
@@ -73,6 +83,7 @@ export type HerdrSubagentError =
 	| HerdrCommandFailed
 	| ActionRejected
 	| SubagentRecursionDenied
+	| ModelResolutionFailed
 	| TargetNotResolved
 	| WaitTimedOut
 	| HerdrFileSystemFailed
@@ -113,6 +124,7 @@ export const toToolError = (failure: HerdrSubagentError): HerdrSubagentToolError
 		case "HerdrNotAvailable":
 		case "ActionRejected":
 		case "SubagentRecursionDenied":
+		case "ModelResolutionFailed":
 		case "TargetNotResolved":
 		case "WaitTimedOut":
 			return new HerdrSubagentToolError({ message: failure.message });

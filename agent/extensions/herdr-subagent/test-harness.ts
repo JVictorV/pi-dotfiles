@@ -10,6 +10,8 @@ import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
+import type { ModelRegistryForResolution } from "./model-resolver";
+
 type HerdrRuntimeRequirements = ChildProcessSpawner | FileSystem | Path;
 
 const nodeLayer = Layer.provideMerge(
@@ -95,6 +97,8 @@ export interface FakeContext {
 	readonly hasUI: boolean;
 	/** Fake UI methods used by the tool. */
 	readonly ui: { readonly confirm: (title: string, message: string) => Promise<boolean> };
+	/** Optional fake pi model registry for spawn model resolution tests. */
+	readonly modelRegistry?: ModelRegistryForResolution;
 }
 
 type ExtensionFactory = (pi: FakePi) => void;
@@ -164,10 +168,14 @@ export const makeTempRoot = async (): Promise<string> => {
 };
 
 /** Build a fake tool execution context rooted at the provided cwd. */
-export const makeContext = (cwd: string): FakeContext => ({
+export const makeContext = (
+	cwd: string,
+	modelRegistry?: ModelRegistryForResolution,
+): FakeContext => ({
 	cwd,
 	hasUI: false,
 	ui: { confirm: async () => true },
+	...(modelRegistry ? { modelRegistry } : {}),
 });
 
 /** Load the extension default export and return the captured herdr_subagent tool. */

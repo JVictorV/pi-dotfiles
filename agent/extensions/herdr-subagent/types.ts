@@ -1,6 +1,7 @@
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { Schema } from "effect";
 
+import type { ModelRegistryForResolution } from "./model-resolver";
 import type { HerdrAgent, RegistryEntrySchema } from "./schemas";
 
 export type HerdrSubagentAction =
@@ -99,4 +100,5 @@ export interface PiToolContext {
 	readonly cwd: string;
 	readonly hasUI: boolean;
 	readonly ui: { confirm(title: string, message: string): Promise<boolean> };
+	readonly modelRegistry?: ModelRegistryForResolution;
 }

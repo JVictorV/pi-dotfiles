@@ -18,6 +18,7 @@ import {
 	setSubagentSession,
 	writeAgent,
 } from "./test-harness";
+import type { ModelRegistryForResolution, ResolvableModelEntry } from "./model-resolver";
 import { createSubagentNotificationManager } from "./notifications";
 import { decodeRegistryEntry } from "./schemas";
 import { notifySubagentFinished, startSubagentRpcServer } from "./subagent-rpc";
@@ -50,6 +51,21 @@ const tabCreateCalls = (
 const TEST_FRESH_SENT_AT_MS = 4_000_000_000_000;
 
 const modeBits = (mode: number): number => mode & 0o777;
+
+const makeModelRegistry = (
+	models: ReadonlyArray<ResolvableModelEntry>,
+	available?: ReadonlyArray<ResolvableModelEntry>,
+): ModelRegistryForResolution => {
+	const base = {
+		find(provider: string, modelId: string): ResolvableModelEntry | undefined {
+			return models.find((model) => model.provider === provider && model.id === modelId);
+		},
+		getAll(): ReadonlyArray<ResolvableModelEntry> {
+			return models;
+		},
+	};
+	return available ? { ...base, getAvailable: () => available } : base;
+};
 
 const resultSocketArg = (args: ReadonlyArray<string> | undefined): string | undefined =>
 	args?.find((arg) => arg.startsWith("HERDR_SUBAGENT_RESULT_SOCK="));
@@ -875,6 +891,67 @@ describe("herdr_subagent extension", () => {
 		const command = runCommandFromCalls(await readHerdrCalls(log));
 		expect(command).toContain("anthropic/claude-opus-4-8");
 		expect(command).not.toContain("openai-codex/gpt-5.5");
+	});
+
+	test("resolves stale dated and dotted role model pins before spawning", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "anthropic/claude-opus-4.8-20260101");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+		const registry = makeModelRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-8", name: "Claude Opus 4.8" },
+			{ provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5 Codex" },
+		]);
+
+		await tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-a",
+				agentType: "worker",
+				task: "Implement the focused change.",
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace", registry),
+		);
+
+		const command = runCommandFromCalls(await readHerdrCalls(log));
+		expect(command).toContain("anthropic/claude-opus-4-8");
+		expect(command).not.toContain("20260101");
+	});
+
+	test("rejects an unresolvable spawn model before touching herdr", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "anthropic/missing-model");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+		const registry = makeModelRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-8", name: "Claude Opus 4.8" },
+			{ provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5 Codex" },
+		]);
+
+		await expect(
+			tool.execute(
+				"tool-call",
+				{
+					action: "spawn",
+					name: "worker-a",
+					agentType: "worker",
+					task: "Implement the focused change.",
+				},
+				undefined,
+				undefined,
+				makeContext("/workspace", registry),
+			),
+		).rejects.toThrow(
+			/Model not found: "anthropic\/missing-model"[\s\S]*anthropic\/claude-opus-4-8/,
+		);
+		expect(await readHerdrCalls(log)).toEqual([]);
 	});
 
 	test("agent discovery skips unreadable md-shaped directory entries", async () => {

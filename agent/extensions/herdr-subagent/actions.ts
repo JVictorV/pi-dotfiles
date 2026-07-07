@@ -25,6 +25,7 @@ import {
 	runHerdr,
 	tabExists,
 } from "./herdr-cli";
+import { resolveModelReference } from "./model-resolver";
 import { requireTarget, resolvePane } from "./pane";
 import { textContent, truncateForModel } from "./output";
 import { casesHandled } from "./prelude";
@@ -276,6 +277,18 @@ const commandSpawn: (
 			}
 		}
 
+		const requestedModel = params.model ?? agent?.model;
+		let model: string | undefined;
+		if (requestedModel && ctx.modelRegistry) {
+			const resolvedModel = resolveModelReference(requestedModel, ctx.modelRegistry);
+			if (Result.isFailure(resolvedModel)) {
+				return yield* Effect.fail(resolvedModel.failure);
+			}
+			model = resolvedModel.success.reference;
+		} else {
+			model = requestedModel;
+		}
+
 		const pane = yield* currentPane().pipe(
 			Effect.catch((error) => (params.workspace ? Effect.succeed(undefined) : Effect.fail(error))),
 		);
@@ -297,7 +310,7 @@ const commandSpawn: (
 			cwd,
 			label,
 			agentType: params.agentType,
-			model: params.model ?? agent?.model,
+			model,
 			thinking: params.thinking ?? agent?.thinking,
 			taskFile: "",
 			createdAt: reservedAt,
@@ -355,7 +368,6 @@ const commandSpawn: (
 				? yield* writeRuntimeFile("system", name, agent.systemPrompt)
 				: undefined;
 			runtimeFiles.push(systemPromptFile);
-			const model = params.model ?? agent?.model;
 			const thinking = params.thinking ?? agent?.thinking;
 			const tools = params.tools ?? agent?.tools;
 			const commandParts = ["pi", "--name", `subagent: ${name}`];
