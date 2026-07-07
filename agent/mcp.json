@@ -1,6 +1,9 @@
 {
 	"imports": ["cursor", "claude-code", "claude-desktop"],
 	"mcpServers": {
+		"notion": {
+			"url": "https://mcp.notion.com/mcp"
+		},
 		"figma": {
 			"command": "npx",
 			"args": ["-y", "figma-developer-mcp", "--stdio"],
