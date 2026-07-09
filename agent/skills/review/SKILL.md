@@ -1,6 +1,6 @@
 ---
 name: review
-description: Alias for the code-review skill. Use when the user says /review or asks for a Claude-style review of a diff, PR, branch, or uncommitted changes.
+description: Alias for the code-review skill. Use when the user says /review or asks to review a diff, PR, branch, or changes since a fixed point.
 ---
 
 # Review

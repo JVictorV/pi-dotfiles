@@ -1,152 +1,89 @@
 ---
 name: code-review
-description: Claude-style code review for diffs, PRs, branches, or uncommitted changes. Use when the user asks to review code, run /review, /code-review, inspect a PR for merge blockers, or find bugs/regressions/security issues in a change.
+description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews independently and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X" or says /review or /code-review.
 ---
 
-# Code Review
+Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
-Review code like a strict maintainer. Your job is to find actionable defects in the proposed change, not to summarize or fix it.
+- **Standards** — does the code conform to this repo's documented coding standards?
+- **Spec** — does the code faithfully implement the originating issue / PRD / spec?
 
-This skill is a behavioral reconstruction of Claude-style `/review` / `/code-review`: inspect the diff, understand enough surrounding code to evaluate it, verify claims where practical, and report merge-blocking findings first.
+Both axes run **independently** so they don't pollute each other's context — as parallel herdr subagents when the `herdr_subagent` tool is available, otherwise as two self-contained sequential passes — then this skill aggregates their findings.
 
-## Operating mode
+The issue tracker should have been provided to you — run `/setup-matt-pocock-skills` if `docs/agents/issue-tracker.md` is missing.
 
-- **Reviewer, not implementer.** Do not edit files unless the user explicitly asks for fixes after the review.
-- **Find defects, not preferences.** Prioritize correctness, security, data loss, regressions, missing migrations, broken API contracts, concurrency/idempotency issues, and test gaps that could let those defects ship.
-- **Review the change under review.** Do not criticize unrelated legacy code unless the diff makes it newly reachable or worse.
-- **No rubber-stamping.** If you find nothing, say so plainly and include what you checked and any residual risk.
-- **No vague findings.** Every finding needs a concrete failure mode and a precise code location.
+## Process
 
-## Determine the review target
+### 1. Pin the fixed point
 
-Use the user's explicit target if provided: PR number/URL, branch, commit range, file list, or staged/uncommitted changes.
+Whatever the user said is the fixed point — a commit SHA, branch name, tag, `main`, `HEAD~5`, etc. If they didn't specify one, ask for it.
 
-If no target is provided, infer one in this order:
+Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
 
-1. Staged and unstaged worktree changes:
-   - `git diff --stat`
-   - `git diff --cached --stat`
-   - `git diff`
-   - `git diff --cached`
-2. Current PR, if available:
-   - `gh pr view --json number,baseRefName,headRefName,url` when `gh` is configured
-3. Current branch against its merge base with the default base branch:
-   - find base from PR metadata, `origin/main`, `main`, `origin/master`, or `master`
-   - `git merge-base HEAD <base>`
-   - `git diff <merge-base>...HEAD`
+Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here — not inside the two reviews.
 
-If the repo is using stacked PRs or the user mentions a stack, run the `stack` skill/tool first for stack-aware context. Prefer reviewing the specific stack slice the user named, not the whole stack accidentally.
+### 2. Identify the spec source
 
-## Review workflow
+Look for the originating spec, in this order:
 
-### 1. Build a mental model of the diff
+1. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.) — fetch via the workflow in `docs/agents/issue-tracker.md`.
+2. A path the user passed as an argument.
+3. A PRD/spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** review is skipped and reports "no spec available".
 
-Run lightweight discovery before reading deeply:
+### 3. Identify the standards sources
 
-- `git status --short`
-- `git diff --stat` for worktree reviews, or the equivalent range stat for branch/PR reviews
-- file list and high-level themes: source, tests, migrations, generated files, config, docs
+Anything in the repo that documents how code should be written, such as `CODING_STANDARDS.md` or `CONTRIBUTING.md`.
 
-Then inspect the actual patch. For each meaningful changed area, read enough surrounding code to understand invariants:
+On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 
-- the full changed function/class/module, not only patch hunks
-- definitions of newly used symbols
-- call sites of changed public APIs
-- tests for the touched behavior
-- schema/migration/config files that constrain the code
-- relevant docs/ADRs/`CONTEXT.md` if present
+- **The repo overrides.** A documented repo standard always wins; where it endorses something the baseline would flag, suppress the smell.
+- **Always a judgement call.** Each smell is a labelled heuristic ("possible Feature Envy"), never a hard violation — and, like any standard here, skip anything tooling already enforces.
 
-Use LSP for definitions/references when semantic navigation is better than grep.
+Each smell reads *what it is* → *how to fix*; match it against the diff:
 
-### 2. Review for merge-blocking risks
+- **Mysterious Name** — a function, variable, or type whose name doesn't reveal what it does or holds. → rename it; if no honest name comes, the design's murky.
+- **Duplicated Code** — the same logic shape appears in more than one hunk or file in the change. → extract the shared shape, call it from both.
+- **Feature Envy** — a method that reaches into another object's data more than its own. → move the method onto the data it envies.
+- **Data Clumps** — the same few fields or params keep travelling together (a type wanting to be born). → bundle them into one type, pass that.
+- **Primitive Obsession** — a primitive or string standing in for a domain concept that deserves its own type. → give the concept its own small type.
+- **Repeated Switches** — the same `switch`/`if`-cascade on the same type recurs across the change. → replace with polymorphism, or one map both sites share.
+- **Shotgun Surgery** — one logical change forces scattered edits across many files in the diff. → gather what changes together into one module.
+- **Divergent Change** — one file or module is edited for several unrelated reasons. → split so each module changes for one reason.
+- **Speculative Generality** — abstraction, parameters, or hooks added for needs the spec doesn't have. → delete it; inline back until a real need shows.
+- **Message Chains** — long `a.b().c().d()` navigation the caller shouldn't depend on. → hide the walk behind one method on the first object.
+- **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the real target direct.
+- **Refused Bequest** — a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
 
-Look for these classes of issues first:
+### 4. Run both reviews independently
 
-1. **Correctness/regression:** wrong condition, missing branch, off-by-one, bad async sequencing, stale state, race, accidental behavior change.
-2. **Security/auth/privacy:** missing authorization, trust boundary confusion, injection, path traversal, unsafe deserialization, secret/token leakage in logs/errors/tests.
-3. **Data integrity:** migration incompatibility, lossy transform, non-idempotent retry, transaction boundary bug, duplicate writes, partial failure with no recovery.
-4. **API/contract breakage:** changed exported behavior, DTO/schema mismatch, backwards-incompatible response, broken CLI/env/config assumptions.
-5. **Error handling/observability:** swallowed expected failures, unhandled promises, misleading errors, loss of safe diagnostic context.
-6. **Tests:** missing or weakened tests for risky new behavior; tests that assert implementation details while the bug-prone behavior remains untested.
-7. **Performance/resource use:** obvious N+1, unbounded memory, leaked handles, pathological loops introduced by the change.
+If the `herdr_subagent` tool is available, spawn two subagents in one message (model `anthropic/claude-opus-4-8`, thinking high — reviews are judgment work) and wait for both results. Otherwise, run the two briefs yourself as two self-contained sequential passes: finish one axis completely before starting the other, and build each report only from that axis's brief — do not let one axis's findings steer the other.
 
-Ignore pure style, naming, formatting, small refactors, or alternate designs unless they create a concrete bug or the user asked for design review.
+**Standards review prompt** — include:
 
-### 3. Verify before reporting when practical
+- The full diff command and commit list.
+- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full — a subagent has no other access to it.
+- The brief: "Report — per file/hunk where relevant — (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls — documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
 
-For each suspected issue, try to falsify it:
+**Spec review prompt** — include:
 
-- Trace the exact input/state that reaches the bug.
-- Check whether callers already guard the invariant.
-- Check tests or fixtures that may already cover the case.
-- Run targeted commands when cheap and safe: unit tests for touched files, typecheck, lint, build, or a focused repro.
+- The diff command and commit list.
+- The path or fetched contents of the spec.
+- The brief: "Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. Under 400 words."
 
-Do not run broad or destructive commands without user approval. If you cannot verify, mark the confidence honestly and explain what would confirm it.
+If the spec is missing, skip the Spec review and note this in the final report.
 
-### 4. Compose findings
+### 5. Aggregate
 
-Findings must be actionable and compact. Prefer one finding per root cause.
+Present the two reports under `## Standards` and `## Spec` headings, verbatim or lightly cleaned. Do **not** merge or rerank findings — the two axes are deliberately separate (see _Why two axes_).
 
-Each finding format:
+End with a one-line summary: total findings per axis, and the worst issue _within each axis_ (if any). Don't pick a single winner across axes — that's the reranking the separation exists to prevent.
 
-```markdown
-- **P1 — Short imperative/problem title** (`path/to/file.ts:123`)
-  The changed code does <specific thing>. When <specific scenario/input>, <bad outcome> happens because <mechanism>. This would <user/system impact>. Consider <minimal direction for a fix>.
-```
+## Why two axes
 
-Severity rubric:
+A change can pass one axis and fail the other:
 
-- **P0:** immediate security incident, data loss, service outage, or change must not ship.
-- **P1:** likely production bug, serious regression, auth bypass, corrupt data, or broken core path.
-- **P2:** real bug in an edge case, missing guard, meaningful test gap for risky behavior.
-- **P3:** minor issue worth fixing but not normally merge-blocking. Use sparingly; omit nits by default.
+- Code that follows every standard but implements the wrong thing → **Standards pass, Spec fail.**
+- Code that does exactly what the issue asked but breaks the project's conventions → **Spec pass, Standards fail.**
 
-Location rules:
-
-- Point to the smallest changed line that introduces or exposes the issue.
-- If the failure manifests elsewhere, explain that in the text but anchor the finding on the diff.
-- Use file paths and line numbers when available.
-
-## Output format
-
-Start with findings. Do not lead with praise or a broad summary.
-
-If there are findings:
-
-```markdown
-## Findings
-
-- **P1 — ...** (`file:line`)
-  ...
-
-## Checks
-
-- Reviewed diff: <range/PR/worktree>
-- Ran: `<command>` — <result>
-- Not run: <commands/reasons, if relevant>
-```
-
-If there are no findings:
-
-```markdown
-No findings.
-
-## Checks
-
-- Reviewed diff: <range/PR/worktree>
-- Inspected: <key files/areas>
-- Ran: `<command>` — <result>
-- Residual risk: <anything not covered, or "none obvious">
-```
-
-## Anti-patterns
-
-Do not:
-
-- rewrite the patch during review mode
-- list every changed file as a summary
-- give generic advice without a failing scenario
-- report pre-existing issues unrelated to the diff
-- request broad rewrites when a narrow fix addresses the bug
-- complain about missing tests unless you can name the risky behavior that needs coverage
-- treat formatting, personal taste, or architecture preference as a finding without concrete impact
+Reporting them separately stops one axis from masking the other.

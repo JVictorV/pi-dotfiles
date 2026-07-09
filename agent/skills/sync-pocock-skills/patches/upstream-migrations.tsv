@@ -4,3 +4,5 @@ diagnose	diagnosing-bugs	renamed	mattpocock-skills@1.0.0	Install the new skill a
 write-a-skill	writing-great-skills	replaced	mattpocock-skills@1.0.0	Install the replacement (including GLOSSARY.md) and remove the old directory.
 zoom-out	-	removed	mattpocock-skills@1.0.0	Remove the local skill; upstream removed it as unused.
 caveman	-	removed	mattpocock-skills@1.0.0	Remove the local skill; upstream says it was never intended to be public.
+to-issues	to-tickets	replaced	main@d574778	Unified planning skills (386d4ff): install to-tickets, remove to-issues.
+to-prd	to-spec	replaced	main@d574778	Unified planning skills (386d4ff): install to-spec, remove to-prd.

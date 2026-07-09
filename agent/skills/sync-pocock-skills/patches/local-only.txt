@@ -12,3 +12,4 @@ stack
 herdr-subagents
 lsp
 review
+debrief

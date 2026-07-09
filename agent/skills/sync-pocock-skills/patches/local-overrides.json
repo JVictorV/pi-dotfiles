@@ -10,12 +10,6 @@
 			"prototype": {
 				"disable-model-invocation": true
 			},
-			"to-issues": {
-				"disable-model-invocation": true
-			},
-			"to-prd": {
-				"disable-model-invocation": true
-			},
 			"triage": {
 				"disable-model-invocation": true
 			}
