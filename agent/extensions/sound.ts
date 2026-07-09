@@ -11,8 +11,11 @@
  * - opencode also played `perm.oga` on `permission.ask` / question tool /
  *   external-directory prompts. pi has no generic "permission asked" event
  *   surfaced to extensions, so only the idle sound is wired up here. The
- *   `playSound` helper + `perm.oga` are kept so other extensions (or future
+ *   `playSound` helper + `perm.wav` are kept so other extensions (or future
  *   hooks) can reuse them.
+ *
+ * Sounds are ffmpeg-synthesized soft chimes (WAV for reliable afplay/CoreAudio
+ * support); the original opencode ogg/oga files live in sounds/backup/.
  *
  * Desktop notifications (text) are handled separately by notify.ts.
  */
@@ -23,7 +26,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const soundFolder = join(homedir(), ".pi", "agent", "sounds");
-const idleSound = join(soundFolder, "idle.ogg");
+const idleSound = join(soundFolder, "idle.wav");
 
 /**
  * Fire-and-forget sound playback via macOS `afplay`. Detached so it never
