@@ -1,12 +1,15 @@
 {
-	"lastChangelogVersion": "0.80.3",
+	"lastChangelogVersion": "0.80.5",
 	"theme": "light",
-	"defaultProvider": "anthropic",
-	"defaultModel": "claude-fable-5",
+	"defaultProvider": "openai-codex",
+	"defaultModel": "gpt-5.6-sol",
 	"defaultThinkingLevel": "high",
 	"httpIdleTimeoutMs": 60000,
 	"enabledModels": [
 		"openai-codex/gpt-5.5",
+		"openai-codex/gpt-5.6-luna",
+		"openai-codex/gpt-5.6-sol",
+		"openai-codex/gpt-5.6-terra",
 		"anthropic/claude-opus-4-8",
 		"anthropic/claude-fable-5"
 	],

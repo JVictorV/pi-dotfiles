@@ -1,0 +1,11 @@
+{
+	"providers": {
+		"anthropic": {
+			"modelOverrides": {
+				"claude-fable-5": {
+					"contextWindow": 500000
+				}
+			}
+		}
+	}
+}

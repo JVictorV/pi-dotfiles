@@ -51,7 +51,6 @@ Application rules:
 - Cost is a tie-breaker only. For anything that ships, intelligence > taste > cost.
 - Use `openai-codex/gpt-5.5` for most implementation workers and read-only scouts.
 - Use `anthropic/claude-opus-4-8` for reviewers, planners, ambiguous investigations, product/API/UI/copy judgment, and final synthesis.
-- Avoid spawning `anthropic/claude-fable-5` as a worker by default; Fable's job here is orchestration.
 - Never use Haiku or other low-end models for this workflow.
 - For high-risk tasks, set `thinking` to `high` or `xhigh`. For mechanical scouts, `medium` is usually enough.
 
