@@ -112,7 +112,7 @@ For organize imports:
 }
 ```
 
-Mutating operations fail in non-interactive contexts because they require a UI confirmation prompt before any files are written. Workspace edits are limited to text edits for `file://` documents; resource operations such as file create/rename/delete are not supported.
+Mutating operations fail in non-interactive contexts unless `autoAuthorize` is enabled because they otherwise require a UI confirmation prompt before any files are written. Workspace edits are limited to text edits for `file://` documents; resource operations such as file create/rename/delete are not supported.
 
 ### Status line
 
@@ -152,7 +152,7 @@ The repo identity is:
 1. the canonical Git root when available
 2. otherwise the canonical pi session `cwd`
 
-Both `allow` and `deny` are persisted so pi does not keep asking.
+Both `allow` and `deny` are persisted so pi does not keep asking. Set `autoAuthorize` to `true` in `lsp.json` to bypass all spawn and mutation prompts globally.
 
 ## Built-in servers
 
@@ -227,6 +227,7 @@ Example:
 
 ```json
 {
+	"autoAuthorize": true,
 	"servers": {
 		"typescript": {
 			"command": ["typescript-language-server", "--stdio"]
@@ -248,6 +249,11 @@ Example:
 }
 ```
 
+Top-level config fields:
+
+- `autoAuthorize?: boolean` — bypass server-spawn and file-mutation confirmation prompts; defaults to `false`
+- `servers?: Record<string, ServerConfig>` — built-in overrides and custom servers
+
 Config fields per server:
 
 - `disabled?: boolean`
@@ -268,7 +274,7 @@ Diagnostics are cached in the background but are only sent to the model when it 
 
 ## Limits and safety
 
-- Query operations are read-only. Mutating operations apply file text edits only after interactive approval.
+- Query operations are read-only. Mutating operations apply file text edits after interactive approval unless `autoAuthorize` is enabled.
 - Mutating operations use the first available running/matching client that advertises support for the requested provider.
 - Results are capped by operation and then truncated using pi's standard output limits.
 - Crashed or failed servers are marked broken for the current session and skipped until `/lsp-restart`.

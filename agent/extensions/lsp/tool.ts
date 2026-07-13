@@ -692,9 +692,12 @@ const applyWorkspaceEdit = Effect.fn("applyWorkspaceEdit")(function* (
 
 const mutationApproval = Effect.fn("mutationApproval")(function* (
 	ctx: ExtensionContext,
+	autoAuthorize: boolean,
 	title: string,
 	body: string,
 ) {
+	if (autoAuthorize) return;
+
 	if (!ctx.hasUI) {
 		return yield* Effect.fail(
 			LspToolInputError.make({ reason: `${title} requires interactive approval.` }),
@@ -985,6 +988,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							});
 							yield* mutationApproval(
 								ctx,
+								runtime.autoAuthorize,
 								"Apply LSP rename?",
 								`Apply rename to ${params.newName}?`,
 							);
@@ -1009,6 +1013,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							});
 							yield* mutationApproval(
 								ctx,
+								runtime.autoAuthorize,
 								"Apply LSP formatting?",
 								`Apply formatting to ${filePath}?`,
 							);
@@ -1056,6 +1061,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							}
 							yield* mutationApproval(
 								ctx,
+								runtime.autoAuthorize,
 								"Apply LSP code action?",
 								`Apply code action ${action.title}?`,
 							);
@@ -1092,6 +1098,7 @@ export const registerLspTool = (pi: ExtensionAPI, getRuntime: () => LspRuntime |
 							}
 							yield* mutationApproval(
 								ctx,
+								runtime.autoAuthorize,
 								"Apply LSP organize imports?",
 								`Apply organize imports to ${filePath}?`,
 							);

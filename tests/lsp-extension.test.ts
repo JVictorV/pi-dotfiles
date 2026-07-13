@@ -260,6 +260,29 @@ describe("LSP Extension", () => {
 		expect(project.confirm).toHaveBeenCalledTimes(2);
 	});
 
+	test("autoAuthorize bypasses spawn and mutation prompts", async () => {
+		const project = await createProject({ ...createConfig(), autoAuthorize: true });
+		runtimes.push(project.runtime);
+		const tool = registerTool(project.runtime);
+
+		await tool.execute(
+			"tool-call-auto-authorized-rename",
+			{
+				operation: "rename",
+				filePath: "main.fake",
+				line: 1,
+				character: 1,
+				newName: "renamedSymbol",
+			},
+			undefined,
+			undefined,
+			project.ctx,
+		);
+
+		expect(await readFile(project.filePath, "utf8")).toBe("renamedSymbol()\n");
+		expect(project.confirm).not.toHaveBeenCalled();
+	});
+
 	test("lsp tool lists and applies code actions by title", async () => {
 		const project = await createProject();
 		runtimes.push(project.runtime);
@@ -998,6 +1021,21 @@ describe("LSP Extension", () => {
 			["eslint", "deny"],
 			["typescript", "allow"],
 		]);
+	});
+
+	test("loads autoAuthorize from LSP config", async () => {
+		const project = await createProject();
+		await mkdir(project.agentDir, { recursive: true });
+		await writeFile(
+			join(project.agentDir, "lsp.json"),
+			JSON.stringify({ autoAuthorize: true }),
+			"utf8",
+		);
+
+		await expect(Effect.runPromise(loadLspConfig())).resolves.toEqual({
+			autoAuthorize: true,
+			servers: {},
+		});
 	});
 
 	test("invalid LSP config fails with typed config error", async () => {

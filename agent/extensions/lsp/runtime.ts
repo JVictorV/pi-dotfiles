@@ -47,6 +47,7 @@ const isBrokenClient = (client: LspClient): boolean => client.status.status === 
 
 export class LspRuntime {
 	readonly cwd: string;
+	readonly autoAuthorize: boolean;
 
 	private readonly registry: ReadonlyMap<string, LspServerDefinition>;
 	private readonly state = SynchronizedRef.makeUnsafe(makeRuntimeState());
@@ -55,6 +56,7 @@ export class LspRuntime {
 
 	constructor(options: RuntimeOptions) {
 		this.cwd = options.cwd;
+		this.autoAuthorize = options.config.autoAuthorize ?? false;
 		this.registry = buildServerRegistry(options.config);
 		this.onStatusChange = options.onStatusChange;
 		this.sessionRuntime = ManagedRuntime.make(
@@ -462,7 +464,10 @@ export class LspRuntime {
 		root: string,
 		ctx: ExtensionContext,
 	): Effect.Effect<LspPermission, LspError, FileSystem.FileSystem> {
+		const autoAuthorize = this.autoAuthorize;
 		return Effect.gen(function* () {
+			if (autoAuthorize) return "allow";
+
 			const repoRoot = yield* findRepositoryRoot(root);
 			const store = yield* LspPermissionStore.load();
 			const existing = store.get(repoRoot, definition.id);

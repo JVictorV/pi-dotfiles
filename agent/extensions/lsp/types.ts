@@ -18,6 +18,7 @@ export interface UserServerConfig {
 }
 
 export interface LspConfig {
+	autoAuthorize?: boolean;
 	servers: Readonly<Record<string, UserServerConfig>>;
 }
 

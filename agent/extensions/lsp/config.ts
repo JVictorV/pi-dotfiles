@@ -102,8 +102,10 @@ const parseConfig = Effect.fn("parseConfig")(function* (value: unknown) {
 		return yield* failConfig("agent/lsp.json must contain a JSON object");
 	}
 
+	const autoAuthorize = yield* optionalBoolean(value.autoAuthorize, "autoAuthorize");
+
 	if (value.servers === undefined) {
-		return { servers: {} };
+		return { autoAuthorize, servers: {} };
 	}
 
 	if (!isRecord(value.servers)) {
@@ -114,7 +116,7 @@ const parseConfig = Effect.fn("parseConfig")(function* (value: unknown) {
 	for (const [serverId, server] of Object.entries(value.servers)) {
 		servers[serverId] = yield* parseServerConfig(serverId, server);
 	}
-	return { servers };
+	return { autoAuthorize, servers };
 });
 
 const parseJson = (text: string): Effect.Effect<unknown, LspConfigError> =>
