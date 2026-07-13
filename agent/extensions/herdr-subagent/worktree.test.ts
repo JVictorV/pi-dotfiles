@@ -173,7 +173,7 @@ describe("git worktree isolation", () => {
 	test("spawn isolation uses the worktree workPath and close preserves changes", async () => {
 		const root = await makeTempRoot();
 		const agentDir = join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const repo = initGitRepo();
@@ -234,7 +234,7 @@ describe("git worktree isolation", () => {
 	test("close reports a preserved worktree that needs manual cleanup", async () => {
 		const root = await makeTempRoot();
 		const agentDir = join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const repo = initGitRepo();
@@ -292,7 +292,7 @@ describe("git worktree isolation", () => {
 	test("spawn isolation rejects non-git cwd instead of spawning unisolated", async () => {
 		const root = await makeTempRoot();
 		const agentDir = join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const nonGit = join(root, "not-git");

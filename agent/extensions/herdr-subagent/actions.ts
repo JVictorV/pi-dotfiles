@@ -52,14 +52,18 @@ import {
 	type WorktreeInfo,
 } from "./worktree";
 import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
-import type {
-	AgentDefinition,
-	HerdrSubagentAction,
-	HerdrSubagentParams,
-	PiToolContext,
-	RegistryEntry,
-	ResolvedPane,
-	ToolResult,
+import {
+	isSubagentModel,
+	isSubagentThinking,
+	SUBAGENT_MODELS,
+	SUBAGENT_THINKING_LEVELS,
+	type AgentDefinition,
+	type HerdrSubagentAction,
+	type HerdrSubagentParams,
+	type PiToolContext,
+	type RegistryEntry,
+	type ResolvedPane,
+	type ToolResult,
 } from "./types";
 
 type HerdrActionRequirements = ChildProcessSpawner | FileSystem | Path;
@@ -319,6 +323,17 @@ const commandSpawn: (
 		} else {
 			model = requestedModel;
 		}
+		if (model !== undefined && !isSubagentModel(model)) {
+			return yield* failAction(
+				`Subagents may only use ${SUBAGENT_MODELS.join(", ")}; received ${model}.`,
+			);
+		}
+		const thinking = params.thinking ?? agent?.thinking;
+		if (thinking !== undefined && !isSubagentThinking(thinking)) {
+			return yield* failAction(
+				`Subagent thinking must be one of ${SUBAGENT_THINKING_LEVELS.join(", ")}; received ${thinking}.`,
+			);
+		}
 
 		const pane = yield* currentPane().pipe(
 			Effect.catch((error) => (params.workspace ? Effect.succeed(undefined) : Effect.fail(error))),
@@ -342,7 +357,7 @@ const commandSpawn: (
 			label,
 			agentType: params.agentType,
 			model,
-			thinking: params.thinking ?? agent?.thinking,
+			thinking,
 			taskFile: "",
 			createdAt: reservedAt,
 			updatedAt: reservedAt,

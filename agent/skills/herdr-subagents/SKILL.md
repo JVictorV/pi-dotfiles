@@ -35,24 +35,13 @@ Stay in-context (no subagents) when the task is a small focused edit, a quick qu
 
 ## Model selection
 
-Fable is usually the **orchestrator**, not the worker. When spawning subagents, pass an explicit `model` unless the user specifically asks to inherit the current/default model.
-
-Rankings are practical defaults for this setup, not hard limits. Higher is better. Cost reflects local effective cost/limits, not list price. Intelligence means how hard a problem the model can handle unsupervised; taste covers UI/UX, code quality, API design, and copy.
-
-| model                       | cost | intelligence | taste | use                                                                                                                                             |
-| --------------------------- | ---: | -----------: | ----: | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openai-codex/gpt-5.5`      |    9 |            8 |     5 | Default worker for clear-spec implementation, data analysis, migrations, tests, broad codebase search, and mechanical/bulk work.                |
-| `anthropic/claude-opus-4-8` |    4 |            7 |     8 | Reviews, architecture/design judgment, UI/API/copy taste, ambiguous bugs, plan critique, and synthesis.                                         |
-| `anthropic/claude-fable-5`  |    2 |            9 |     9 | Usually keep as orchestrator. Spawn only for pure high-taste critique, copy/UI direction, or when explicitly comparing subjective alternatives. |
+Use only `openai-codex/gpt-5.6-sol` for subagents. Always pass that exact `model`; do not inherit the current/default model.
 
 Application rules:
 
-- These are defaults, not limits. If output is mediocre, rerun/escalate with a better-fit model without asking.
-- Cost is a tie-breaker only. For anything that ships, intelligence > taste > cost.
-- Use `openai-codex/gpt-5.5` for most implementation workers and read-only scouts.
-- Use `anthropic/claude-opus-4-8` for reviewers, planners, ambiguous investigations, product/API/UI/copy judgment, and final synthesis.
-- Never use Haiku or other low-end models for this workflow.
-- For high-risk tasks, set `thinking` to `high` or `xhigh`. For mechanical scouts, `medium` is usually enough.
+- Never spawn another model.
+- Only use `low`, `medium`, or `high` thinking.
+- Use `low` for quick scouting, `medium` for research and ordinary analysis, and `high` for implementation, debugging, planning, review, and difficult judgment.
 
 ## Tool-first workflow
 
@@ -75,7 +64,7 @@ Spawn a panel-backed subagent:
 	"action": "spawn",
 	"name": "investigate-tests",
 	"agentType": "scout",
-	"model": "openai-codex/gpt-5.5",
+	"model": "openai-codex/gpt-5.6-sol",
 	"thinking": "medium",
 	"task": "Run read-only investigation of the failing tests. Diagnose root cause and report files/commands. Do not edit files."
 }
@@ -99,19 +88,13 @@ Send a follow-up:
 
 `send` works while the subagent is still running — pi queues it as a steering message — and starts a new turn when the subagent is idle.
 
-Wait for completion:
+Do not call `action=wait` after `spawn` or `send`. It blocks the current tool call—by default for up to ten minutes—and prevents the orchestrator from doing useful work while the subagent runs.
 
-```json
-{ "action": "wait", "target": "investigate-tests", "status": "done", "timeoutMs": 600000 }
-```
-
-Then inspect before trusting the result:
+Instead, end the current turn and rely on the automatic `subagent_result` follow-up notification (`notify` defaults to `true`). The notification triggers a new orchestrator turn when the subagent finishes or blocks. Inspect the panel before trusting the result:
 
 ```json
 { "action": "inspect", "target": "investigate-tests", "lines": 200 }
 ```
-
-Herdr's raw `done` status means "finished but not yet viewed"; a viewed pane reports `idle` instead. The tool's `done` wait handles this: it polls and completes on either `done` or a stable `idle`, so it works even when a human is watching the subagent's tab. A `done` wait timing out therefore means the subagent is genuinely still working (or blocked) — inspect the panel.
 
 Focus a panel:
 
@@ -152,19 +135,19 @@ Deliverable:
 ## Orchestration rules
 
 1. Start with a `status` action.
-2. Spawn at most 12 subagents; start small and scale toward that only when the task genuinely benefits from fan-out.
-3. For research/review/testing tasks, subagents may share the same worktree.
-4. For parallel code-writing tasks, avoid multiple subagents editing the same worktree. Use separate worktrees/workspaces or serialize the edit phase.
-5. Prefer read-only diagnostic/scout tasks first, then choose one implementation agent.
-6. Always inspect a subagent's panel before trusting its result.
-7. Summarize subagent outputs back to the user with names, statuses, and important file paths.
-8. Close subagents after summarizing their results, unless the user wants the panel kept open.
+2. Never call `action=wait`; rely on automatic `subagent_result` follow-up notifications and continue only when they arrive.
+3. Spawn at most 12 subagents; start small and scale toward that only when the task genuinely benefits from fan-out.
+4. For research/review/testing tasks, subagents may share the same worktree.
+5. For parallel code-writing tasks, avoid multiple subagents editing the same worktree. Use separate worktrees/workspaces or serialize the edit phase.
+6. Prefer read-only diagnostic/scout tasks first, then choose one implementation agent.
+7. Always inspect a subagent's panel before trusting its result.
+8. Summarize subagent outputs back to the user with names, statuses, and important file paths.
+9. Close subagents after summarizing their results, unless the user wants the panel kept open.
 
 ## Failure handling
 
 Failed actions reject with an error message; read it before retrying.
 
-- `wait` timeout: not fatal. The timeout message includes the last observed agent status. Inspect the panel — the subagent may still be working or blocked — then re-wait or ask the user.
 - `spawn` fails with "already registered": `close` that name first (close also cleans up stale entries whose tab is already gone) or pick a new name.
 - Other herdr failures (exit codes, timeouts): run `status` to re-sync pane ids, then retry once. Do not blindly re-`spawn` — check whether the panel was actually created first.
 
@@ -174,14 +157,14 @@ The tool can use user-level agent definitions from `~/.pi/agent/agents/*.md` and
 
 Preferred default roles:
 
-- `scout` — read-only codebase reconnaissance; defaults to `openai-codex/gpt-5.5`.
-- `planner` — read-only implementation planning; defaults to `anthropic/claude-opus-4-8`.
-- `reviewer` — read-only code review with P0-P3 findings; defaults to `anthropic/claude-opus-4-8`.
-- `worker` — general implementation worker; defaults to `openai-codex/gpt-5.5`.
-- `researcher` — read-only web research (docs, changelogs, dependency comparisons) with cited findings; defaults to `openai-codex/gpt-5.5`.
-- `test-writer` — writes tests through real seams; edits test files only, never production code; defaults to `openai-codex/gpt-5.5`.
-- `debugger` — root-cause diagnosis with temporary instrumentation; defaults to `anthropic/claude-opus-4-8`.
-- `critic` — high-taste critique of UI/copy/API/design alternatives; defaults to `anthropic/claude-fable-5`. This is the one legitimate reason to spawn Fable.
+- `scout` — read-only codebase reconnaissance; defaults to Sol with `low` thinking.
+- `researcher` — cited web research; defaults to Sol with `medium` thinking.
+- `planner` — read-only implementation planning; defaults to Sol with `high` thinking.
+- `reviewer` — read-only code review with P0-P3 findings; defaults to Sol with `high` thinking.
+- `worker` — general implementation worker; defaults to Sol with `high` thinking.
+- `test-writer` — writes tests through real seams; defaults to Sol with `high` thinking.
+- `debugger` — root-cause diagnosis with temporary instrumentation; defaults to Sol with `high` thinking.
+- `critic` — high-taste critique of UI/copy/API/design alternatives; defaults to Sol with `high` thinking.
 
 Role definitions set default `model` and `thinking`; spawn params override both. Use `agentType` on spawn to select a role. Omit `agentType` for a plain pi subagent, but still pass an explicit `model`.
 
@@ -195,7 +178,7 @@ herdr pane list
 herdr tab create --workspace <workspace-id> --label "agent: tests" --no-focus
 herdr pane read <pane-id> --source recent-unwrapped --lines 120
 herdr pane run <pane-id> "<message or command>"
-herdr wait agent-status <pane-id> --status done --timeout 600000
+herdr agent list
 ```
 
 For detailed pane/tab/workspace control, load the `herdr` skill too.

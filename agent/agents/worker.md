@@ -1,7 +1,7 @@
 ---
 name: worker
 description: General-purpose implementation worker with isolated context.
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 

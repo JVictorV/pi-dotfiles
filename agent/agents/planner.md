@@ -2,7 +2,7 @@
 name: planner
 description: Read-only implementation planner that turns context and requirements into a concrete plan.
 tools: read, grep, find, ls
-model: anthropic/claude-opus-4-8
+model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 

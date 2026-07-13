@@ -2,7 +2,7 @@
 name: reviewer
 description: Read-only code review specialist for bugs, regressions, security issues, and maintainability.
 tools: read, grep, find, ls, bash
-model: anthropic/claude-opus-4-8
+model: openai-codex/gpt-5.6-sol
 thinking: high
 ---
 

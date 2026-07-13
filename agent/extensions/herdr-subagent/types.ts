@@ -17,6 +17,10 @@ export type PaneReadSource = "visible" | "recent" | "recent-unwrapped";
 export type WaitStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 export type AgentScope = "user" | "project" | "both";
 export type SpawnIsolation = "worktree";
+/** The only model a herdr subagent may be spawned with. */
+export type SubagentModel = "openai-codex/gpt-5.6-sol";
+/** The thinking levels a herdr subagent may be spawned with. */
+export type SubagentThinking = "low" | "medium" | "high";
 
 export const ACTIONS: ReadonlyArray<HerdrSubagentAction> = [
 	"status",
@@ -38,6 +42,26 @@ export const WAIT_STATUSES: ReadonlyArray<WaitStatus> = [
 ];
 export const AGENT_SCOPES: ReadonlyArray<AgentScope> = ["user", "project", "both"];
 export const SPAWN_ISOLATIONS: ReadonlyArray<SpawnIsolation> = ["worktree"];
+export const SUBAGENT_MODELS: ReadonlyArray<SubagentModel> = ["openai-codex/gpt-5.6-sol"];
+export const SUBAGENT_THINKING_LEVELS: ReadonlyArray<SubagentThinking> = ["low", "medium", "high"];
+
+/**
+ * Check whether a string is an allowed subagent model.
+ *
+ * @param value - The model reference to check.
+ * @returns True when the value is a permitted subagent model.
+ */
+export const isSubagentModel = (value: string): value is SubagentModel =>
+	SUBAGENT_MODELS.some((model) => model === value);
+
+/**
+ * Check whether a string is an allowed subagent thinking level.
+ *
+ * @param value - The thinking level to check.
+ * @returns True when the value is a permitted subagent thinking level.
+ */
+export const isSubagentThinking = (value: string): value is SubagentThinking =>
+	SUBAGENT_THINKING_LEVELS.some((level) => level === value);
 
 export interface HerdrSubagentParams {
 	readonly action: HerdrSubagentAction;

@@ -154,7 +154,7 @@ describe("herdr_subagent extension", () => {
 	test("allows spawn from a subagent session with the explicit environment grant", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setSubagentSession("worker-a", true);
@@ -174,7 +174,7 @@ describe("herdr_subagent extension", () => {
 	test("spawn records the current pane as the registry owner", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -197,7 +197,7 @@ describe("herdr_subagent extension", () => {
 	test("spawn allowSpawn parameter controls the child recursion grant env", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -236,7 +236,7 @@ describe("herdr_subagent extension", () => {
 		await mkdir(agentsDir, { recursive: true });
 		await writeFile(
 			path.join(agentsDir, "delegator.md"),
-			"---\nname: delegator\ndescription: can delegate\nmodel: openai-codex/gpt-5.5\nallowSpawn: true\n---\n\nYou may delegate.\n",
+			"---\nname: delegator\ndescription: can delegate\nmodel: openai-codex/gpt-5.6-sol\nallowSpawn: true\n---\n\nYou may delegate.\n",
 			"utf8",
 		);
 		const { log } = await installFakeHerdr(root);
@@ -273,7 +273,7 @@ describe("herdr_subagent extension", () => {
 	test("spawns a role with the role's default model", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -294,13 +294,13 @@ describe("herdr_subagent extension", () => {
 		expect(result.content[0]?.text).toContain("Spawned worker-a");
 		const command = runCommandFromCalls(await readHerdrCalls(log));
 		expect(command).toContain("--model");
-		expect(command).toContain("openai-codex/gpt-5.5");
+		expect(command).toContain("openai-codex/gpt-5.6-sol");
 	});
 
 	test("spawn arms a watcher that sends a follow-up result envelope with pane tail", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		// Realistic pickup: the watcher must observe a working phase before trusting done.
@@ -345,7 +345,7 @@ describe("herdr_subagent extension", () => {
 	test("blocked watcher notifications distinguish attention-needed state", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		// Realistic pickup: working phase first, then the blocked state is trusted immediately.
@@ -378,7 +378,7 @@ describe("herdr_subagent extension", () => {
 	test("explicit wait consumes an armed watcher without a duplicate notification", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -408,7 +408,7 @@ describe("herdr_subagent extension", () => {
 	test("close cancels an armed watcher", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -438,7 +438,7 @@ describe("herdr_subagent extension", () => {
 	test("send replaces a live watcher and delivers exactly one notification", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -484,7 +484,7 @@ describe("herdr_subagent extension", () => {
 	test("send re-arm distrusts the previous turn's leftover done status", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -519,7 +519,7 @@ describe("herdr_subagent extension", () => {
 	test("session shutdown cancels pending watchers", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -543,7 +543,7 @@ describe("herdr_subagent extension", () => {
 	test("notify false disables spawn watcher delivery", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
@@ -1016,7 +1016,7 @@ describe("herdr_subagent extension", () => {
 		const root = await mkdtemp(path.join("/tmp", "pi-hsa-"));
 		try {
 			const agentDir = path.join(root, "agent");
-			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 			const { log } = await installFakeHerdr(root);
 			setEnv("HERDR_ENV", "1");
 			setEnv("FAKE_HERDR_AGENT_STATUS", "working");
@@ -1088,34 +1088,33 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
-	test("lets an explicit model override the role default", async () => {
+	test("rejects an explicit non-Sol model before touching herdr", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
 
-		await tool.execute(
-			"tool-call",
-			{
-				action: "spawn",
-				name: "review-a",
-				agentType: "worker",
-				model: "anthropic/claude-opus-4-8",
-				task: "Review the plan for API design issues.",
-			},
-			undefined,
-			undefined,
-			makeContext("/workspace"),
-		);
-
-		const command = runCommandFromCalls(await readHerdrCalls(log));
-		expect(command).toContain("anthropic/claude-opus-4-8");
-		expect(command).not.toContain("openai-codex/gpt-5.5");
+		await expect(
+			tool.execute(
+				"tool-call",
+				{
+					action: "spawn",
+					name: "review-a",
+					agentType: "worker",
+					model: "anthropic/claude-opus-4-8",
+					task: "Review the plan for API design issues.",
+				},
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/Subagents may only use openai-codex\/gpt-5\.6-sol/);
+		expect(await readHerdrCalls(log)).toEqual([]);
 	});
 
-	test("resolves stale dated and dotted role model pins before spawning", async () => {
+	test("rejects stale non-Sol role model pins before spawning", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await writeAgent(agentDir, "worker", "anthropic/claude-opus-4.8-20260101");
@@ -1124,25 +1123,24 @@ describe("herdr_subagent extension", () => {
 		const tool = await loadTool(agentDir);
 		const registry = makeModelRegistry([
 			{ provider: "anthropic", id: "claude-opus-4-8", name: "Claude Opus 4.8" },
-			{ provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5 Codex" },
+			{ provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
 		]);
 
-		await tool.execute(
-			"tool-call",
-			{
-				action: "spawn",
-				name: "worker-a",
-				agentType: "worker",
-				task: "Implement the focused change.",
-			},
-			undefined,
-			undefined,
-			makeContext("/workspace", registry),
-		);
-
-		const command = runCommandFromCalls(await readHerdrCalls(log));
-		expect(command).toContain("anthropic/claude-opus-4-8");
-		expect(command).not.toContain("20260101");
+		await expect(
+			tool.execute(
+				"tool-call",
+				{
+					action: "spawn",
+					name: "worker-a",
+					agentType: "worker",
+					task: "Implement the focused change.",
+				},
+				undefined,
+				undefined,
+				makeContext("/workspace", registry),
+			),
+		).rejects.toThrow(/Subagents may only use openai-codex\/gpt-5\.6-sol/);
+		expect(await readHerdrCalls(log)).toEqual([]);
 	});
 
 	test("rejects an unresolvable spawn model before touching herdr", async () => {
@@ -1154,7 +1152,7 @@ describe("herdr_subagent extension", () => {
 		const tool = await loadTool(agentDir);
 		const registry = makeModelRegistry([
 			{ provider: "anthropic", id: "claude-opus-4-8", name: "Claude Opus 4.8" },
-			{ provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5 Codex" },
+			{ provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
 		]);
 
 		await expect(
@@ -1179,7 +1177,7 @@ describe("herdr_subagent extension", () => {
 	test("agent discovery skips unreadable md-shaped directory entries", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await mkdir(path.join(agentDir, "agents", "not-an-agent.md"));
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
@@ -1199,7 +1197,7 @@ describe("herdr_subagent extension", () => {
 	test("close removes a stale registry entry when the tab is already gone, unblocking the name", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1242,7 +1240,7 @@ describe("herdr_subagent extension", () => {
 	test("close by pane id removes the name-keyed registry entry", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1278,7 +1276,7 @@ describe("herdr_subagent extension", () => {
 	test("concurrent spawns all persist in the registry", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1317,7 +1315,7 @@ describe("herdr_subagent extension", () => {
 	test("role default thinking is applied and an explicit thinking overrides it", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "planner", "anthropic/claude-opus-4-8", "high");
+		await writeAgent(agentDir, "planner", "openai-codex/gpt-5.6-sol", "high");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1431,7 +1429,7 @@ describe("herdr_subagent extension", () => {
 	test("close still fails when the tab exists but herdr close fails", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1494,7 +1492,7 @@ describe("herdr_subagent extension", () => {
 	test("only one same-name concurrent spawn succeeds", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
@@ -1672,7 +1670,7 @@ describe("herdr_subagent extension", () => {
 	test("stale reservations can be taken over by spawn", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
@@ -1687,7 +1685,7 @@ describe("herdr_subagent extension", () => {
 					cwd: "/workspace",
 					label: "agent: worker-a",
 					agentType: "worker",
-					model: "openai-codex/gpt-5.5",
+					model: "openai-codex/gpt-5.6-sol",
 					taskFile: "",
 					createdAt: staleAt,
 					updatedAt: staleAt,
@@ -1716,7 +1714,7 @@ describe("herdr_subagent extension", () => {
 	test("only one concurrent spawn takes over a stale reservation", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
@@ -1731,7 +1729,7 @@ describe("herdr_subagent extension", () => {
 					cwd: "/workspace",
 					label: "agent: worker-a",
 					agentType: "worker",
-					model: "openai-codex/gpt-5.5",
+					model: "openai-codex/gpt-5.6-sol",
 					taskFile: "",
 					createdAt: staleAt,
 					updatedAt: staleAt,
@@ -1775,7 +1773,7 @@ describe("herdr_subagent extension", () => {
 	test("fresh reservations block spawn with the same name", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
@@ -1790,7 +1788,7 @@ describe("herdr_subagent extension", () => {
 					cwd: "/workspace",
 					label: "agent: worker-a",
 					agentType: "worker",
-					model: "openai-codex/gpt-5.5",
+					model: "openai-codex/gpt-5.6-sol",
 					taskFile: "",
 					createdAt: now,
 					updatedAt: now,
@@ -1837,7 +1835,7 @@ describe("herdr_subagent extension", () => {
 	test("spawn pane run failure closes the created tab and clears the reservation", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
-		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.5");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
 		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_PANE_RUN_FAIL", "1");

@@ -119,7 +119,7 @@ describe("buildOverview", () => {
 				entry({
 					name: "worker",
 					terminalId: "term-1",
-					model: "openai-codex/gpt-5.5",
+					model: "openai-codex/gpt-5.6-sol",
 					thinking: "high",
 				}),
 				entry({ name: "bare", terminalId: "term-2" }),
@@ -132,7 +132,7 @@ describe("buildOverview", () => {
 		);
 
 		expect(result.rows.find((row) => row.name === "worker")).toMatchObject({
-			model: "openai-codex/gpt-5.5",
+			model: "openai-codex/gpt-5.6-sol",
 			thinking: "high",
 		});
 		expect(result.rows.find((row) => row.name === "bare")).not.toHaveProperty("model");
@@ -300,7 +300,7 @@ describe("renderOverview", () => {
 					name: "worker",
 					kind: "working",
 					elapsedMs: 45_000,
-					model: "openai-codex/gpt-5.5",
+					model: "openai-codex/gpt-5.6-sol",
 					thinking: "high",
 				},
 				{ name: "critic", kind: "working", elapsedMs: 45_000, model: "anthropic/claude-opus-4-8" },
@@ -310,7 +310,7 @@ describe("renderOverview", () => {
 		);
 
 		const worker = lines.find((line) => line.includes("worker"));
-		expect(worker).toContain("[dim]gpt-5.5·high");
+		expect(worker).toContain("[dim]gpt-5.6-sol·high");
 		expect(worker).not.toContain("openai-codex");
 		const critic = lines.find((line) => line.includes("critic"));
 		expect(critic).toContain("[dim]claude-opus-4-8");

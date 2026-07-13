@@ -22,6 +22,8 @@ import {
 	AGENT_SCOPES,
 	SOURCES,
 	SPAWN_ISOLATIONS,
+	SUBAGENT_MODELS,
+	SUBAGENT_THINKING_LEVELS,
 	WAIT_STATUSES,
 	type HerdrSubagentParams,
 	type RegistryEntry,
@@ -201,10 +203,9 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use herdr_subagent when the user asks to orchestrate subagents, spawn panel-backed agents, inspect agent panels, or coordinate work across herdr.",
 			"Call herdr_subagent with action=status before controlling existing panel-backed subagents.",
-			"When using herdr_subagent action=spawn, pass an explicit model unless the user specifically asks to inherit the current/default model.",
-			"For herdr_subagent implementation workers, scouts, tests, migrations, data analysis, and clear-spec mechanical work, prefer model openai-codex/gpt-5.5 with thinking medium/high.",
-			"For herdr_subagent reviewers, planners, ambiguous investigations, architecture/API/UI/copy judgment, and synthesis, prefer model anthropic/claude-opus-4-8 with thinking high/xhigh.",
-			"Avoid spawning anthropic/claude-fable-5 with herdr_subagent by default; Fable should usually orchestrate rather than work. Use it only for pure high-taste critique/copy/UI direction or explicit subjective comparisons.",
+			"When using herdr_subagent action=spawn, always use model openai-codex/gpt-5.6-sol; never use another model.",
+			"Only use low, medium, or high thinking for herdr_subagent spawns; never use off, minimal, or xhigh.",
+			"Use low thinking for quick scouting, medium for research and ordinary analysis, and high for implementation, debugging, planning, review, and difficult judgment.",
 			"Prefer one herdr_subagent spawn per task, with tab labels like agent: <name>; inspect a subagent panel before trusting its result.",
 			"After herdr_subagent spawn or send, wait for the automatic subagent_result follow-up notification instead of polling wait; use wait only when explicitly blocking is necessary.",
 			"Spawned subagents cannot spawn their own subagents by default; orchestrators may grant recursive delegation with allowSpawn when genuinely needed.",
@@ -255,15 +256,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 				}),
 			),
 			model: Type.Optional(
-				Type.String({
+				StringEnum([...SUBAGENT_MODELS], {
 					description:
-						"pi model for spawned subagent. Usually pass explicitly: openai-codex/gpt-5.5 for workers/scouts/mechanics, anthropic/claude-opus-4-8 for review/planning/taste/synthesis. Overrides agentType model.",
+						"Model for the spawned subagent. Only openai-codex/gpt-5.6-sol is allowed. Overrides agentType model.",
 				}),
 			),
 			thinking: Type.Optional(
-				Type.String({
+				StringEnum([...SUBAGENT_THINKING_LEVELS], {
 					description:
-						"pi thinking level for spawned subagent, e.g. low, medium, high, xhigh. Overrides agentType thinking.",
+						"Thinking level for the spawned subagent: low, medium, or high. Overrides agentType thinking.",
 				}),
 			),
 			tools: Type.Optional(

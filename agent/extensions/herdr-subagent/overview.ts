@@ -166,7 +166,7 @@ const truncateName = (name: string): string =>
 
 const META_MAX_WIDTH = 24;
 
-/** Strip the provider prefix from a model id: `openai-codex/gpt-5.5` → `gpt-5.5`. */
+/** Strip the provider prefix from a model id: `openai-codex/gpt-5.6-sol` → `gpt-5.6-sol`. */
 const shortModel = (model: string): string => model.slice(model.lastIndexOf("/") + 1);
 
 /** Compact `model·effort` label for a row; empty when neither is known. */
