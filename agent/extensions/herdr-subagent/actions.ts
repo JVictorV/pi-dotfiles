@@ -53,9 +53,7 @@ import {
 } from "./worktree";
 import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
 import {
-	isSubagentModel,
 	isSubagentThinking,
-	SUBAGENT_MODELS,
 	SUBAGENT_THINKING_LEVELS,
 	type AgentDefinition,
 	type HerdrSubagentAction,
@@ -322,11 +320,6 @@ const commandSpawn: (
 			model = resolvedModel.success.reference;
 		} else {
 			model = requestedModel;
-		}
-		if (model !== undefined && !isSubagentModel(model)) {
-			return yield* failAction(
-				`Subagents may only use ${SUBAGENT_MODELS.join(", ")}; received ${model}.`,
-			);
 		}
 		const thinking = params.thinking ?? agent?.thinking;
 		if (thinking !== undefined && !isSubagentThinking(thinking)) {

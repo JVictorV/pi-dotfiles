@@ -1088,7 +1088,7 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
-	test("rejects an explicit non-Sol model before touching herdr", async () => {
+	test("spawns with an explicit model outside the openai-codex family", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
@@ -1096,25 +1096,25 @@ describe("herdr_subagent extension", () => {
 		setEnv("HERDR_ENV", "1");
 		const tool = await loadTool(agentDir);
 
-		await expect(
-			tool.execute(
-				"tool-call",
-				{
-					action: "spawn",
-					name: "review-a",
-					agentType: "worker",
-					model: "anthropic/claude-opus-4-8",
-					task: "Review the plan for API design issues.",
-				},
-				undefined,
-				undefined,
-				makeContext("/workspace"),
-			),
-		).rejects.toThrow(/Subagents may only use openai-codex\/gpt-5\.6-sol/);
-		expect(await readHerdrCalls(log)).toEqual([]);
+		await tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "review-a",
+				agentType: "worker",
+				model: "anthropic/claude-opus-4-8",
+				task: "Review the plan for API design issues.",
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const command = lastRunCommandFromCalls(await readHerdrCalls(log));
+		expect(command).toContain("--model");
+		expect(command).toContain("anthropic/claude-opus-4-8");
 	});
 
-	test("rejects stale non-Sol role model pins before spawning", async () => {
+	test("resolves role model pins through the registry before spawning", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await writeAgent(agentDir, "worker", "anthropic/claude-opus-4.8-20260101");
@@ -1126,21 +1126,21 @@ describe("herdr_subagent extension", () => {
 			{ provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
 		]);
 
-		await expect(
-			tool.execute(
-				"tool-call",
-				{
-					action: "spawn",
-					name: "worker-a",
-					agentType: "worker",
-					task: "Implement the focused change.",
-				},
-				undefined,
-				undefined,
-				makeContext("/workspace", registry),
-			),
-		).rejects.toThrow(/Subagents may only use openai-codex\/gpt-5\.6-sol/);
-		expect(await readHerdrCalls(log)).toEqual([]);
+		await tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-a",
+				agentType: "worker",
+				task: "Implement the focused change.",
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace", registry),
+		);
+		const command = lastRunCommandFromCalls(await readHerdrCalls(log));
+		expect(command).toContain("--model");
+		expect(command).toContain("anthropic/claude-opus-4-8");
 	});
 
 	test("rejects an unresolvable spawn model before touching herdr", async () => {

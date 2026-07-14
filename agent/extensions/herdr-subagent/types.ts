@@ -17,10 +17,15 @@ export type PaneReadSource = "visible" | "recent" | "recent-unwrapped";
 export type WaitStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 export type AgentScope = "user" | "project" | "both";
 export type SpawnIsolation = "worktree";
-/** The only model a herdr subagent may be spawned with. */
-export type SubagentModel = "openai-codex/gpt-5.6-sol";
-/** The thinking levels a herdr subagent may be spawned with. */
-export type SubagentThinking = "low" | "medium" | "high";
+/**
+ * The thinking levels a herdr subagent may be spawned with.
+ *
+ * `off`/`minimal` stay banned — they are wrong for autonomous agents. `xhigh`
+ * is allowed so implementation/diagnosis roles can run at the effort DeepSWE
+ * quality was benchmarked at (`[max]`); reasoning tokens are a small cost
+ * slice and higher effort tends to reduce turn count (the cache-read driver).
+ */
+export type SubagentThinking = "low" | "medium" | "high" | "xhigh";
 
 export const ACTIONS: ReadonlyArray<HerdrSubagentAction> = [
 	"status",
@@ -42,17 +47,12 @@ export const WAIT_STATUSES: ReadonlyArray<WaitStatus> = [
 ];
 export const AGENT_SCOPES: ReadonlyArray<AgentScope> = ["user", "project", "both"];
 export const SPAWN_ISOLATIONS: ReadonlyArray<SpawnIsolation> = ["worktree"];
-export const SUBAGENT_MODELS: ReadonlyArray<SubagentModel> = ["openai-codex/gpt-5.6-sol"];
-export const SUBAGENT_THINKING_LEVELS: ReadonlyArray<SubagentThinking> = ["low", "medium", "high"];
-
-/**
- * Check whether a string is an allowed subagent model.
- *
- * @param value - The model reference to check.
- * @returns True when the value is a permitted subagent model.
- */
-export const isSubagentModel = (value: string): value is SubagentModel =>
-	SUBAGENT_MODELS.some((model) => model === value);
+export const SUBAGENT_THINKING_LEVELS: ReadonlyArray<SubagentThinking> = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+];
 
 /**
  * Check whether a string is an allowed subagent thinking level.

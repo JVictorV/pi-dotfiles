@@ -2,7 +2,7 @@
 name: researcher
 description: Read-only web research specialist for library docs, API changes, error messages, dependency comparisons, and current external information. Returns compressed, cited findings.
 tools: read, grep, find, ls, websearch, webfetch
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-5.6-luna
 thinking: medium
 ---
 

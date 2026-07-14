@@ -35,13 +35,14 @@ Stay in-context (no subagents) when the task is a small focused edit, a quick qu
 
 ## Model selection
 
-Use only `openai-codex/gpt-5.6-sol` for subagents. Always pass that exact `model`; do not inherit the current/default model.
+Agent types carry routed model defaults (see `~/.pi/agent/agents/MODEL-MATRIX.md`): sol for planning/debugging/review/taste, terra for implementation/tests, luna for recon/research. Prefer the agent-type default; override `model` only when the matrix favors it for the specific task.
 
 Application rules:
 
-- Never spawn another model.
-- Only use `low`, `medium`, or `high` thinking.
-- Use `low` for quick scouting, `medium` for research and ordinary analysis, and `high` for implementation, debugging, planning, review, and difficult judgment.
+- The openai-codex GPT-5.6 family (sol, terra, luna) is the recommended default; other logged-in models are allowed when the matrix favors them.
+- When difficulty is ambiguous, round up a tier; if a terra/luna subagent fails or returns low-quality work, re-spawn the retry on the next tier up instead of retrying the same model.
+- Only use `low`, `medium`, `high`, or `xhigh` thinking — never `off` or `minimal`.
+- Use `low` for quick scouting, `medium` for research and ordinary analysis, `high` for review and taste judgment, and `xhigh` for implementation, test-writing, planning, and debugging.
 
 ## Tool-first workflow
 
@@ -64,7 +65,6 @@ Spawn a panel-backed subagent:
 	"action": "spawn",
 	"name": "investigate-tests",
 	"agentType": "scout",
-	"model": "openai-codex/gpt-5.6-sol",
 	"thinking": "medium",
 	"task": "Run read-only investigation of the failing tests. Diagnose root cause and report files/commands. Do not edit files."
 }
