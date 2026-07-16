@@ -39,14 +39,6 @@ export default defineConfig({
 			rules: { "effect/no-raw-throw": "off" },
 		},
 		{
-			// SAFETY: pi types CompactOptions.onError as (error: Error) => void, so
-			// error.message is statically Error, not unknown. This is plain pi
-			// extension glue rendering a UI notification, not Effect domain code
-			// with typed failure channels.
-			files: ["agent/extensions/auto-compact.ts"],
-			rules: { "effect/no-unknown-error-message": "off" },
-		},
-		{
 			// SAFETY: StatusLineStateStore writes values through the same typed
 			// StatusLineStateKey id; getStatusLineState falls back to key.initial for
 			// missing values. TypeScript cannot express this dependent map invariant.
