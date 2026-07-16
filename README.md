@@ -111,6 +111,8 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 
 - **`sync-pocock-skills`** — syncs [mattpocock/skills](https://github.com/mattpocock/skills)
   from upstream, applies pi-specific patches, flags new skills. Invoke with "sync skills".
+- **`effect`** — production Effect v4 guidance from
+  [kitlangton/skills](https://github.com/kitlangton/skills).
 - The rest (`diagnose`, `tdd`, `triage`, `to-prd`, `to-issues`, `grill-with-docs`,
   `improve-codebase-architecture`, `prototype`, `zoom-out`, `setup-matt-pocock-skills`,
   `handoff`, `teach`) are Pocock skills installed and patched via the sync skill.
