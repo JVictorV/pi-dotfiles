@@ -74,6 +74,7 @@ const DEFAULT_INSPECT_LINES = 120;
 const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
 const WAIT_POLL_INTERVAL_MS = 2_000;
 const WAIT_IDLE_CONFIRMATIONS = 2;
+const TERRA_MODEL_ID = "gpt-5.6-terra";
 
 type RecursionGuardedAction = "spawn" | "send" | "close" | "focus";
 
@@ -109,6 +110,9 @@ const guardSubagentRecursion = (
 };
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
+const isTerraModelReference = (model: string | undefined): boolean =>
+	model?.split("/").at(-1)?.toLowerCase() === TERRA_MODEL_ID;
 
 const isRegistryReservation = (entry: RegistryEntry): boolean => entryPhase(entry) === "reserved";
 
@@ -325,6 +329,11 @@ const commandSpawn: (
 		if (thinking !== undefined && !isSubagentThinking(thinking)) {
 			return yield* failAction(
 				`Subagent thinking must be one of ${SUBAGENT_THINKING_LEVELS.join(", ")}; received ${thinking}.`,
+			);
+		}
+		if (isTerraModelReference(model) && thinking !== "high" && thinking !== "xhigh") {
+			return yield* failAction(
+				"GPT-5.6 Terra requires high or xhigh thinking for herdr subagents.",
 			);
 		}
 

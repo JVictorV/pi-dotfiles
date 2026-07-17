@@ -85,6 +85,16 @@ describe("herdr_subagent extension", () => {
 		).rejects.toThrow(/HERDR_ENV is not 1/);
 	});
 
+	test("model guidance excludes Luna and gates Terra by thinking level", async () => {
+		const root = await makeTempRoot();
+		const tool = await loadTool(path.join(root, "agent"));
+		const guidance = tool.promptGuidelines?.join("\n") ?? "";
+
+		expect(guidance).toContain("Never suggest or select Luna for subagents");
+		expect(guidance).toContain("Terra is allowed only with high or xhigh thinking");
+		expect(guidance).not.toContain("sol, terra, luna");
+	});
+
 	test("denies recursive mutating actions from subagent sessions before herdr calls", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
@@ -1310,6 +1320,72 @@ describe("herdr_subagent extension", () => {
 		const text = status.content[0]?.text ?? "";
 		expect(text).toContain("worker-a");
 		expect(text).toContain("worker-b");
+	});
+
+	test("rejects Terra below high thinking before touching herdr", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-terra");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		for (const [index, thinking] of [undefined, "low", "medium"].entries()) {
+			await expect(
+				tool.execute(
+					`tool-call-${index}`,
+					{
+						action: "spawn",
+						name: `worker-${index}`,
+						agentType: "worker",
+						thinking,
+						task: "Implement the focused change.",
+					},
+					undefined,
+					undefined,
+					makeContext("/workspace"),
+				),
+			).rejects.toThrow(/Terra requires high or xhigh thinking/);
+		}
+
+		expect(await readHerdrCalls(log)).toEqual([]);
+	});
+
+	test("allows Terra with high or xhigh thinking", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-terra", "high");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call-high",
+			{ action: "spawn", name: "worker-high", agentType: "worker", task: "High task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		await tool.execute(
+			"tool-call-xhigh",
+			{
+				action: "spawn",
+				name: "worker-xhigh",
+				agentType: "worker",
+				thinking: "xhigh",
+				task: "Xhigh task.",
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		const commands = (await readHerdrCalls(log))
+			.filter((args) => args[0] === "pane" && args[1] === "run")
+			.map((args) => args[3] ?? "");
+		expect(commands).toHaveLength(2);
+		expect(commands[0]).toContain("'high'");
+		expect(commands[1]).toContain("'xhigh'");
 	});
 
 	test("role default thinking is applied and an explicit thinking overrides it", async () => {

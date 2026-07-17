@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { getCapabilities } from "@earendil-works/pi-tui";
 
 /** Thinking levels pi can display in the status line. */
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Context usage facts rendered by the right-side status region. */
 export type ContextUsageSnapshot = {

@@ -10,8 +10,9 @@ agent/sessions/
 # herdr subagent orchestration runtime registry/tasks
 agent/herdr-subagents/
 
-# Local trust decisions and LSP spawn preferences (absolute paths)
+# Local trust decisions, model catalog cache, and LSP spawn preferences
 agent/trust.json
+agent/models-store.json
 agent/lsp-permissions.json
 
 # Vendored tool binaries (large, platform-specific; pi fetches these)

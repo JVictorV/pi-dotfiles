@@ -202,11 +202,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use herdr_subagent when the user asks to orchestrate subagents, spawn panel-backed agents, inspect agent panels, or coordinate work across herdr.",
 			"Call herdr_subagent with action=status before controlling existing panel-backed subagents.",
-			"When using herdr_subagent action=spawn, prefer the agent type's model default; before overriding it, read ~/.pi/agent/agents/MODEL-MATRIX.md and pick per its matrix. The openai-codex GPT-5.6 family (sol, terra, luna) is the recommended default, but any logged-in model is allowed when the matrix favors it.",
+			"When using herdr_subagent action=spawn, prefer the agent type's model default; before overriding it, read ~/.pi/agent/agents/MODEL-MATRIX.md and pick per its matrix. Use openai-codex/gpt-5.6-sol by default. Never suggest or select Luna for subagents. Terra is allowed only with high or xhigh thinking; other logged-in models remain available when the matrix favors them.",
 			"Only use low, medium, high, or xhigh thinking for herdr_subagent spawns; never use off or minimal.",
-			"Use low thinking for quick scouting, medium for research and ordinary analysis, high for review and taste judgment, and xhigh for implementation, test-writing, planning, and debugging.",
-			"When task difficulty is ambiguous, choose the higher model tier; under-provisioning costs rework loops, over-provisioning costs cents.",
-			"If a terra or luna subagent fails or returns low-quality work, re-spawn the retry on the next tier up (luna→terra, terra→sol) instead of retrying the same model.",
+			"Use low thinking for quick scouting, medium for research and ordinary analysis, high for review and taste judgment, and xhigh for implementation, test-writing, planning, and debugging. Low/medium tasks use Sol, never Terra.",
+			"When task difficulty is ambiguous, choose Sol; under-provisioning costs rework loops, over-provisioning costs cents.",
+			"If a Terra subagent fails or returns low-quality work, re-spawn the retry on Sol instead of retrying Terra.",
 			"Prefer one herdr_subagent spawn per task, with tab labels like agent: <name>; inspect a subagent panel before trusting its result.",
 			"After herdr_subagent spawn or send, wait for the automatic subagent_result follow-up notification instead of polling wait; use wait only when explicitly blocking is necessary.",
 			"Spawned subagents cannot spawn their own subagents by default; orchestrators may grant recursive delegation with allowSpawn when genuinely needed.",
@@ -259,13 +259,13 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			model: Type.Optional(
 				Type.String({
 					description:
-						"Model reference for the spawned subagent (provider/model-id). Defaults per agent type; see MODEL-MATRIX.md for routing. Overrides agentType model.",
+						"Model reference for the spawned subagent (provider/model-id). Defaults per agent type; see MODEL-MATRIX.md for routing. Never select Luna; Terra requires high or xhigh thinking. Overrides agentType model.",
 				}),
 			),
 			thinking: Type.Optional(
 				StringEnum([...SUBAGENT_THINKING_LEVELS], {
 					description:
-						"Thinking level for the spawned subagent: low, medium, high, or xhigh. Overrides agentType thinking.",
+						"Thinking level for the spawned subagent: low, medium, high, or xhigh. Terra requires high or xhigh. Overrides agentType thinking.",
 				}),
 			),
 			tools: Type.Optional(

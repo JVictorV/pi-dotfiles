@@ -39,6 +39,8 @@ export interface ToolResult {
 export interface ToolDefinition {
 	/** Machine name of the registered tool. */
 	readonly name: string;
+	/** Model-facing operating rules contributed by the tool. */
+	readonly promptGuidelines?: ReadonlyArray<string>;
 	/** Execute the registered tool. */
 	execute(
 		toolCallId: string,

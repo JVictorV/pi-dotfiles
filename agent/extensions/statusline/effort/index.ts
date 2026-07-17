@@ -11,6 +11,7 @@ const THINKING_COLOR: Record<ThinkingLevel, ThemeColor> = {
 	medium: "thinkingMedium",
 	high: "thinkingHigh",
 	xhigh: "thinkingXhigh",
+	max: "thinkingMax",
 };
 
 /** Segment that renders the active thinking/effort level. */

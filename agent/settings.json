@@ -1,19 +1,18 @@
 {
-	"lastChangelogVersion": "0.80.7",
+	"lastChangelogVersion": "0.80.10",
 	"theme": "light",
 	"defaultProvider": "anthropic",
 	"defaultModel": "claude-fable-5",
-	"defaultThinkingLevel": "high",
+	"defaultThinkingLevel": "xhigh",
 	"httpIdleTimeoutMs": 60000,
 	"enabledModels": [
 		"openai-codex/gpt-5.6-sol",
 		"openai-codex/gpt-5.6-terra",
-		"openai-codex/gpt-5.6-luna",
 		"anthropic/claude-opus-4-8",
 		"anthropic/claude-fable-5"
 	],
 	"skills": ["!**/.agents/skills/**", "~/.local/share/pi-skills"],
-	"hideThinkingBlock": true,
+	"hideThinkingBlock": false,
 	"quietStartup": true,
 	"packages": ["npm:pi-mcp-adapter", "npm:@ygncode/pi-web"]
 }

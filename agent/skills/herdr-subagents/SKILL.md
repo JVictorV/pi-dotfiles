@@ -35,12 +35,14 @@ Stay in-context (no subagents) when the task is a small focused edit, a quick qu
 
 ## Model selection
 
-Agent types carry routed model defaults (see `~/.pi/agent/agents/MODEL-MATRIX.md`): sol for planning/debugging/review/taste, terra for implementation/tests, luna for recon/research. Prefer the agent-type default; override `model` only when the matrix favors it for the specific task.
+Agent types carry routed model defaults (see `~/.pi/agent/agents/MODEL-MATRIX.md`): Sol for scouting, research, planning, debugging, review, and taste; Terra for implementation and tests at high effort or above. Prefer the agent-type default and override `model` only when the matrix favors it for the specific task.
 
 Application rules:
 
-- The openai-codex GPT-5.6 family (sol, terra, luna) is the recommended default; other logged-in models are allowed when the matrix favors them.
-- When difficulty is ambiguous, round up a tier; if a terra/luna subagent fails or returns low-quality work, re-spawn the retry on the next tier up instead of retrying the same model.
+- Use `openai-codex/gpt-5.6-sol` by default. Never suggest or select Luna for a subagent.
+- Terra is allowed only with `high` or `xhigh` thinking. The extension rejects Terra with missing, `low`, or `medium` thinking.
+- When difficulty is ambiguous, choose Sol. If a Terra subagent fails or returns low-quality work, re-spawn the retry on Sol instead of retrying Terra.
+- Other logged-in models are allowed when the matrix favors them.
 - Only use `low`, `medium`, `high`, or `xhigh` thinking — never `off` or `minimal`.
 - Use `low` for quick scouting, `medium` for research and ordinary analysis, `high` for review and taste judgment, and `xhigh` for implementation, test-writing, planning, and debugging.
 
@@ -159,14 +161,14 @@ Preferred default roles:
 
 - `scout` — read-only codebase reconnaissance; defaults to Sol with `low` thinking.
 - `researcher` — cited web research; defaults to Sol with `medium` thinking.
-- `planner` — read-only implementation planning; defaults to Sol with `high` thinking.
+- `planner` — read-only implementation planning; defaults to Sol with `xhigh` thinking.
 - `reviewer` — read-only code review with P0-P3 findings; defaults to Sol with `high` thinking.
-- `worker` — general implementation worker; defaults to Sol with `high` thinking.
-- `test-writer` — writes tests through real seams; defaults to Sol with `high` thinking.
-- `debugger` — root-cause diagnosis with temporary instrumentation; defaults to Sol with `high` thinking.
+- `worker` — general implementation worker; defaults to Terra with `xhigh` thinking.
+- `test-writer` — writes tests through real seams; defaults to Terra with `xhigh` thinking.
+- `debugger` — root-cause diagnosis with temporary instrumentation; defaults to Sol with `xhigh` thinking.
 - `critic` — high-taste critique of UI/copy/API/design alternatives; defaults to Sol with `high` thinking.
 
-Role definitions set default `model` and `thinking`; spawn params override both. Use `agentType` on spawn to select a role. Omit `agentType` for a plain pi subagent, but still pass an explicit `model`.
+Role definitions set default `model` and `thinking`; spawn params override both, subject to Terra's `high`/`xhigh` floor. Use `agentType` on spawn to select a role. Omit `agentType` for a plain pi subagent, but still pass an explicit `model`.
 
 ## Lower-level fallback
 
