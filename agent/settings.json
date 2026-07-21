@@ -14,5 +14,5 @@
 	"skills": ["!**/.agents/skills/**", "~/.local/share/pi-skills"],
 	"hideThinkingBlock": false,
 	"quietStartup": true,
-	"packages": ["npm:pi-mcp-adapter", "npm:@ygncode/pi-web"]
+	"packages": ["npm:pi-mcp-adapter"]
 }
