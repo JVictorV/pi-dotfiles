@@ -57,7 +57,8 @@ export default defineConfig({
 		"agent/bin/**",
 		"agent/sessions/**",
 		"agent/extensions/herdr-agent-state.ts",
-		// Vendored from dmmulroy's dotfiles; linted upstream, kept faithful for re-sync.
+		// Vendored extensions are linted upstream and kept faithful for easy re-sync.
 		"agent/extensions/web-tools/**",
+		"agent/extensions/openai-server-compaction/**",
 	],
 });

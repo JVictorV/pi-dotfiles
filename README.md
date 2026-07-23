@@ -95,15 +95,16 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 
 `agent/extensions/*.ts` — auto-discovered and loaded on start (or `/reload`).
 
-| Extension            | Purpose                                                                                                                                                                                                                                                              |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                                                                               |
-| `whimsical.ts`       | Shows a random casino-themed "working" message each turn.                                                                                                                                                                                                            |
-| `notify.ts`          | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
-| `sound.ts`           | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
-| `stack.ts`           | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed.                                                    |
-| `lsp/`               | LSP Extension: read-only language-server-backed code navigation, hover/type info, symbols, call hierarchy, diagnostics, persisted per-repo spawn permissions, and passive sync for files touched by tools.                                                           |
-| `statusline.ts`      | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · LSP clients · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                               |
+| Extension                   | Purpose                                                                                                                                                                                                                                                              |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git-interceptor.ts`        | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                                                                               |
+| `whimsical.ts`              | Shows a random casino-themed "working" message each turn.                                                                                                                                                                                                            |
+| `notify.ts`                 | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
+| `sound.ts`                  | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
+| `stack.ts`                  | `stack` tool for [@kitlangton/stack](https://www.npmjs.com/package/@kitlangton/stack) squash-safe stacked-PR workflows; blocks `gh stack`. Needs `effect` (in root `package.json`) and the `stack` CLI installed.                                                    |
+| `lsp/`                      | LSP Extension: read-only language-server-backed code navigation, hover/type info, symbols, call hierarchy, diagnostics, persisted per-repo spawn permissions, and passive sync for files touched by tools.                                                           |
+| `openai-server-compaction/` | Vendored [OpenAI server-compaction extension](https://github.com/algal/pi-openai-server-compaction): Responses v2 artifacts, portable Pi summaries, `previous_response_id` continuity, and WebSocket fallback.                                                       |
+| `statusline.ts`             | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · LSP clients · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                               |
 
 ## Skills
 
@@ -141,6 +142,7 @@ Inspired by these pi/dotfiles setups and codebases:
 - [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main) — vendored at [`.repos/dmmulroy-dotfiles`](.repos/dmmulroy-dotfiles)
 - [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles) — vendored at [`.repos/edusantosbrito-pi-dotfiles`](.repos/edusantosbrito-pi-dotfiles)
 - [anomalyco/opencode](https://github.com/anomalyco/opencode) — inspiration for ported behavior and architecture; vendored at [`.repos/opencode`](.repos/opencode)
+- [algal/pi-openai-server-compaction](https://github.com/algal/pi-openai-server-compaction) — source for `agent/extensions/openai-server-compaction/`; tracked at [`.repos/pi-openai-server-compaction`](.repos/pi-openai-server-compaction) for re-sync
 
 All are tracked as git submodules under `.repos/` for reference. Run
 `git submodule update --init` after cloning to populate them.

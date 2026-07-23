@@ -11,6 +11,7 @@ Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`.
 | --------------------------- | ------------------------------------------------------------------------- |
 | Block/rewrite bash commands | `git-interceptor.ts` (`tool_call` + `isToolCallEventType("bash", event)`) |
 | Custom tool registration    | `stack.ts` (registers `stack` tool; `effect` + `Schema`), `lsp/`          |
+| OpenAI context compaction   | `openai-server-compaction/` (vendored Responses compaction extension)     |
 | Tool result safety          | `tool-result-sanitizer.ts` (guards provider-legal errored tool results)   |
 | Status bar / footer widget  | `statusline.ts` (`belowEditor` widget, registered at `session_start`)     |
 | Turn-end side effects       | `notify.ts` (OSC 777 desktop notification)                                |
@@ -42,4 +43,5 @@ Preferred patterns:
 - **Allowing `--no-verify`** — `git-interceptor` blocks it deliberately; never add an escape hatch.
 - **Widget placement matters** — `statusline` registers as a `belowEditor` widget at `session_start`. Don't move it unless you want it in another UI region.
 - **OSC notifications** — `notify.ts` uses OSC 777; unsupported on Kitty/Terminal.app/Alacritty. Don't assume delivery.
+- **Reformatting vendored compaction code** — `openai-server-compaction/` stays faithful to its reference submodule for easy re-sync and is excluded from root lint/format gates.
 - **`any`, unsafe `as` casts, or thrown exceptions in new Effect code** — use typed errors and `Effect.fail`; model failures in the error channel instead.

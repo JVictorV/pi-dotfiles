@@ -16,3 +16,6 @@
 [submodule ".repos/pi-subagents"]
 	path = .repos/pi-subagents
 	url = https://github.com/tintinweb/pi-subagents
+[submodule ".repos/pi-openai-server-compaction"]
+	path = .repos/pi-openai-server-compaction
+	url = https://github.com/algal/pi-openai-server-compaction.git
