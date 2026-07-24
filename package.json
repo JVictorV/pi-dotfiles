@@ -28,10 +28,10 @@
 		"ws": "^8.18.0"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-agent-core": "^0.80.10",
-		"@earendil-works/pi-ai": "^0.80.10",
-		"@earendil-works/pi-coding-agent": "^0.80.10",
-		"@earendil-works/pi-tui": "^0.80.10",
+		"@earendil-works/pi-agent-core": "^0.82.0",
+		"@earendil-works/pi-ai": "^0.82.0",
+		"@earendil-works/pi-coding-agent": "^0.82.0",
+		"@earendil-works/pi-tui": "^0.82.0",
 		"@types/turndown": "^5.0.5",
 		"@types/ws": "^8.18.1",
 		"effect-rules": "^0.3.6",
