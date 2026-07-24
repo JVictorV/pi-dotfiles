@@ -114,9 +114,12 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
   from upstream, applies pi-specific patches, flags new skills. Invoke with "sync skills".
 - **`effect`** — production Effect v4 guidance from
   [kitlangton/skills](https://github.com/kitlangton/skills).
-- The rest (`diagnose`, `tdd`, `triage`, `to-prd`, `to-issues`, `grill-with-docs`,
-  `improve-codebase-architecture`, `prototype`, `zoom-out`, `setup-matt-pocock-skills`,
-  `handoff`, `teach`) are Pocock skills installed and patched via the sync skill.
+- The upstream set (`code-review`, `codebase-design`, `diagnosing-bugs`,
+  `domain-modeling`, `grill-with-docs`, `grilling`, `handoff`, `implement`,
+  `improve-codebase-architecture`, `prototype`, `research`,
+  `resolving-merge-conflicts`, `setup-matt-pocock-skills`, `tdd`, `teach`,
+  `to-spec`, `to-tickets`, `triage`, `wayfinder`, `writing-great-skills`) is
+  installed and patched via the sync skill.
 
 ## Settings highlights (`agent/settings.json`)
 

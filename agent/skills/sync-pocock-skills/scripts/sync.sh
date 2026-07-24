@@ -118,9 +118,26 @@ if [[ -n "$REQUESTED_UPSTREAM_DIR" ]]; then
   rm -rf "$UPSTREAM_DIR"
   mkdir -p "$(dirname "$UPSTREAM_DIR")"
 fi
-clone_args=(--depth 1 --quiet)
-[[ -z "$UPSTREAM_REF" ]] || clone_args+=(--branch "$UPSTREAM_REF")
-if ! git clone "${clone_args[@]}" "$UPSTREAM_REPO" "$UPSTREAM_DIR" 2>/dev/null; then
+clone_upstream() {
+  if [[ -z "$UPSTREAM_REF" ]]; then
+    git clone --depth 1 --quiet "$UPSTREAM_REPO" "$UPSTREAM_DIR" 2>/dev/null
+    return
+  fi
+
+  # Branch and tag names can use clone's fast path. A resolved commit SHA
+  # cannot be passed to --branch, so fetch it directly as a detached commit.
+  if git clone --depth 1 --quiet --branch "$UPSTREAM_REF" "$UPSTREAM_REPO" "$UPSTREAM_DIR" 2>/dev/null; then
+    return
+  fi
+
+  rm -rf "$UPSTREAM_DIR"
+  git init --quiet "$UPSTREAM_DIR"
+  git -C "$UPSTREAM_DIR" remote add origin "$UPSTREAM_REPO"
+  git -C "$UPSTREAM_DIR" fetch --depth 1 --quiet origin "$UPSTREAM_REF" 2>/dev/null
+  git -C "$UPSTREAM_DIR" checkout --detach --quiet FETCH_HEAD 2>/dev/null
+}
+
+if ! clone_upstream; then
   echo "ERROR: failed to clone $UPSTREAM_REPO${UPSTREAM_REF:+ at $UPSTREAM_REF}"
   exit 1
 fi
@@ -314,7 +331,7 @@ done < "$OUR_LIST"
 # --- Section 5: Scan for Claude Code / sub-agent patterns needing patches ---
 echo ""
 echo "=== UNPATCHED_PATTERNS ==="
-PATTERNS='sub.agent|subagent|Agent tool|spawn.*agent|subagent_type|^[[:space:]-]*If.*CLAUDE\.md.*exists|prefer.*CLAUDE\.md|CLAUDE\.md.*first'
+PATTERNS='sub.agent|subagent|background agent|Agent tool|spawn.*agent|subagent_type|anthropic/claude|claude-opus|gpt-5\.6-luna|^[[:space:]-]*If.*CLAUDE\.md.*exists|prefer.*CLAUDE\.md|CLAUDE\.md.*first'
 while IFS=$'\t' read -r name our_path; do
   upstream_path=$(get_upstream_path "$name")
 
@@ -332,7 +349,9 @@ while IFS=$'\t' read -r name our_path; do
         patch --quiet --forward "$scan_file" "$patch_file" 2>/dev/null || true
       fi
       apply_local_overrides_quiet "$name" "$rel_path" "$scan_file"
-      matches=$(grep -niE "$PATTERNS" "$scan_file" 2>/dev/null || true)
+      # `herdr_subagent` is pi's native orchestration tool, not a Claude Code
+      # pattern. Strip only that token so other patterns on the line still scan.
+      matches=$(sed 's/`herdr_subagent`//g' "$scan_file" | grep -niE "$PATTERNS" 2>/dev/null || true)
       if [[ -n "$matches" ]]; then
         echo "UNPATCHED: $name/$rel_path"
         echo "$matches" | while IFS= read -r line; do echo "  $line"; done
@@ -345,7 +364,7 @@ while IFS=$'\t' read -r name our_path; do
     while IFS= read -r file; do
       [[ "$file" == *.md || "$file" == *.sh ]] || continue
       rel_path="${file#"$our_path"/}"
-      matches=$(grep -niE "$PATTERNS" "$file" 2>/dev/null || true)
+      matches=$(sed 's/`herdr_subagent`//g' "$file" | grep -niE "$PATTERNS" 2>/dev/null || true)
       if [[ -n "$matches" ]]; then
         echo "UNPATCHED: $name/$rel_path"
         echo "$matches" | while IFS= read -r line; do echo "  $line"; done

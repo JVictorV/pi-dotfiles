@@ -1,0 +1,14 @@
+--- upstream/research/SKILL.md
++++ ours/research/SKILL.md
+@@ -1,9 +1,9 @@
+ ---
+ name: research
+-description: Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.
++description: Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a researcher agent.
+ ---
+
+-Spin up a **background agent** to do the research, so you keep working while it reads.
++When the `herdr_subagent` tool is available, launch a researcher agent with `thinking: medium` and keep the researcher agent type's default model so the repo's routing policy remains authoritative. Keep working while it reads, then continue from the automatic completion notification and inspect its panel before trusting the result. If herdr orchestration is unavailable, perform the research directly.
+
+ Its job:
+

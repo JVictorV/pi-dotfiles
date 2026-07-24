@@ -13,3 +13,4 @@ herdr-subagents
 lsp
 review
 debrief
+effect

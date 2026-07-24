@@ -27,13 +27,15 @@ bash "$APPLY_SCRIPT" "$SKILL_NAME" "$UPSTREAM_SKILL_DIR" "$SKILLS_DIR" "$PATCHES
 
 echo "INSTALLED: $SKILL_NAME"
 
-PATTERNS='sub.agent|subagent|Agent tool|spawn.*agent|subagent_type|^[[:space:]-]*If.*CLAUDE\.md.*exists|prefer.*CLAUDE\.md|CLAUDE\.md.*first'
+PATTERNS='sub.agent|subagent|background agent|Agent tool|spawn.*agent|subagent_type|anthropic/claude|claude-opus|gpt-5\.6-luna|^[[:space:]-]*If.*CLAUDE\.md.*exists|prefer.*CLAUDE\.md|CLAUDE\.md.*first'
 found=0
 while IFS= read -r file; do
   rel_path="${file#"$TARGET_DIR"/}"
   # Scan the installed result even when a patch exists. A patch may handle one
   # hunk while a later upstream release adds another pattern in the same file.
-  matches=$(grep -niE "$PATTERNS" "$file" 2>/dev/null || true)
+  # `herdr_subagent` is pi's native orchestration tool, not a Claude Code
+  # pattern. Strip only that token so other patterns on the line still scan.
+  matches=$(sed 's/`herdr_subagent`//g' "$file" | grep -niE "$PATTERNS" 2>/dev/null || true)
   if [[ -n "$matches" ]]; then
     if [[ "$found" -eq 0 ]]; then
       echo "PATTERNS: review these for pi patches"

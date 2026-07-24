@@ -24,12 +24,32 @@ if [[ ! -d "$UPSTREAM_SKILL_DIR" ]]; then
   exit 1
 fi
 
-# Copy upstream files
-echo "Copying upstream $SKILL_NAME..."
-mkdir -p "$TARGET_DIR"
-rsync -a --delete "$UPSTREAM_SKILL_DIR/" "$TARGET_DIR/"
+# Build the complete replacement beside the installed skills. A patch conflict
+# must not leave a partially updated skill or .orig/.rej artifacts behind.
+mkdir -p "$SKILLS_DIR"
+STAGE_ROOT=$(mktemp -d "$SKILLS_DIR/.${SKILL_NAME}.sync.XXXXXX")
+STAGED_DIR="$STAGE_ROOT/staged"
+PREVIOUS_DIR="$STAGE_ROOT/previous"
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [[ -e "$PREVIOUS_DIR" && ! -e "$TARGET_DIR" ]]; then
+    if ! mv "$PREVIOUS_DIR" "$TARGET_DIR"; then
+      echo "ERROR: failed to restore interrupted $SKILL_NAME installation; recovery copy retained at $PREVIOUS_DIR" >&2
+      exit 1
+    fi
+  fi
+  rm -rf "$STAGE_ROOT"
+  exit "$status"
+}
+trap cleanup EXIT
 
-# Apply patches
+# Copy upstream files into staging.
+echo "Copying upstream $SKILL_NAME..."
+mkdir -p "$STAGED_DIR"
+rsync -a --delete "$UPSTREAM_SKILL_DIR/" "$STAGED_DIR/"
+
+# Apply patches only to the staged copy.
 applied=0
 failed=0
 for patch_file in "$PATCHES_DIR"/"${SKILL_NAME}"__*.patch; do
@@ -40,14 +60,14 @@ for patch_file in "$PATCHES_DIR"/"${SKILL_NAME}"__*.patch; do
   rel_path="${patch_basename#"${SKILL_NAME}"__}"
   rel_path="${rel_path%.patch}"
   rel_path="${rel_path//__//}"  # Convert __ back to /
-  target_file="$TARGET_DIR/$rel_path"
+  target_file="$STAGED_DIR/$rel_path"
 
   if [[ ! -f "$target_file" ]]; then
     echo "  SKIP: $rel_path (file no longer exists)"
     continue
   fi
 
-  if patch --quiet --forward "$target_file" "$patch_file" 2>/dev/null; then
+  if patch --quiet --forward --no-backup-if-mismatch "$target_file" "$patch_file" >/dev/null 2>&1; then
     echo "  PATCHED: $rel_path"
     applied=$((applied + 1))
   else
@@ -56,11 +76,27 @@ for patch_file in "$PATCHES_DIR"/"${SKILL_NAME}"__*.patch; do
   fi
 done
 
-# Apply local frontmatter overrides after patches so they are independent of
-# upstream text changes and do not need one-line patch files.
-if [[ -f "$TARGET_DIR/SKILL.md" && -f "$OVERRIDES_SCRIPT" ]]; then
-  python3 "$OVERRIDES_SCRIPT" "$SKILL_NAME" "$TARGET_DIR/SKILL.md" "$PATCHES_DIR"
+if [[ "$failed" -gt 0 ]]; then
+  echo "Result: $applied patched, $failed conflicts"
+  exit "$failed"
 fi
 
-echo "Result: $applied patched, $failed conflicts"
-exit $failed
+# Apply local frontmatter overrides after patches so they are independent of
+# upstream text changes and do not need one-line patch files.
+if [[ -f "$STAGED_DIR/SKILL.md" && -f "$OVERRIDES_SCRIPT" ]]; then
+  python3 "$OVERRIDES_SCRIPT" "$SKILL_NAME" "$STAGED_DIR/SKILL.md" "$PATCHES_DIR"
+fi
+
+# Replace only after the entire staged skill is valid. Keep the old directory
+# beside it until the new directory has been moved into place.
+if [[ -e "$TARGET_DIR" ]]; then
+  mv "$TARGET_DIR" "$PREVIOUS_DIR"
+fi
+if ! mv "$STAGED_DIR" "$TARGET_DIR"; then
+  [[ ! -e "$PREVIOUS_DIR" ]] || mv "$PREVIOUS_DIR" "$TARGET_DIR"
+  echo "ERROR: failed to install staged $SKILL_NAME" >&2
+  exit 1
+fi
+rm -rf "$PREVIOUS_DIR"
+
+echo "Result: $applied patched, 0 conflicts"

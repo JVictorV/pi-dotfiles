@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews independently and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X" or says /review or /code-review.
+description: Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/PRD asked for?). Runs both reviews independently and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, asks to "review since X", or says /review or /code-review.
 ---
 
 Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 - **Standards** — does the code conform to this repo's documented coding standards?
 - **Spec** — does the code faithfully implement the originating issue / PRD / spec?
 
-Both axes run **independently** so they don't pollute each other's context — as parallel herdr subagents when the `herdr_subagent` tool is available, otherwise as two self-contained sequential passes — then this skill aggregates their findings.
+Both axes run **independently** so they don't pollute each other's context — as parallel reviewer agents in herdr when the `herdr_subagent` tool is available, otherwise as two self-contained sequential passes — then this skill aggregates their findings.
 
 The issue tracker should have been provided to you — run `/setup-matt-pocock-skills` if `docs/agents/issue-tracker.md` is missing.
 
@@ -57,12 +57,12 @@ Each smell reads _what it is_ → _how to fix_; match it against the diff:
 
 ### 4. Run both reviews independently
 
-If the `herdr_subagent` tool is available, spawn two subagents in one message (model `anthropic/claude-opus-4-8`, thinking high — reviews are judgment work) and wait for both results. Otherwise, run the two briefs yourself as two self-contained sequential passes: finish one axis completely before starting the other, and build each report only from that axis's brief — do not let one axis's findings steer the other.
+If the `herdr_subagent` tool is available, launch two reviewer agents in parallel with `thinking: high`; keep the reviewer agent type's default model so the repo's model-routing policy remains authoritative. Continue from the automatic completion notifications, inspect both panels before trusting their results, and close them after harvesting the reports. Otherwise, run the two briefs yourself as two self-contained sequential passes: finish one axis completely before starting the other, and build each report only from that axis's brief — do not let one axis's findings steer the other.
 
 **Standards review prompt** — include:
 
 - The full diff command and commit list.
-- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full — a subagent has no other access to it.
+- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full — each reviewer must receive the complete axis-specific brief.
 - The brief: "Report — per file/hunk where relevant — (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls — documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
 
 **Spec review prompt** — include:
