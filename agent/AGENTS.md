@@ -57,8 +57,7 @@ Preferred order:
 
 ```ts
 type Result<T, E extends Error> =
-	| { readonly _tag: "ok"; readonly value: T }
-	| { readonly _tag: "err"; readonly error: E };
+	{ readonly _tag: "ok"; readonly value: T } | { readonly _tag: "err"; readonly error: E };
 ```
 
 Prefer:

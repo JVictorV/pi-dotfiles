@@ -95,6 +95,7 @@ block in each open change description:
 1. #101
 2. #102
 3. **#103** 👈 current
+
 <!-- stack:links:end -->
 ```
 
