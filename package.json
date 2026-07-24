@@ -14,18 +14,18 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@effect/platform-node": "4.0.0-beta.93",
-		"@vue/language-server": "^3.3.6",
-		"effect": "^4.0.0-beta.93",
+		"@effect/platform-node": "4.0.0-beta.101",
+		"@vue/language-server": "^3.3.8",
+		"effect": "^4.0.0-beta.101",
 		"html-to-text": "^10.0.0",
-		"linkedom": "^0.18.12",
+		"linkedom": "^0.18.13",
 		"turndown": "^7.2.0",
 		"turndown-plugin-gfm": "^1.0.2",
 		"typescript-language-server": "^5.3.0",
 		"vscode-jsonrpc": "^9.0.1",
 		"vscode-langservers-extracted": "^4.10.0",
 		"vscode-languageserver-types": "^3.18.0",
-		"ws": "^8.18.0"
+		"ws": "^8.21.1"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-agent-core": "^0.82.0",
@@ -35,12 +35,12 @@
 		"@types/turndown": "^5.0.5",
 		"@types/ws": "^8.18.1",
 		"effect-rules": "^0.3.6",
-		"oxfmt": "^0.57.0",
-		"oxlint": "^1.72.0",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.9"
+		"oxfmt": "^0.60.0",
+		"oxlint": "^1.75.0",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.10"
 	},
 	"overrides": {
-		"@effect/platform-node-shared": "4.0.0-beta.93"
+		"@effect/platform-node-shared": "4.0.0-beta.101"
 	}
 }
