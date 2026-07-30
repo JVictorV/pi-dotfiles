@@ -14,6 +14,19 @@ When rules pull in different directions, use this order:
 
 New code paths, modules, adapters, and services should generally follow these standards, but do not force a whole-project migration for an unrelated change.
 
+## Scope and proportionality
+
+- Prefer existing patterns, frameworks, helpers, and abstractions over inventing new ones.
+- Keep changes narrowly scoped to the requested behavior. Do not include unrelated refactors, renames, metadata churn, speculative features, or incidental cleanup.
+- Add an abstraction only when it removes real complexity, eliminates meaningful duplication, or matches an established local pattern. Do not introduce abstractions merely for hypothetical reuse or future extensibility.
+- Scale tests with risk and blast radius. Keep tests focused for narrow changes; broaden them only for shared behavior, cross-module contracts, regressions, or critical user workflows.
+- Do not test static declarations, implementation details, removed behavior, trivial forwarding code, or invariants already guaranteed by types and boundary parsers.
+- When requirements are unclear, implement the minimum behavior needed for correctness. Do not invent additional policy, edge cases, configuration, extensibility, or fallback behavior without a concrete requirement.
+
+## Technical communication
+
+Use ASD-STE100 Simplified Technical English when communicating with the user or writing documentation. Use short, direct sentences, active voice, consistent terminology, and one instruction or idea per sentence. Avoid idioms, ambiguous wording, unnecessary jargon, and unnecessary detail. Preserve exact code identifiers, API names, error text, and quotations when accuracy requires their original wording.
+
 ## Core principles
 
 - Prefer **errors as values** over `throw` / rejected promises for expected failures.
