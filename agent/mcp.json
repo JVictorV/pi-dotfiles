@@ -10,6 +10,13 @@
 			"env": {
 				"FIGMA_API_KEY": "$env:FIGMA_API_KEY"
 			}
+		},
+		"ghidra": {
+			"command": "/home/ubuntu/.local/opt/ghidra-headless-mcp/.venv/bin/ghidra-headless-mcp",
+			"args": ["--ghidra-install-dir", "/home/ubuntu/.local/opt/ghidra"],
+			"env": {
+				"TMPDIR": "/home/ubuntu/ghidra-work/tmp"
+			}
 		}
 	}
 }
