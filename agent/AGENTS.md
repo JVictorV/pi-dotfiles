@@ -470,6 +470,25 @@ Prefer tests that assert observable input/output behavior:
 - rendered response
 - sent email record in a fake/local adapter
 
+### Contract, metadata, and generated-artifact tests
+
+Before adding a test, state the observable regression that it prevents. If the test cannot fail without a user-visible contract or boundary behavior changing, do not add it.
+
+For data contracts and localized metadata, test the boundary behavior:
+
+- parsing and rejection of malformed input
+- required shape, bounds, identity, and exact coverage
+- duplicate, missing, extra, and unknown entries
+- version, target, and content-hash checks
+- public formatting or transformation behavior
+- cross-language fidelity at the artifact/code-generation boundary
+
+Do not test source-controlled copy as if it were program behavior. Do not assert that localized text contains chosen words, and do not repeat exact translations in tests only to freeze wording. Translation correctness and tone require human review. Assert exact text only when the text is itself an explicit public contract.
+
+When testing lookup or formatting behavior, derive the expected localized value from the parsed canonical artifact. Use representative valid and invalid inputs. Do not duplicate the artifact's translated literals in the test.
+
+One artifact-equivalence test at a real generation boundary is sufficient. Do not also test generated constants, trivial lookup forwarding, serialized bytes, and selected field literals. Use artifact drift checks for committed generated files instead of duplicating snapshot assertions in unit tests.
+
 Avoid spy-driven tests like `expect(sendEmail).toHaveBeenCalledWith(...)` unless the interaction itself is the only observable behavior.
 
 For persistence behavior, prefer SQLite/local DB-backed tests over hand-rolled in-memory fakes when SQL/schema/transaction behavior matters.
