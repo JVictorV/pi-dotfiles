@@ -51,7 +51,13 @@ export interface ToolDefinition {
 	): Promise<ToolResult>;
 }
 
-export type SessionEvent = "session_start" | "session_shutdown" | "agent_end";
+export type SessionEvent =
+	| "session_start"
+	| "session_shutdown"
+	| "input"
+	| "agent_start"
+	| "agent_end"
+	| "agent_settled";
 
 export interface SentCustomMessage {
 	readonly message: unknown;
@@ -63,7 +69,7 @@ export interface SentUserMessage {
 	readonly options: unknown;
 }
 
-type SessionHandler = (event: { readonly type: SessionEvent } | unknown, ctx?: unknown) => void;
+type SessionHandler = (event: { readonly type: SessionEvent } | unknown, ctx?: unknown) => unknown;
 
 /** Minimal fake pi API used by the herdr_subagent tool integration tests. */
 export interface FakePi {
@@ -87,8 +93,10 @@ export interface LoadedTool {
 	readonly sentMessages: SentCustomMessage[];
 	/** User messages injected through pi.sendUserMessage. */
 	readonly sentUserMessages: SentUserMessage[];
-	/** Dispatch a fake session lifecycle or agent event. */
+	/** Dispatch a fake session lifecycle or agent event without awaiting handlers. */
 	dispatch(event: SessionEvent, payload?: unknown, ctx?: unknown): void;
+	/** Dispatch a fake session lifecycle or agent event and await asynchronous handlers. */
+	dispatchAsync(event: SessionEvent, payload?: unknown, ctx?: unknown): Promise<void>;
 }
 
 /** Minimal pi tool context used by herdr_subagent tool execution tests. */
@@ -121,6 +129,9 @@ const originalEnv = {
 	FAKE_HERDR_AGENT_STATUS: envRecord().FAKE_HERDR_AGENT_STATUS,
 	FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE: envRecord().FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
 	FAKE_HERDR_PANE_RUN_FAIL: envRecord().FAKE_HERDR_PANE_RUN_FAIL,
+	FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY: envRecord().FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY,
+	FAKE_HERDR_PANE_RUN_DELAY_MESSAGE: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MESSAGE,
+	FAKE_HERDR_PANE_RUN_DELAY_MS: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MS,
 	FAKE_HERDR_PANE_CURRENT_FAIL: envRecord().FAKE_HERDR_PANE_CURRENT_FAIL,
 	FAKE_HERDR_AGENT_LIST_ENABLE: envRecord().FAKE_HERDR_AGENT_LIST_ENABLE,
 	FAKE_HERDR_AGENT_LIST_FAIL: envRecord().FAKE_HERDR_AGENT_LIST_FAIL,
@@ -242,6 +253,11 @@ export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> 
 				handler(payload ?? { type: event }, ctx);
 			}
 		},
+		async dispatchAsync(event, payload, ctx) {
+			await Promise.all(
+				(handlers.get(event) ?? []).map((handler) => handler(payload ?? { type: event }, ctx)),
+			);
+		},
 	};
 	loadedTools.push(loaded);
 	return loaded;
@@ -328,6 +344,9 @@ const restoreEnv = (): void => {
 		originalEnv.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
 	);
 	setEnv("FAKE_HERDR_PANE_RUN_FAIL", originalEnv.FAKE_HERDR_PANE_RUN_FAIL);
+	setEnv("FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY", originalEnv.FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY);
+	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MESSAGE);
+	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MS);
 	setEnv("FAKE_HERDR_PANE_CURRENT_FAIL", originalEnv.FAKE_HERDR_PANE_CURRENT_FAIL);
 	setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", originalEnv.FAKE_HERDR_AGENT_LIST_ENABLE);
 	setEnv("FAKE_HERDR_AGENT_LIST_FAIL", originalEnv.FAKE_HERDR_AGENT_LIST_FAIL);
@@ -359,6 +378,11 @@ const loadedMissingTool = (
 			for (const handler of handlers.get(event) ?? []) {
 				handler(payload ?? { type: event }, ctx);
 			}
+		},
+		async dispatchAsync(event, payload, ctx) {
+			await Promise.all(
+				(handlers.get(event) ?? []).map((handler) => handler(payload ?? { type: event }, ctx)),
+			);
 		},
 	};
 	loadedTools.push(loaded);
@@ -408,11 +432,23 @@ if (args[0] === "tab" && args[1] === "create") {
   writeJson({ result: { root_pane: { pane_id: "wTest:p1", terminal_id: "term-subagent", tab_id: "wTest:t2", workspace_id: workspace, cwd, foreground_cwd: cwd }, tab: { tab_id: "wTest:t2", workspace_id: workspace, label } } });
   process.exit(0);
 }
-if (args[0] === "pane" && args[1] === "run" && process.env.FAKE_HERDR_PANE_RUN_FAIL === "1") {
-  process.stderr.write("pane run failed");
-  process.exit(1);
+if (args[0] === "pane" && args[1] === "run") {
+  if (process.env.FAKE_HERDR_PANE_RUN_FAIL === "1") {
+    process.stderr.write("pane run failed");
+    process.exit(1);
+  }
+  const delayMessage = process.env.FAKE_HERDR_PANE_RUN_DELAY_MESSAGE;
+  const delayMs = Number(process.env.FAKE_HERDR_PANE_RUN_DELAY_MS || "0");
+  if (delayMs > 0 && (!delayMessage || args[3] === delayMessage)) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+  }
+  if (process.env.FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY === "1") {
+    process.stderr.write("pane run failed after input");
+    process.exit(1);
+  }
+  process.exit(0);
 }
-if (args[0] === "pane" && (args[1] === "rename" || args[1] === "run" || args[1] === "close")) process.exit(0);
+if (args[0] === "pane" && (args[1] === "rename" || args[1] === "close")) process.exit(0);
 if (args[0] === "tab" && args[1] === "close") {
   if (process.env.FAKE_HERDR_TAB_CLOSE_FAIL === "1") {
     process.stderr.write("unknown tab: " + args[2]);

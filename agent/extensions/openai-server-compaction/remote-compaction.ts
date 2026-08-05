@@ -11,7 +11,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, platform, release } from "node:os";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { SessionBeforeCompactEvent, ToolInfo } from "@earendil-works/pi-coding-agent";
+import {
+  sessionEntryToContextMessages,
+  type BranchSummaryEntry,
+  type CompactionEntry,
+  type CustomMessageEntry,
+  type SessionBeforeCompactEvent,
+  type ToolInfo,
+} from "@earendil-works/pi-coding-agent";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   compact,
@@ -23,7 +30,6 @@ import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import { isRecord } from "./config.ts";
 import {
-  hostnameFromBaseUrl,
   isDirectOpenAIResponsesModel,
   isOpenAICodexResponsesModel,
   supportsRemoteCompactionModel,
@@ -81,7 +87,6 @@ export type RemoteCompactionUsageSnapshot = Usage;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
-const RETAINED_MESSAGE_TOKEN_BUDGET = 20_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type RemoteCompactionDetails = {
@@ -103,6 +108,23 @@ export type RemoteCompactionSessionState = {
 export type RemoteCompactionResult = {
   output: ResponseItem[];
   usage?: RemoteCompactionUsageSnapshot;
+};
+
+/** A Pi branch entry shape used to build portable and remote provider context. */
+export type RemoteCompactionBranchEntry = {
+  type: string;
+  id: string;
+  parentId?: string | null;
+  timestamp?: string;
+  details?: unknown;
+  message?: AgentMessage;
+  customType?: string;
+  content?: CustomMessageEntry["content"];
+  display?: boolean;
+  summary?: string;
+  fromId?: string;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
 };
 
 function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string {
@@ -358,6 +380,14 @@ function buildPortableSummaryPrompt(conversation: string, customInstructions?: s
 export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
   const items: ResponseItem[] = [];
 
+  if (
+    message.role !== "user" &&
+    message.role !== "assistant" &&
+    message.role !== "toolResult"
+  ) {
+    return convertToLlm([message]).flatMap((llmMessage) => messageToResponseItems(llmMessage));
+  }
+
   if (message.role === "user") {
     const content = contentToResponseContentItems(message.content);
     if (content.length > 0) {
@@ -424,6 +454,77 @@ export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
 
 export function messagesToResponseItems(messages: AgentMessage[]): ResponseItem[] {
   return messages.flatMap((message) => messageToResponseItems(message));
+}
+
+/**
+ * Project Pi branch entries into the same logical message sequence used by Pi provider context.
+ *
+ * @param branchEntries - Active Pi session branch entries.
+ * @returns Context-participating Pi messages in branch order.
+ */
+export function branchEntriesToAgentMessages(
+  branchEntries: RemoteCompactionBranchEntry[],
+): AgentMessage[] {
+  return branchEntries.flatMap((entry) => {
+    if (entry.type === "message" && entry.message) {
+      return [entry.message];
+    }
+    if (
+      entry.type === "custom_message" &&
+      entry.timestamp !== undefined &&
+      entry.customType !== undefined &&
+      entry.content !== undefined &&
+      entry.display !== undefined
+    ) {
+      const customEntry: CustomMessageEntry = {
+        type: "custom_message",
+        id: entry.id,
+        parentId: entry.parentId ?? null,
+        timestamp: entry.timestamp,
+        customType: entry.customType,
+        content: entry.content,
+        display: entry.display,
+        details: entry.details,
+      };
+      return sessionEntryToContextMessages(customEntry);
+    }
+    if (
+      entry.type === "branch_summary" &&
+      entry.timestamp !== undefined &&
+      entry.summary !== undefined &&
+      entry.fromId !== undefined
+    ) {
+      const branchSummaryEntry: BranchSummaryEntry = {
+        type: "branch_summary",
+        id: entry.id,
+        parentId: entry.parentId ?? null,
+        timestamp: entry.timestamp,
+        summary: entry.summary,
+        fromId: entry.fromId,
+        details: entry.details,
+      };
+      return sessionEntryToContextMessages(branchSummaryEntry);
+    }
+    if (
+      entry.type === "compaction" &&
+      entry.timestamp !== undefined &&
+      entry.summary !== undefined &&
+      entry.tokensBefore !== undefined
+    ) {
+      const compactionEntry: CompactionEntry = {
+        type: "compaction",
+        id: entry.id,
+        parentId: entry.parentId ?? null,
+        timestamp: entry.timestamp,
+        summary: entry.summary,
+        firstKeptEntryId: entry.firstKeptEntryId ?? "",
+        tokensBefore: entry.tokensBefore,
+        details: entry.details,
+      };
+      return sessionEntryToContextMessages(compactionEntry);
+    }
+    return [];
+  });
 }
 
 function cloneResponseItem(item: ResponseItem): ResponseItem {
@@ -599,65 +700,34 @@ export function processCompactedHistory(items: ResponseItem[]): ResponseItem[] {
   return items.filter(shouldKeepCompactedHistoryItem).map(cloneResponseItem);
 }
 
-function responseMessageText(item: ResponseItem): string {
-  if (item.type !== "message" || !Array.isArray(item.content)) return "";
-  return item.content
-    .filter((content): content is Extract<ResponseContentItem, { type: "input_text" | "output_text" }> =>
-      content.type === "input_text" || content.type === "output_text",
-    )
-    .map((content) => content.text)
-    .join("");
+function isValidRemoteCompactionV2Item(item: unknown): item is ResponseItem {
+  return isRecord(item) &&
+    item.type === "compaction" &&
+    typeof item.encrypted_content === "string" &&
+    item.encrypted_content.trim().length > 0;
 }
 
-function approximateMessageTokens(item: ResponseItem): number {
-  return Math.max(1, Math.ceil(responseMessageText(item).length / 4));
-}
+function canonicalizeRemoteCompactionV2History(value: unknown[]): ResponseItem[] | undefined {
+  if (!value.every(isResponseItem)) return undefined;
+  const finalItem = value.at(-1);
+  if (!isValidRemoteCompactionV2Item(finalItem)) return undefined;
 
-function truncateMessageToTokenBudget(item: ResponseItem, maxTokens: number): ResponseItem | undefined {
-  if (item.type !== "message" || !Array.isArray(item.content)) return cloneResponseItem(item);
-  let remainingCharacters = Math.max(0, maxTokens * 4);
-  const content = item.content.flatMap((part) => {
-    if (part.type === "input_image") return [part];
-    if (remainingCharacters === 0) return [];
-    const text = part.text.slice(0, remainingCharacters);
-    remainingCharacters -= text.length;
-    return text ? [{ ...part, text }] : [];
-  });
-  return content.length > 0 ? { ...cloneResponseItem(item), content } : undefined;
-}
+  const artifactCount = value.filter(
+    (item) => item.type === "compaction" || item.type === "compaction_summary",
+  ).length;
+  if (artifactCount !== 1) return undefined;
 
-function truncateRetainedMessages(items: ResponseItem[], maxTokens: number): ResponseItem[] {
-  let remainingTokens = maxTokens;
-  const retainedReversed: ResponseItem[] = [];
-  for (const item of [...items].reverse()) {
-    if (remainingTokens === 0) break;
-    const tokenCount = approximateMessageTokens(item);
-    if (tokenCount <= remainingTokens) {
-      retainedReversed.push(cloneResponseItem(item));
-      remainingTokens -= tokenCount;
-      continue;
-    }
-    const truncated = truncateMessageToTokenBudget(item, remainingTokens);
-    if (truncated) retainedReversed.push(truncated);
-    remainingTokens = 0;
-  }
-  return retainedReversed.reverse();
+  return [cloneResponseItem(finalItem)];
 }
 
 export function buildRemoteCompactionV2History(
-  input: ResponseItem[],
+  _input: ResponseItem[],
   compactionItem: ResponseItem,
 ): ResponseItem[] {
-  if (compactionItem.type !== "compaction") {
-    throw new Error("OpenAI remote compaction v2 did not return a compaction item.");
+  if (!isValidRemoteCompactionV2Item(compactionItem)) {
+    throw new Error("OpenAI remote compaction v2 did not return a valid compaction item.");
   }
-  const retainedUserMessages = input.filter(
-    (item) => item.type === "message" && item.role === "user" && isRealUserMessage(item),
-  );
-  return [
-    ...truncateRetainedMessages(retainedUserMessages, RETAINED_MESSAGE_TOKEN_BUDGET),
-    cloneResponseItem(compactionItem),
-  ];
+  return [cloneResponseItem(compactionItem)];
 }
 
 function toolInfoToResponseTool(tool: ToolInfo): Record<string, unknown> {
@@ -707,14 +777,24 @@ export async function generatePortableSummary(params: {
     },
   );
 
+  if (response.stopReason === "aborted") {
+    throw new Error("Portable compaction summary was aborted.");
+  }
+  if (response.stopReason === "error") {
+    throw new Error(response.errorMessage ?? "Portable compaction summary failed.");
+  }
+
   const summary = response.content
     .filter((item): item is { type: "text"; text: string } => item.type === "text")
     .map((item) => item.text)
     .join("\n")
     .trim();
+  if (!summary) {
+    throw new Error("Portable compaction summary was empty.");
+  }
 
   return {
-    summary: summary || buildCompactionSummaryText(params.model),
+    summary,
     firstKeptEntryId: params.firstKeptEntryId,
     tokensBefore: params.tokensBefore,
   };
@@ -968,16 +1048,20 @@ export async function callRemoteCompactionEndpoint(params: {
 }
 
 export function buildRemoteCompactionDetails(
-  model: Model<any>,
+  model: Parameters<typeof modelKey>[0],
   replacementHistory: ResponseItem[],
   usage?: RemoteCompactionUsageSnapshot,
 ): RemoteCompactionDetails {
+  const canonicalHistory = canonicalizeRemoteCompactionV2History(replacementHistory);
+  if (!canonicalHistory) {
+    throw new Error("OpenAI remote compaction v2 replacement history is malformed.");
+  }
   return {
     version: 2,
     provider: "openai-responses-compaction",
     implementation: "responses_compaction_v2",
     modelKey: modelKey(model),
-    replacementHistory,
+    replacementHistory: canonicalHistory,
     ...(usage ? { usage } : {}),
   };
 }
@@ -994,8 +1078,10 @@ export function extractRemoteCompactionDetails(details: unknown):
   if (!isLegacy && !isV2) return undefined;
   if (!Array.isArray(remote.replacementHistory)) return undefined;
 
-  const replacementHistory = remote.replacementHistory.filter(isResponseItem);
-  if (replacementHistory.length === 0) return undefined;
+  const replacementHistory = isV2
+    ? canonicalizeRemoteCompactionV2History(remote.replacementHistory)
+    : remote.replacementHistory.filter(isResponseItem);
+  if (!replacementHistory || replacementHistory.length === 0) return undefined;
 
   const usage = parseRemoteCompactionUsageSnapshot(remote.usage);
 
@@ -1028,7 +1114,7 @@ function assistantMessageMatchesModelKey(
 }
 
 export function reconstructRemoteCompactionStateFromBranch(params: {
-  branchEntries: Array<{ type: string; id: string; details?: unknown; message?: AgentMessage }>;
+  branchEntries: RemoteCompactionBranchEntry[];
 }): RemoteCompactionSessionState | undefined {
   let latestCompactionIndex = -1;
   let latestCompactionEntryId = "";
@@ -1047,21 +1133,24 @@ export function reconstructRemoteCompactionStateFromBranch(params: {
   let pendingTurnItems: ResponseItem[] = [];
 
   for (const entry of params.branchEntries.slice(latestCompactionIndex + 1)) {
-    if (entry.type !== "message" || !entry.message) continue;
+    const messages = branchEntriesToAgentMessages([entry]);
+    for (const message of messages) {
+      const items = messageToResponseItems(message);
+      if (items.length === 0) continue;
 
-    const items = messageToResponseItems(entry.message);
-    if (items.length === 0) continue;
-
-    if (entry.message.role === "assistant") {
-      if (assistantMessageMatchesModelKey(entry.message, latestDetails.modelKey)) {
-        trailingMessages.push(...pendingTurnItems, ...items);
+      if (message.role === "assistant") {
+        if (assistantMessageMatchesModelKey(message, latestDetails.modelKey)) {
+          trailingMessages.push(...pendingTurnItems, ...items);
+        }
+        pendingTurnItems = [];
+        continue;
       }
-      pendingTurnItems = [];
-      continue;
-    }
 
-    pendingTurnItems.push(...items);
+      pendingTurnItems.push(...items);
+    }
   }
+
+  trailingMessages.push(...pendingTurnItems);
 
   return {
     compactionEntryId: latestCompactionEntryId,
@@ -1069,9 +1158,4 @@ export function reconstructRemoteCompactionStateFromBranch(params: {
     replacementHistory: latestDetails.replacementHistory,
     explicitHistory: [...latestDetails.replacementHistory, ...trailingMessages],
   };
-}
-
-export function buildCompactionSummaryText(model: Model<any>): string {
-  const host = hostnameFromBaseUrl(model.baseUrl) ?? "api.openai.com";
-  return `OpenAI remote compaction applied for ${model.provider}/${model.id} via ${host}. Pi keeps this textual summary for portability, while compatible future OpenAI turns can use provider-native replacement history stored in compaction details.`;
 }

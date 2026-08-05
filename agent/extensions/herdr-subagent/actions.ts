@@ -43,6 +43,7 @@ import {
 	updateEntryHints,
 } from "./store";
 import { deleteRuntimeFiles, writeRuntimeFile } from "./runtime-files";
+import { readSubagentCompletionArm, writeSubagentCompletionArm } from "./subagent-rpc";
 import * as SubagentName from "./subagent-name";
 import {
 	cleanupWorktree,
@@ -68,6 +69,8 @@ type HerdrActionRequirements = ChildProcessSpawner | FileSystem | Path;
 
 interface HerdrActionEnvironment {
 	readonly resultSocketPath?: string;
+	readonly completionArmId?: string;
+	readonly onCompletionArmPrepared?: (resolved: ResolvedPane, armId: string) => void;
 }
 
 const DEFAULT_INSPECT_LINES = 120;
@@ -440,6 +443,12 @@ const commandSpawn: (
 			}
 			commandParts.push(`@${taskFile}`);
 			const command = commandParts.map(shellQuote).join(" ");
+			if (environment.completionArmId) {
+				const armed = yield* writeSubagentCompletionArm(name, environment.completionArmId);
+				if (!armed) {
+					return yield* failAction(`Could not arm direct result delivery for ${name}.`);
+				}
+			}
 			yield* runHerdr(["pane", "run", paneId, command]);
 
 			const createdAt = yield* nowIso;
@@ -521,15 +530,34 @@ const commandInspect: (
 
 const commandSend: (
 	params: HerdrSubagentParams,
+	environment: HerdrActionEnvironment,
 ) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
-	function* (params) {
+	function* (params, environment) {
 		const target = requireTarget(params);
 		if (!target || !params.message) {
 			return yield* failAction("send requires target/name and message.");
 		}
 		const entries = yield* listEntries;
 		const resolved = yield* resolvePane(target, entries);
-		yield* runHerdr(["pane", "run", resolved.paneId, params.message]);
+		const previousArmId = environment.completionArmId
+			? yield* readSubagentCompletionArm(resolved.name)
+			: undefined;
+		if (environment.completionArmId) {
+			environment.onCompletionArmPrepared?.(resolved, environment.completionArmId);
+			const armed = yield* writeSubagentCompletionArm(resolved.name, environment.completionArmId);
+			if (!armed) {
+				return yield* failAction(`Could not arm direct result delivery for ${resolved.name}.`);
+			}
+		}
+		const sendResult = yield* runHerdr(["pane", "run", resolved.paneId, params.message]).pipe(
+			Effect.result,
+		);
+		if (Result.isFailure(sendResult)) {
+			if (environment.completionArmId) {
+				yield* writeSubagentCompletionArm(resolved.name, previousArmId ?? "");
+			}
+			return yield* Effect.fail(sendResult.failure);
+		}
 		return {
 			content: [textContent(`Sent message to ${resolved.name} (${resolved.paneId}).`)],
 			details: { action: "send", resolved },
@@ -753,7 +781,7 @@ const runAction = (
 		case "inspect":
 			return commandInspect(params);
 		case "send":
-			return commandSend(params);
+			return commandSend(params, environment);
 		case "wait":
 			return commandWait(params);
 		case "focus":

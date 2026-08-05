@@ -4,7 +4,7 @@
  * Wires together request patching, remote compaction, runtime state
  * reconstruction, session lifecycle cleanup, and provider override registration.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { isRecord, loadConfig } from "./config.ts";
 import { streamOpenAIResponsesWithPhase2B } from "./custom-stream.ts";
@@ -24,7 +24,7 @@ import {
 } from "./openai.ts";
 import { releaseAllWsSessions, releaseWsSession } from "./openai-ws-stream.ts";
 import {
-  buildCompactionSummaryText,
+  branchEntriesToAgentMessages,
   buildRemoteCompactionDetails,
   buildToolsPayload,
   callRemoteCompactionEndpoint,
@@ -33,6 +33,8 @@ import {
   messagesToResponseItems,
   normalizeResponseItemsForPrompt,
   reconstructRemoteCompactionStateFromBranch,
+  type RemoteCompactionBranchEntry,
+  type RemoteCompactionResult,
 } from "./remote-compaction.ts";
 import {
   clearAllContinuationState,
@@ -49,11 +51,55 @@ import {
 
 type TargetModel = Parameters<typeof modelKey>[0];
 
-type BranchEntry = {
-  type: string;
-  id: string;
-  details?: unknown;
-  message?: unknown;
+function settledFailureMessage(
+  operation: string,
+  result: PromiseSettledResult<unknown>,
+): string | undefined {
+  if (result.status === "fulfilled") return undefined;
+  const detail = result.reason instanceof Error ? result.reason.message : String(result.reason);
+  return `${operation} failed: ${detail}`;
+}
+
+/**
+ * Resolve parallel portable and remote compaction attempts into one atomic Pi result.
+ *
+ * @param params - The model and settled compaction operations.
+ * @returns Hybrid state, portable-only state, or `undefined` so Pi runs native compaction.
+ */
+export function resolveHybridCompactionResults(params: {
+  model: TargetModel;
+  localResult: PromiseSettledResult<CompactionResult>;
+  remoteResult: PromiseSettledResult<RemoteCompactionResult>;
+}): { compaction: CompactionResult } | undefined {
+  if (
+    params.localResult.status !== "fulfilled" ||
+    !params.localResult.value.summary.trim()
+  ) {
+    return undefined;
+  }
+
+  if (params.remoteResult.status !== "fulfilled") {
+    return { compaction: params.localResult.value };
+  }
+
+  const localSummary = params.localResult.value;
+  const remoteDetails = buildRemoteCompactionDetails(
+    params.model,
+    params.remoteResult.value.output,
+    params.remoteResult.value.usage,
+  );
+  return {
+    compaction: {
+      ...localSummary,
+      details: {
+        ...(localSummary.details !== undefined ? { localSummaryDetails: localSummary.details } : {}),
+        remoteCompaction: remoteDetails,
+      },
+    },
+  };
+}
+
+type BranchEntry = RemoteCompactionBranchEntry & {
   thinkingLevel?: unknown;
 };
 
@@ -61,6 +107,7 @@ type SessionContextLike = {
   sessionManager: {
     getSessionId(): string;
     getBranch(): BranchEntry[];
+    buildContextEntries(): BranchEntry[];
   };
 };
 
@@ -68,14 +115,14 @@ function getSessionId(ctx: SessionContextLike): string {
   return ctx.sessionManager.getSessionId();
 }
 
-function getBranchMessages(branchEntries: BranchEntry[]): AgentMessage[] {
-  return branchEntries.flatMap((entry) =>
-    entry.type === "message" && entry.message ? [entry.message as AgentMessage] : [],
+function getFullBranchMessages(branchEntries: BranchEntry[]): AgentMessage[] {
+  return branchEntriesToAgentMessages(
+    branchEntries.filter((entry) => entry.type !== "compaction"),
   );
 }
 
-function getBranchMessageCount(branchEntries: BranchEntry[]): number {
-  return branchEntries.filter((entry) => entry.type === "message" && Boolean(entry.message)).length;
+function getContextMessageCount(ctx: SessionContextLike): number {
+  return branchEntriesToAgentMessages(ctx.sessionManager.buildContextEntries()).length;
 }
 
 function getBranchThinkingLevel(branchEntries: BranchEntry[]): string | undefined {
@@ -100,12 +147,7 @@ function clearSessionRuntimeState(sessionId: string | undefined): void {
 
 function syncRemoteState(ctx: SessionContextLike): void {
   const sessionId = getSessionId(ctx);
-  const branchEntries = ctx.sessionManager.getBranch() as Array<{
-    type: string;
-    id: string;
-    details?: unknown;
-    message?: AgentMessage;
-  }>;
+  const branchEntries = ctx.sessionManager.getBranch();
   const state = reconstructRemoteCompactionStateFromBranch({ branchEntries });
   if (state) {
     setRemoteCompactionState(sessionId, state);
@@ -212,7 +254,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     const branchEntries = event.branchEntries as BranchEntry[];
     const remoteState = getMatchingRemoteState(sessionId, model);
     const observedRequestShape = getResponsesRequestShapeState(sessionId);
-    const fullBranchMessages = getBranchMessages(branchEntries);
+    const fullBranchMessages = getFullBranchMessages(branchEntries);
     const responseItems = remoteState
       ? remoteState.explicitHistory
       : messagesToResponseItems(fullBranchMessages);
@@ -252,42 +294,28 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       }),
     ]);
 
-    if (remoteResult.status !== "fulfilled") {
-      if (localResult.status === "fulfilled") {
-        return { compaction: localResult.value };
-      }
-      if (!event.signal.aborted && ctx.hasUI) {
-        const message = remoteResult.reason instanceof Error ? remoteResult.reason.message : String(remoteResult.reason);
-        ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
-      }
-      return undefined;
-    }
-
-    const remoteDetails = buildRemoteCompactionDetails(
+    const resolved = resolveHybridCompactionResults({
       model,
-      remoteResult.value.output,
-      remoteResult.value.usage,
-    );
-    const localSummary =
-      localResult.status === "fulfilled"
-        ? localResult.value
-        : {
-            summary: buildCompactionSummaryText(model),
-            firstKeptEntryId: event.preparation.firstKeptEntryId,
-            tokensBefore: event.preparation.tokensBefore,
-          };
+      localResult,
+      remoteResult,
+    });
+    if (resolved) return resolved;
 
-    return {
-      compaction: {
-        summary: localSummary.summary,
-        firstKeptEntryId: localSummary.firstKeptEntryId,
-        tokensBefore: localSummary.tokensBefore,
-        details: {
-          ...(localSummary.details !== undefined ? { localSummaryDetails: localSummary.details } : {}),
-          remoteCompaction: remoteDetails,
-        },
-      },
-    };
+    if (!event.signal.aborted && ctx.hasUI) {
+      const failureDetails = [
+        settledFailureMessage("Portable summary", localResult) ??
+          (localResult.status === "fulfilled" && !localResult.value.summary.trim()
+            ? "Portable summary was empty."
+            : undefined),
+        settledFailureMessage("Remote compaction", remoteResult),
+      ].filter((message): message is string => message !== undefined);
+      const detailSuffix = failureDetails.length > 0 ? ` ${failureDetails.join(" ")}` : "";
+      ctx.ui.notify(
+        `OpenAI compaction did not produce a portable summary; falling back to default compaction.${detailSuffix}`,
+        "warning",
+      );
+    }
+    return undefined;
   });
 
   pi.on("message_end", (event, ctx) => {
@@ -311,7 +339,8 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       responseId,
       modelKey: modelKey(model),
       updatedAt: Date.now(),
-      contextLength: getBranchMessageCount(ctx.sessionManager.getBranch() as BranchEntry[]),
+      // Pi emits message_end extensions before it appends the current assistant entry.
+      contextLength: getContextMessageCount(ctx) + 1,
     });
   });
 
@@ -323,6 +352,9 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     if (!model || !isRecord(event.payload) || !looksLikeResponsesPayload(event.payload)) return undefined;
 
     const sessionId = getSessionId(ctx);
+    // Custom messages do not emit message_end. Rebuild from the authoritative Pi branch before
+    // replacing provider input so a just-injected follow-up participates in this exact request.
+    syncRemoteState(ctx);
     setResponsesRequestShapeState(sessionId, {
       updatedAt: Date.now(),
       reasoning: extractResponsesReasoningConfig(event.payload),

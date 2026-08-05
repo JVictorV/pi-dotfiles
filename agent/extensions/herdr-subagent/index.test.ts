@@ -1,4 +1,14 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+	access,
+	mkdir,
+	mkdtemp,
+	readFile,
+	readdir,
+	rm,
+	stat,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import * as path from "node:path";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -21,7 +31,14 @@ import {
 import type { ModelRegistryForResolution, ResolvableModelEntry } from "./model-resolver";
 import { createSubagentNotificationManager } from "./notifications";
 import { decodeRegistryEntry } from "./schemas";
-import { notifySubagentFinished, startSubagentRpcServer } from "./subagent-rpc";
+import {
+	notifySubagentFinished,
+	readSubagentCompletionArm,
+	SubagentCompletionDeliveryFailed,
+	startSubagentRpcServer,
+	takePersistedSubagentCompletion,
+	writeSubagentCompletionArm,
+} from "./subagent-rpc";
 
 afterEach(cleanupHarness);
 
@@ -307,17 +324,16 @@ describe("herdr_subagent extension", () => {
 		expect(command).toContain("openai-codex/gpt-5.6-sol");
 	});
 
-	test("spawn arms a watcher that sends a follow-up result envelope with pane tail", async () => {
+	test("spawn uses the settled outbox when the live result socket is unavailable", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
-		await installFakeHerdr(root);
+		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
-		// Realistic pickup: the watcher must observe a working phase before trusting done.
 		const statusSequence = path.join(root, "status-sequence.txt");
-		await writeFile(statusSequence, "working\ndone\n", "utf8");
+		await writeFile(statusSequence, "working\ndone\nworking\n", "utf8");
 		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
-		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const loaded = await loadToolWithFakePi(agentDir);
 
 		await loaded.tool.execute(
@@ -333,11 +349,33 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 2_500);
+		});
+		expect(loaded.sentMessages).toHaveLength(0);
+
+		const create = tabCreateCalls(await readHerdrCalls(log))[0];
+		const socketArg = resultSocketArg(create);
+		expect(socketArg).toBeDefined();
+		const socketPath = socketArg?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+		expect(armId).toMatch(/^[0-9a-f-]{36}$/u);
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "the final settled result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				armId,
+			}),
+		);
+
 		await vi.waitFor(
 			() => {
 				expect(loaded.sentMessages).toHaveLength(1);
 			},
-			{ timeout: 6_000, interval: 50 },
+			{ timeout: 3_000, interval: 50 },
 		);
 		const delivered = loaded.sentMessages[0];
 		const content = firstMessageContent(delivered?.message);
@@ -348,9 +386,12 @@ describe("herdr_subagent extension", () => {
 		expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
 		expect(content).toContain("Subagent worker-a finished");
 		expect(content).toContain("Implement the focused change");
-		expect(content).toContain("STATUS: done");
-		expect(content).toContain("All good.");
-	});
+		expect(content).toContain("the final settled result");
+		expect(content).toContain(
+			'<required_action tool="herdr_subagent" action="inspect" target="worker-a" pane="wTest:p1">',
+		);
+		expect(content).toContain("Do not stop after only acknowledging this notification.");
+	}, 8_000);
 
 	test("blocked watcher notifications distinguish attention-needed state", async () => {
 		const root = await makeTempRoot();
@@ -445,11 +486,11 @@ describe("herdr_subagent extension", () => {
 		expect(loaded.sentMessages).toHaveLength(0);
 	});
 
-	test("send replaces a live watcher and delivers exactly one notification", async () => {
+	test("send replaces a live watcher and delivers exactly one settled result", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
-		await installFakeHerdr(root);
+		const { log } = await installFakeHerdr(root);
 		setEnv("HERDR_ENV", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const loaded = await loadToolWithFakePi(agentDir);
@@ -461,13 +502,6 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
-		// Realistic post-send pickup: the re-armed watcher sees the new turn working, then done.
-		// Padded with a second working entry because the about-to-be-replaced spawn watcher may
-		// legitimately consume one sequence entry before the send re-arms.
-		const statusSequence = path.join(root, "status-sequence.txt");
-		await writeFile(statusSequence, "working\nworking\ndone\n", "utf8");
-		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
-		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
 		await loaded.tool.execute(
 			"tool-call-send",
 			{ action: "send", target: "worker-a", message: "Follow-up after spawn." },
@@ -476,20 +510,34 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
+		const create = tabCreateCalls(await readHerdrCalls(log))[0];
+		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "the settled follow-up result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				armId,
+			}),
+		);
+
 		await vi.waitFor(
 			() => {
 				expect(loaded.sentMessages).toHaveLength(1);
 			},
-			{ timeout: 6_000, interval: 50 },
+			{ timeout: 4_000, interval: 50 },
 		);
-		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
-			"Follow-up after spawn.",
-		);
+		const content = firstMessageContent(loaded.sentMessages[0]?.message);
+		expect(content).toContain("Follow-up after spawn.");
+		expect(content).toContain("the settled follow-up result");
 		await new Promise<void>((resolve) => {
 			setTimeout(resolve, 2_200);
 		});
 		expect(loaded.sentMessages).toHaveLength(1);
-	}, 12_000);
+	}, 8_000);
 
 	test("send re-arm distrusts the previous turn's leftover done status", async () => {
 		const root = await makeTempRoot();
@@ -525,6 +573,117 @@ describe("herdr_subagent extension", () => {
 		});
 		expect(loaded.sentMessages).toHaveLength(0);
 	}, 10_000);
+
+	test("a direct RPC watcher ignores transient done until the settled result arrives", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "working\ndone\nworking\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		try {
+			const directNotification = {
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "Task A.",
+				completionSource: "rpc" as const,
+			};
+			manager.arm(directNotification);
+
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 2_500);
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "the settled result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain("the settled result");
+		} finally {
+			manager.cancelAll();
+		}
+	}, 8_000);
+
+	test("send to a live pane does not trust transient terminal status", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const statusSequence = path.join(root, "status-sequence.txt");
+		// Pane resolution consumes the first status. The watcher then sees working, done, working.
+		await writeFile(statusSequence, "working\nworking\ndone\nworking\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		const sendResult = await loaded.tool.execute(
+			"tool-call-send",
+			{ action: "send", target: "wTest:p1", message: "Follow-up to live pane." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		expect(sendResult.content.at(-1)?.text).toContain(
+			"Automatic settled-result delivery is unavailable",
+		);
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 2_500);
+		});
+
+		expect(loaded.sentMessages).toHaveLength(0);
+	}, 8_000);
+
+	test("a direct RPC watcher still reports a blocked subagent", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const statusSequence = path.join(root, "status-sequence.txt");
+		await writeFile(statusSequence, "working\nblocked\n", "utf8");
+		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
+		setEnv("FAKE_HERDR_AGENT_STATUS", "blocked");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		try {
+			const directNotification = {
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "Task A.",
+				completionSource: "rpc" as const,
+			};
+			manager.arm(directNotification);
+
+			await vi.waitFor(
+				() => {
+					expect(sentMessages).toHaveLength(1);
+				},
+				{ timeout: 5_000, interval: 50 },
+			);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain('state="blocked"');
+		} finally {
+			manager.cancelAll();
+		}
+	}, 8_000);
 
 	test("session shutdown cancels pending watchers", async () => {
 		const root = await makeTempRoot();
@@ -601,6 +760,231 @@ describe("herdr_subagent extension", () => {
 			expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
 			expect(content).toContain("solo result");
 			expect(content).not.toContain("<subagent_result_group");
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("a fast new settlement is buffered while the previous watcher is still armed", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "old action",
+				expectedArmId: "arm-old",
+				acceptResultsSinceMs: 0,
+			});
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "fast new result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-new",
+				armId: "arm-new",
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "new action",
+				expectedArmId: "arm-new",
+				acceptResultsSinceMs: 0,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain("fast new result");
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("a late previous settlement cannot consume a newly armed action", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "new action",
+				expectedArmId: "arm-new",
+				acceptResultsSinceMs: 0,
+			});
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "previous result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-old",
+				armId: "arm-old",
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "new result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-new",
+				armId: "arm-new",
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain("new result");
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("a watcher accepts the arm from a send whose CLI response failed", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "original action",
+				expectedArmId: "arm-original",
+				acceptResultsSinceMs: 0,
+			});
+			manager.acceptArm("worker-a", "arm-attempted");
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "the attempted send was accepted",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-attempted",
+				armId: "arm-attempted",
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain(
+				"the attempted send was accepted",
+			);
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("distinct settlements with the same report each notify exactly once", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "same final report",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-1",
+			});
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task B." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "same final report",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-2",
+			});
+
+			expect(sentMessages).toHaveLength(2);
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("a repeated completion id is dropped without consuming the fresh watcher", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "first report",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-1",
+			});
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task B." });
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "first report",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-1",
+			});
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "second report",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-2",
+			});
+
+			expect(sentMessages).toHaveLength(2);
+			expect(firstMessageContent(sentMessages[1]?.message)).toContain("second report");
+		} finally {
+			manager.cancelAll();
+		}
+	});
+
+	test("a completion that arrives before arm is delivered after the reservation attaches", () => {
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.beginBatchMember("worker-a");
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "fast result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-fast",
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.arm({
+				name: "worker-a",
+				paneId: "wTest:p1",
+				summarySource: "Task A.",
+				acceptResultsSinceMs: 0,
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain("fast result");
 		} finally {
 			manager.cancelAll();
 		}
@@ -798,6 +1182,47 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
+	test("cancel removes a completed member that is waiting for its group", () => {
+		vi.useFakeTimers();
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			neverResolvingRunPromise,
+		);
+		try {
+			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "Task A." });
+			manager.arm({ name: "worker-b", paneId: "wTest:p2", summarySource: "Task B." });
+			vi.advanceTimersByTime(150);
+			manager.deliverExternal("worker-a", {
+				status: "done",
+				finalMessage: "result A",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-a",
+			});
+			expect(sentMessages).toHaveLength(0);
+
+			manager.cancel("worker-a");
+			manager.deliverExternal("worker-b", {
+				status: "done",
+				finalMessage: "result B",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-b",
+			});
+
+			expect(sentMessages).toHaveLength(1);
+			const content = firstMessageContent(sentMessages[0]?.message);
+			expect(content).toContain("result B");
+			expect(content).not.toContain("result A");
+		} finally {
+			manager.cancelAll();
+			vi.useRealTimers();
+		}
+	});
+
 	test("stale RPC after re-arm is dropped and the fresh watcher remains armed", async () => {
 		const root = await makeTempRoot();
 		await installFakeHerdr(root);
@@ -835,6 +1260,91 @@ describe("herdr_subagent extension", () => {
 			expect(content).not.toContain("old result");
 		} finally {
 			manager.cancelAll();
+		}
+	}, 8_000);
+
+	test("a subagent sends only the final assistant report after Pi settles", async () => {
+		const root = await makeTempRoot();
+		const socketPath = path.join(root, "result.sock");
+		const received: Array<{
+			readonly finalMessage: string;
+			readonly status: string;
+			readonly armId?: string;
+		}> = [];
+		const server = await runHerdrSubagentEffect(
+			startSubagentRpcServer({
+				socketPath,
+				onFinished(payload) {
+					received.push({
+						finalMessage: payload.finalMessage,
+						status: payload.status,
+						armId: payload.armId,
+					});
+				},
+			}),
+		);
+		try {
+			setEnv("HERDR_ENV", "1");
+			setSubagentSession("worker-a");
+			setEnv("HERDR_SUBAGENT_RESULT_SOCK", socketPath);
+			const loaded = await loadToolWithFakePi(path.join(root, "agent"));
+			const assistantMessage = (text: string, stopReason: "length" | "stop") => ({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				stopReason,
+			});
+
+			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-length"));
+			await loaded.dispatchAsync("agent_start");
+			loaded.dispatch("agent_end", {
+				messages: [assistantMessage("premature length-limited report", "length")],
+			});
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 200);
+			});
+			expect(received).toHaveLength(0);
+
+			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-done"));
+			await loaded.dispatchAsync("agent_start");
+			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-steered"));
+			await loaded.dispatchAsync("input", { source: "interactive", text: "steer" });
+			const doneReport = "STATUS: blocked\nSTATUS: done";
+			loaded.dispatch("agent_end", {
+				messages: [assistantMessage(doneReport, "stop")],
+			});
+			expect(received).toHaveLength(0);
+
+			loaded.dispatch("agent_settled");
+			await vi.waitFor(
+				() => {
+					expect(received).toEqual([
+						{ finalMessage: doneReport, status: "done", armId: "arm-steered" },
+					]);
+				},
+				{ timeout: 1_500, interval: 10 },
+			);
+
+			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-blocked"));
+			await loaded.dispatchAsync("agent_start");
+			loaded.dispatch("agent_end", {
+				messages: [assistantMessage("STATUS: blocked\nI need a credential.", "stop")],
+			});
+			loaded.dispatch("agent_settled");
+			await vi.waitFor(
+				() => {
+					expect(received).toEqual([
+						{ finalMessage: doneReport, status: "done", armId: "arm-steered" },
+						{
+							finalMessage: "STATUS: blocked\nI need a credential.",
+							status: "blocked",
+							armId: "arm-blocked",
+						},
+					]);
+				},
+				{ timeout: 1_500, interval: 10 },
+			);
+		} finally {
+			await server.close();
 		}
 	}, 8_000);
 
@@ -903,7 +1413,7 @@ describe("herdr_subagent extension", () => {
 		}
 	}, 8_000);
 
-	test("RPC result delivery without an armed watcher is dropped", async () => {
+	test("RPC result delivery without an armed watcher does not notify", async () => {
 		const root = await makeTempRoot();
 		const socketPath = path.join(root, "result.sock");
 		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
@@ -940,12 +1450,92 @@ describe("herdr_subagent extension", () => {
 
 			expect(sentMessages).toHaveLength(0);
 		} finally {
+			manager.cancelAll();
 			await server.close();
 		}
 	});
 
+	test("a failed result RPC falls back to the durable settled result", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("PI_CODING_AGENT_DIR", path.join(root, "agent"));
+		setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+		const manager = createSubagentNotificationManager(
+			{
+				sendMessage(message, options) {
+					sentMessages.push({ message, options });
+				},
+			},
+			(effect) => runHerdrSubagentEffect(effect),
+		);
+		try {
+			manager.arm({
+				name: "worker-durable",
+				paneId: "wTest:p1",
+				summarySource: "Task A.",
+				completionSource: "rpc",
+				acceptResultsSinceMs: 0,
+			});
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath: path.join(root, "missing.sock"),
+					name: "worker-durable",
+					status: "done",
+					finalMessage: "durable fallback result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+					completionId: "completion-durable",
+				}),
+			);
+			const completionDir = path.join(root, "agent", "herdr-subagents", "completion");
+			const completionFile = (await readdir(completionDir)).find(
+				(fileName) => fileName.startsWith("v2-worker-durable-") && fileName.endsWith(".json"),
+			);
+			expect(completionFile).toBeDefined();
+			expect(modeBits((await stat(completionDir)).mode)).toBe(0o700);
+			if (completionFile) {
+				expect(modeBits((await stat(path.join(completionDir, completionFile))).mode)).toBe(0o600);
+			}
+
+			await vi.waitFor(
+				() => {
+					expect(sentMessages).toHaveLength(1);
+				},
+				{ timeout: 5_000, interval: 50 },
+			);
+			expect(firstMessageContent(sentMessages[0]?.message)).toContain("durable fallback result");
+		} finally {
+			manager.cancelAll();
+		}
+	}, 8_000);
+
+	test("durable fallback retains more than one undelivered settlement", async () => {
+		const root = await makeTempRoot();
+		setEnv("PI_CODING_AGENT_DIR", path.join(root, "agent"));
+		for (const [index, completionId] of ["completion-1", "completion-2"].entries()) {
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath: path.join(root, "missing.sock"),
+					name: "worker-queued",
+					status: "done",
+					finalMessage: `result ${index + 1}`,
+					sentAtMs: index + 1,
+					completionId,
+				}),
+			);
+		}
+
+		const first = await runHerdrSubagentEffect(takePersistedSubagentCompletion("worker-queued"));
+		const second = await runHerdrSubagentEffect(takePersistedSubagentCompletion("worker-queued"));
+
+		expect(first?.completionId).toBe("completion-1");
+		expect(second?.completionId).toBe("completion-2");
+	});
+
 	test("RPC client degrades quickly when the orchestrator socket is unavailable", async () => {
 		const root = await makeTempRoot();
+		setEnv("PI_CODING_AGENT_DIR", path.join(root, "agent"));
 		const outcome = await Promise.race([
 			runHerdrSubagentEffect(
 				notifySubagentFinished({
@@ -962,6 +1552,27 @@ describe("herdr_subagent extension", () => {
 		]);
 
 		expect(outcome).toBe("resolved");
+	});
+
+	test("completion delivery fails when neither RPC nor durable persistence succeeds", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		setEnv("PI_CODING_AGENT_DIR", agentDir);
+		const runtimeDir = path.join(agentDir, "herdr-subagents");
+		await mkdir(runtimeDir, { recursive: true });
+		await writeFile(path.join(runtimeDir, "completion"), "not a directory", "utf8");
+
+		await expect(
+			runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath: path.join(root, "missing.sock"),
+					name: "worker-undelivered",
+					status: "done",
+					finalMessage: "the undeliverable result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+				}),
+			),
+		).rejects.toBeInstanceOf(SubagentCompletionDeliveryFailed);
 	});
 
 	test("server close after restart does not unlink the new server socket", async () => {
@@ -1005,6 +1616,45 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
+	test("starting another RPC server preserves an old active socket", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-rpc-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			setEnv("PI_CODING_AGENT_DIR", agentDir);
+			let received = 0;
+			const first = await runHerdrSubagentEffect(
+				startSubagentRpcServer({
+					onFinished() {
+						received += 1;
+					},
+				}),
+			);
+			const oldTimestamp = new Date("2000-01-01T00:00:00.000Z");
+			await utimes(first.socketPath, oldTimestamp, oldTimestamp);
+			const second = await runHerdrSubagentEffect(startSubagentRpcServer({ onFinished() {} }));
+			try {
+				await access(first.socketPath);
+				await runHerdrSubagentEffect(
+					notifySubagentFinished({
+						socketPath: first.socketPath,
+						name: "worker-a",
+						status: "done",
+						finalMessage: "still connected",
+						sentAtMs: TEST_FRESH_SENT_AT_MS,
+					}),
+				);
+				await vi.waitFor(() => {
+					expect(received).toBe(1);
+				});
+			} finally {
+				await first.close();
+				await second.close();
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("RPC directory and socket permissions are owner-only", async () => {
 		const root = await mkdtemp(path.join("/tmp", "pi-hsa-rpc-"));
 		try {
@@ -1022,7 +1672,7 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
-	test("spawn passes the RPC result socket only after the server is available", async () => {
+	test("spawn passes a durable fallback path before the live RPC server is available", async () => {
 		const root = await mkdtemp(path.join("/tmp", "pi-hsa-"));
 		try {
 			const agentDir = path.join(root, "agent");
@@ -1034,7 +1684,13 @@ describe("herdr_subagent extension", () => {
 
 			await loaded.tool.execute(
 				"tool-call-no-rpc",
-				{ action: "spawn", name: "worker-a", agentType: "worker", task: "Task A." },
+				{
+					action: "spawn",
+					name: "worker-a",
+					agentType: "worker",
+					task: "Task A.",
+					notify: false,
+				},
 				undefined,
 				undefined,
 				makeContext("/workspace"),
@@ -1062,15 +1718,295 @@ describe("herdr_subagent extension", () => {
 
 			const creates = tabCreateCalls(await readHerdrCalls(log));
 			expect(creates).toHaveLength(2);
-			expect(resultSocketArg(creates[0])).toBeUndefined();
+			const fallbackSocketArg = resultSocketArg(creates[0]);
+			expect(fallbackSocketArg).toBeDefined();
 			const socketArg = resultSocketArg(creates[1]);
 			expect(socketArg).toBeDefined();
+			expect(socketArg).not.toBe(fallbackSocketArg);
 			const socketPath = socketArg?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
 			await access(socketPath);
+			const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-b"));
+			expect(armId).toMatch(/^[0-9a-f-]{36}$/u);
+
+			setEnv("FAKE_HERDR_AGENT_STATUS", "done");
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 2_500);
+			});
+			expect(loaded.sentMessages).toHaveLength(0);
+
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath,
+					name: "worker-b",
+					status: "done",
+					finalMessage: "the settled direct result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+					armId,
+				}),
+			);
+			await vi.waitFor(
+				() => {
+					expect(loaded.sentMessages).toHaveLength(1);
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+			expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
+				"the settled direct result",
+			);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
 	}, 8_000);
+
+	test("concurrent sends preserve the completion arm for the last follow-up", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-send-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+			const { log } = await installFakeHerdr(root);
+			setEnv("HERDR_ENV", "1");
+			setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+			const loaded = await loadToolWithFakePi(agentDir);
+			loaded.dispatch("session_start", { type: "session_start" }, { mode: "print", hasUI: false });
+
+			const rpcDir = path.join(agentDir, "herdr-subagents", "rpc");
+			let socketPath = "";
+			await vi.waitFor(
+				async () => {
+					const socketName = (await readdir(rpcDir)).find(
+						(name) => name.startsWith("v1-") && name.endsWith(".sock"),
+					);
+					expect(socketName).toBeDefined();
+					if (socketName) {
+						socketPath = path.join(rpcDir, socketName);
+					}
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+
+			await loaded.tool.execute(
+				"tool-call-spawn",
+				{
+					action: "spawn",
+					name: "worker-a",
+					agentType: "worker",
+					task: "Initial task.",
+					notify: false,
+				},
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+
+			setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", "message A");
+			setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", "250");
+			const sendA = loaded.tool.execute(
+				"tool-call-send-a",
+				{ action: "send", target: "worker-a", message: "message A" },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+			await vi.waitFor(
+				async () => {
+					const calls = await readHerdrCalls(log);
+					expect(calls.some((args) => args[0] === "pane" && args[3] === "message A")).toBe(true);
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+			const sendB = loaded.tool.execute(
+				"tool-call-send-b",
+				{ action: "send", target: "worker-a", message: "message B" },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+			await Promise.all([sendA, sendB]);
+
+			const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+			expect(armId).toMatch(/^[0-9a-f-]{36}$/u);
+			await runHerdrSubagentEffect(
+				notifySubagentFinished({
+					socketPath,
+					name: "worker-a",
+					status: "done",
+					finalMessage: "the final concurrent-send result",
+					sentAtMs: TEST_FRESH_SENT_AT_MS,
+					armId,
+				}),
+			);
+
+			await vi.waitFor(
+				() => {
+					expect(loaded.sentMessages).toHaveLength(1);
+				},
+				{ timeout: 1_000, interval: 10 },
+			);
+			expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
+				"the final concurrent-send result",
+			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 8_000);
+
+	test("a fast completion on an existing watcher is not re-armed after send success", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call-spawn",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Initial task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const originalArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+		const create = tabCreateCalls(await readHerdrCalls(log))[0];
+		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+
+		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", "fast follow-up");
+		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", "3000");
+		const send = loaded.tool.execute(
+			"tool-call-send",
+			{ action: "send", target: "worker-a", message: "fast follow-up" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		let attemptedArmId: string | undefined;
+		await vi.waitFor(
+			async () => {
+				attemptedArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+				expect(attemptedArmId).not.toBe(originalArmId);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "fast send result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS + 1,
+				completionId: "completion-fast",
+				armId: attemptedArmId,
+			}),
+		);
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 2_500, interval: 25 },
+		);
+		await send;
+
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "unrelated later result",
+				sentAtMs: TEST_FRESH_SENT_AT_MS + 2,
+				completionId: "completion-later",
+				armId: attemptedArmId,
+			}),
+		);
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, 200);
+		});
+		expect(loaded.sentMessages).toHaveLength(1);
+		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain("fast send result");
+	}, 10_000);
+
+	test("an ambiguous failed send preserves its provisional watcher and restores the arm file", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+		const loaded = await loadToolWithFakePi(agentDir);
+
+		await loaded.tool.execute(
+			"tool-call-spawn",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Initial task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const previousArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+		expect(previousArmId).toMatch(/^[0-9a-f-]{36}$/u);
+		const create = tabCreateCalls(await readHerdrCalls(log))[0];
+		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "the original turn settled",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				completionId: "completion-original",
+				armId: previousArmId,
+			}),
+		);
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 3_000, interval: 50 },
+		);
+		loaded.sentMessages.splice(0);
+
+		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", "message accepted before failure");
+		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", "250");
+		setEnv("FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY", "1");
+		const failedSend = loaded.tool.execute(
+			"tool-call-send",
+			{ action: "send", target: "worker-a", message: "message accepted before failure" },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		let attemptedArmId: string | undefined;
+		await vi.waitFor(
+			async () => {
+				attemptedArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
+				expect(attemptedArmId).toMatch(/^[0-9a-f-]{36}$/u);
+				expect(attemptedArmId).not.toBe(previousArmId);
+			},
+			{ timeout: 1_000, interval: 10 },
+		);
+		await expect(failedSend).rejects.toThrow(/pane run failed after input/u);
+		setEnv("FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY", undefined);
+		expect(await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"))).toBe(previousArmId);
+
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "worker-a",
+				status: "done",
+				finalMessage: "the attempted send settled",
+				sentAtMs: TEST_FRESH_SENT_AT_MS + 1,
+				completionId: "completion-attempted",
+				armId: attemptedArmId,
+			}),
+		);
+		await vi.waitFor(
+			() => {
+				expect(loaded.sentMessages).toHaveLength(1);
+			},
+			{ timeout: 3_000, interval: 50 },
+		);
+		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
+			"the attempted send settled",
+		);
+	}, 10_000);
 
 	test("RPC server unlinks a stale socket file before listening", async () => {
 		const root = await makeTempRoot();

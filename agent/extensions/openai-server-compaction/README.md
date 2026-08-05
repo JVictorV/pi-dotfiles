@@ -2,7 +2,7 @@
 
 Vendored copy of the TypeScript extension from [`algal/pi-openai-server-compaction`](../../../.repos/pi-openai-server-compaction). The source files stay identical to the pinned reference submodule for straightforward re-sync. Runtime and type dependencies live in the repository root rather than a nested package.
 
-The extension adds OpenAI Responses compaction v2 while retaining Pi's portable text summaries. It supports direct `openai/*` and `openai-codex/*` Responses models, persists opaque compaction artifacts in Pi session entries, reconstructs compatible history after session lifecycle changes, and uses `previous_response_id` plus a WebSocket transport for direct OpenAI continuation.
+The extension adds OpenAI Responses compaction v2 while retaining Pi's portable text summaries. It supports direct `openai/*` and `openai-codex/*` Responses models, persists opaque compaction artifacts in Pi session entries, reconstructs compatible history after session lifecycle changes, preserves Pi extension custom messages, and uses `previous_response_id` plus a WebSocket transport for direct OpenAI continuation.
 
 ## Data handling
 

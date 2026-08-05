@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -12,9 +14,12 @@ import {
 } from "./herdr-cli";
 import { createSubagentNotificationManager } from "./notifications";
 import { registerOverviewWidget } from "./overview-widget";
+import { textContent } from "./output";
 import {
 	notifySubagentFinished,
+	readSubagentCompletionArm,
 	startSubagentRpcServer,
+	subagentRpcSocketPath,
 	type SubagentRpcServer,
 } from "./subagent-rpc";
 import {
@@ -92,6 +97,14 @@ const finalAssistantText = (event: { readonly messages: ReadonlyArray<unknown> }
 	return "";
 };
 
+const completionStatus = (finalMessage: string): "done" | "blocked" => {
+	let status: "done" | "blocked" = "done";
+	for (const match of finalMessage.matchAll(/^\s*STATUS:\s*(done|blocked)\s*$/gim)) {
+		status = match[1]?.toLowerCase() === "blocked" ? "blocked" : "done";
+	}
+	return status;
+};
+
 const actionDetails = (result: ToolResult): ActionDetails | undefined => {
 	const details = result.details;
 	if (!isRecord(details) || typeof details.action !== "string") {
@@ -124,6 +137,18 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 	let rpcServer: SubagentRpcServer | undefined;
 	let rpcServerStarting = false;
 	let resultSocketPath: string | undefined;
+	let latestFinalAssistantText: string | undefined;
+	let latestCompletionArmId: string | undefined;
+	let sendQueue: Promise<void> = Promise.resolve();
+	const unavailableResultSocketPath = subagentRpcSocketPath("unavailable");
+	const directResultNames = new Set<string>();
+	const refreshCompletionArm = async (): Promise<void> => {
+		const name = herdrSubagentName();
+		if (!isHerdrSubagentSession() || !name) {
+			return;
+		}
+		latestCompletionArmId = await Effect.runPromise(readSubagentCompletionArm(name));
+	};
 	const overviewWidget = registerOverviewWidget(pi, (effect) => nodeRuntime.runPromise(effect));
 	if (typeof pi.on === "function") {
 		pi.on("session_start", () => {
@@ -140,6 +165,8 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 									status: payload.status,
 									finalMessage: payload.finalMessage,
 									sentAtMs: payload.sentAtMs,
+									completionId: payload.completionId,
+									armId: payload.armId,
 								});
 							},
 						}),
@@ -156,33 +183,48 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 					),
 			);
 		});
+		pi.on("input", refreshCompletionArm);
+		pi.on("agent_start", async () => {
+			if (!isHerdrSubagentSession()) {
+				return;
+			}
+			latestFinalAssistantText = undefined;
+			await refreshCompletionArm();
+		});
 		pi.on("agent_end", (event) => {
-			const socketPath = herdrSubagentResultSocket();
-			const name = herdrSubagentName();
-			if (!isHerdrSubagentSession() || !socketPath || !name) {
+			if (!isHerdrSubagentSession()) {
 				return;
 			}
 			const finalMessage = finalAssistantText(event).trim();
-			if (finalMessage.length === 0) {
+			latestFinalAssistantText = finalMessage.length > 0 ? finalMessage : undefined;
+		});
+		pi.on("agent_settled", async () => {
+			const socketPath = herdrSubagentResultSocket();
+			const name = herdrSubagentName();
+			const finalMessage = latestFinalAssistantText;
+			latestFinalAssistantText = undefined;
+			if (!isHerdrSubagentSession() || !socketPath || !name || !finalMessage) {
 				return;
 			}
-			discardPromise(
-				Effect.runPromise(
-					Effect.gen(function* () {
-						const sentAtMs = yield* Clock.currentTimeMillis;
-						yield* notifySubagentFinished({
-							socketPath,
-							name,
-							status: "done",
-							finalMessage,
-							sentAtMs,
-						});
-					}),
-				),
+			await Effect.runPromise(
+				Effect.gen(function* () {
+					const sentAtMs = yield* Clock.currentTimeMillis;
+					yield* notifySubagentFinished({
+						socketPath,
+						name,
+						status: completionStatus(finalMessage),
+						finalMessage,
+						sentAtMs,
+						armId: latestCompletionArmId,
+					});
+				}),
 			);
 		});
 		pi.on("session_shutdown", () => {
 			notifications.cancelAll();
+			directResultNames.clear();
+			latestFinalAssistantText = undefined;
+			latestCompletionArmId = undefined;
 			const server = rpcServer;
 			rpcServer = undefined;
 			rpcServerStarting = false;
@@ -302,63 +344,144 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			),
 		}),
 		execute(_toolCallId, params: HerdrSubagentParams, signal, _onUpdate, ctx) {
+			// Every spawned child gets a settled-result path. If the live RPC server is not ready,
+			// the random unavailable path makes the child use the durable completion outbox instead
+			// of trusting transient pane status during automatic compaction.
+			const actionResultSocketPath = resultSocketPath ?? unavailableResultSocketPath;
+			const acceptResultsSinceMs = Date.now();
+			const completionArmId =
+				actionResultSocketPath &&
+				params.notify !== false &&
+				(params.action === "spawn" || params.action === "send")
+					? randomUUID()
+					: undefined;
 			const reservedSpawnName =
 				params.action === "spawn" && params.notify !== false && typeof params.name === "string"
 					? params.name
 					: undefined;
 			let spawnReservationArmed = false;
+			let provisionalSendWatcherArmed = false;
 			if (reservedSpawnName) {
 				notifications.beginBatchMember(reservedSpawnName);
 			}
-			return nodeRuntime
-				.runPromise(executeAction(params, ctx, { resultSocketPath }), { signal })
-				.then((result) => {
-					const details = actionDetails(result);
-					if (details?.action === "spawn" && params.notify !== false) {
-						notifications.arm({
-							name: details.entry.name,
-							paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
-							summarySource: params.task ?? "spawned subagent task",
-						});
-						spawnReservationArmed = true;
-					} else if (reservedSpawnName) {
-						notifications.releaseBatchMember(reservedSpawnName);
-					}
-					if (details?.action === "send") {
-						if (params.notify === false) {
-							notifications.cancel(details.resolved.paneId);
-						} else {
-							notifications.arm({
-								name: details.resolved.name,
-								paneId: details.resolved.paneId,
-								summarySource: params.message ?? "subagent follow-up message",
-							});
+			const executeWithNotifications = () => {
+				return nodeRuntime
+					.runPromise(
+						executeAction(params, ctx, {
+							resultSocketPath: actionResultSocketPath,
+							completionArmId,
+							onCompletionArmPrepared(resolved, armId) {
+								const acceptedByExistingWatcher = notifications.acceptArm(resolved.name, armId);
+								if (
+									!acceptedByExistingWatcher &&
+									params.notify !== false &&
+									directResultNames.has(resolved.name)
+								) {
+									provisionalSendWatcherArmed = true;
+									notifications.arm({
+										name: resolved.name,
+										paneId: resolved.paneId,
+										summarySource: params.message ?? "subagent follow-up message",
+										completionSource: "rpc",
+										acceptResultsSinceMs,
+										expectedArmId: armId,
+									});
+								}
+							},
+						}),
+						{ signal },
+					)
+					.then((result) => {
+						const details = actionDetails(result);
+						const completionArrivedDuringAction = completionArmId
+							? notifications.hasDeliveredArm(completionArmId)
+							: false;
+						let automaticNotificationUnavailable = false;
+						if (details?.action === "spawn" && actionResultSocketPath) {
+							directResultNames.add(details.entry.name);
 						}
-					}
-					if (details?.action === "wait") {
-						notifications.cancel(details.resolved.paneId);
-					}
-					if (details?.action === "close") {
-						notifications.cancel(
-							details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
-						);
-					}
-					if (
-						details?.action === "spawn" ||
-						details?.action === "send" ||
-						details?.action === "close"
-					) {
-						// Registry just changed; refresh the widget immediately instead of
-						// waiting out the idle poll cadence.
-						overviewWidget.poke();
-					}
-					return result;
-				})
-				.finally(() => {
-					if (reservedSpawnName && !spawnReservationArmed) {
-						notifications.releaseBatchMember(reservedSpawnName);
-					}
-				});
+						if (details?.action === "spawn" && params.notify !== false) {
+							notifications.arm({
+								name: details.entry.name,
+								paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
+								summarySource: params.task ?? "spawned subagent task",
+								completionSource: directResultNames.has(details.entry.name) ? "rpc" : "poll",
+								acceptResultsSinceMs,
+								expectedArmId: completionArmId,
+							});
+							spawnReservationArmed = true;
+						} else if (reservedSpawnName) {
+							notifications.releaseBatchMember(reservedSpawnName);
+						}
+						if (details?.action === "send") {
+							if (params.notify === false) {
+								notifications.cancel(details.resolved.paneId);
+							} else if (directResultNames.has(details.resolved.name)) {
+								if (!provisionalSendWatcherArmed && !completionArrivedDuringAction) {
+									notifications.arm({
+										name: details.resolved.name,
+										paneId: details.resolved.paneId,
+										summarySource: params.message ?? "subagent follow-up message",
+										completionSource: "rpc",
+										acceptResultsSinceMs,
+										expectedArmId: completionArmId,
+									});
+								}
+							} else {
+								notifications.cancel(details.resolved.paneId);
+								automaticNotificationUnavailable = true;
+							}
+						}
+						if (details?.action === "wait") {
+							notifications.cancel(details.resolved.paneId);
+						}
+						if (details?.action === "close") {
+							notifications.cancel(
+								details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
+							);
+							const closedName = details.entry?.name ?? details.resolved?.name ?? params.name;
+							if (closedName) {
+								directResultNames.delete(closedName);
+							}
+						}
+						if (
+							details?.action === "spawn" ||
+							details?.action === "send" ||
+							details?.action === "close"
+						) {
+							// Registry just changed; refresh the widget immediately instead of
+							// waiting out the idle poll cadence.
+							overviewWidget.poke();
+						}
+						if (automaticNotificationUnavailable) {
+							return {
+								...result,
+								content: [
+									...result.content,
+									textContent(
+										"Automatic settled-result delivery is unavailable for this unmanaged pane. Use action=wait when you need completion.",
+									),
+								],
+							};
+						}
+						return result;
+					});
+			};
+			const execution =
+				params.action === "send"
+					? sendQueue.then(executeWithNotifications)
+					: executeWithNotifications();
+			if (params.action === "send") {
+				sendQueue = execution.then(
+					() => undefined,
+					() => undefined,
+				);
+			}
+			return execution.finally(() => {
+				if (reservedSpawnName && !spawnReservationArmed) {
+					notifications.releaseBatchMember(reservedSpawnName);
+				}
+			});
 		},
 	});
 }

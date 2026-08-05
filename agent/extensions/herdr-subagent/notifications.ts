@@ -6,6 +6,7 @@ import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSp
 
 import { liveAgent, runHerdr } from "./herdr-cli";
 import { truncateForModel } from "./output";
+import { takePersistedSubagentCompletion } from "./subagent-rpc";
 
 const WATCH_POLL_INTERVAL_MS = 2_000;
 const WATCH_IDLE_CONFIRMATIONS = 2;
@@ -15,6 +16,7 @@ const CUSTOM_MESSAGE_TYPE = "herdr-subagent-result";
 const ARM_BATCH_WINDOW_MS = 150;
 const GROUP_JOIN_TIMEOUT_MS = 30_000;
 const GROUP_JOIN_STRAGGLER_TIMEOUT_MS = 15_000;
+const MAX_TRACKED_DELIVERED_ARMS = 256;
 
 type NotificationPi = Pick<ExtensionAPI, "sendMessage">;
 
@@ -25,6 +27,7 @@ type RunPromise = <A>(
 ) => Promise<A>;
 
 type NotificationState = "done" | "blocked";
+type CompletionSource = "poll" | "rpc";
 
 type ObservedState = "done" | "idle" | "blocked";
 
@@ -49,6 +52,9 @@ interface ArmedNotification {
 	readonly name: string;
 	readonly paneId: string;
 	readonly summarySource: string;
+	readonly completionSource?: CompletionSource;
+	readonly acceptResultsSinceMs?: number;
+	readonly expectedArmId?: string;
 }
 
 interface WatchedNotification extends ArmedNotification {
@@ -66,6 +72,8 @@ interface ExternalNotificationResult {
 	readonly status: NotificationState;
 	readonly finalMessage: string;
 	readonly sentAtMs: number;
+	readonly completionId?: string;
+	readonly armId?: string;
 }
 
 interface WatcherSlot {
@@ -74,6 +82,7 @@ interface WatcherSlot {
 	readonly paneId: string;
 	readonly summarySource: string;
 	readonly armedAtMs: number;
+	readonly acceptedArmIds: Set<string>;
 	readonly controller: AbortController;
 }
 
@@ -93,6 +102,12 @@ interface NotificationDelivery {
 	readonly individualContent: string;
 }
 
+interface WatchCompletion {
+	readonly notification?: WatchedNotification;
+	readonly name?: string;
+	readonly result?: ExternalNotificationResult;
+}
+
 interface CompletionGroup {
 	readonly id: string;
 	memberKeys: Set<string>;
@@ -109,6 +124,10 @@ export interface SubagentNotificationManager {
 	releaseBatchMember(name: string): void;
 	/** Arm or re-arm one notification watcher for a subagent turn. */
 	arm(notification: ArmedNotification): void;
+	/** Let the current watcher accept the arm published for an in-flight send attempt. */
+	acceptArm(target: string, armId: string): boolean;
+	/** Test whether a watcher already delivered the result for an arm. */
+	hasDeliveredArm(armId: string): boolean;
 	/** Deliver an external RPC result if, and only if, the matching watcher is armed. */
 	deliverExternal(name: string, result: ExternalNotificationResult): void;
 	/** Cancel any watcher matching a subagent name, pane id, or tool target. */
@@ -143,10 +162,20 @@ const escapeXmlText = (text: string): string =>
 const stateVerb = (state: NotificationState): string =>
 	state === "blocked" ? "needs attention" : "finished";
 
-const guidanceFor = (state: NotificationState): string =>
-	state === "blocked"
-		? "Guidance: inspect the panel before trusting the result; use herdr_subagent send or focus to unblock."
-		: "Guidance: inspect the panel before trusting the result; do not duplicate the subagent's work.";
+const requiredActionFor = (notification: {
+	readonly name: string;
+	readonly paneId: string;
+	readonly state: NotificationState;
+}): string => {
+	const escapedName = escapeXmlText(notification.name);
+	const nextStep =
+		notification.state === "blocked"
+			? "Evaluate the blocker, then use herdr_subagent send or focus to unblock it when possible. Otherwise, report the blocker to the user."
+			: "Evaluate the result, then use the findings to continue the parent task. Do not duplicate the subagent's completed work.";
+	return `<required_action tool="herdr_subagent" action="inspect" target="${escapedName}" pane="${escapeXmlText(notification.paneId)}">
+Call herdr_subagent with action=inspect and target="${escapedName}" now. ${nextStep} Do not stop after only acknowledging this notification.
+</required_action>`;
+};
 
 const watchedResultBlockFor = (notification: WatchedNotification): string => {
 	const sourceSummary = summarizeSource(notification.summarySource);
@@ -173,22 +202,20 @@ ${escapeXmlText(notification.finalMessage)}
 };
 
 const envelopeFor = (notification: WatchedNotification): string =>
-	`${watchedResultBlockFor(notification)}\n\n${guidanceFor(notification.state)}`;
+	`${watchedResultBlockFor(notification)}\n\n${requiredActionFor(notification)}`;
 
 const externalEnvelopeFor = (notification: ExternalNotification): string =>
-	`${externalResultBlockFor(notification)}\n\n${guidanceFor(notification.state)}`;
+	`${externalResultBlockFor(notification)}\n\n${requiredActionFor(notification)}`;
 
 const groupGuidanceFor = (
 	deliveries: ReadonlyArray<NotificationDelivery>,
 	partial: boolean,
 ): string => {
-	if (partial) {
-		return "Guidance: inspect the delivered panels before trusting the result; remaining grouped subagents are still running and will be re-batched.";
-	}
-	if (deliveries.some((delivery) => delivery.state === "blocked")) {
-		return "Guidance: inspect the panels before trusting the result; use herdr_subagent send or focus for blocked members.";
-	}
-	return "Guidance: inspect the panels before trusting the result; do not duplicate the subagents' work.";
+	const requiredActions = deliveries.map(requiredActionFor).join("\n");
+	const groupStatus = partial
+		? "Remaining grouped subagents are still running and will be re-batched."
+		: "After all required inspections, continue the parent task with the combined findings.";
+	return `${requiredActions}\n${groupStatus}`;
 };
 
 const groupEnvelopeFor = (
@@ -233,18 +260,43 @@ const externalDeliveryFor = (
 
 const waitForNotificationState: (
 	notification: ArmedNotification,
-) => Effect.Effect<ObservedState, never, NotificationRequirements> = Effect.fnUntraced(
-	function* (notification) {
+) => Effect.Effect<ObservedState | ExternalNotificationResult, never, NotificationRequirements> =
+	Effect.fnUntraced(function* (notification) {
 		let consecutiveSettled = 0;
 		let firstSettledAt: number | undefined;
 		let observedWorking = false;
 
-		const poll: Effect.Effect<ObservedState, never, NotificationRequirements> = Effect.suspend(() =>
+		const poll: Effect.Effect<
+			ObservedState | ExternalNotificationResult,
+			never,
+			NotificationRequirements
+		> = Effect.suspend(() =>
 			Effect.gen(function* () {
+				if (notification.completionSource === "rpc") {
+					const persisted = yield* takePersistedSubagentCompletion(notification.name);
+					if (persisted && persisted.sentAtMs >= (notification.acceptResultsSinceMs ?? 0)) {
+						return {
+							status: persisted.status,
+							finalMessage: persisted.finalMessage,
+							sentAtMs: persisted.sentAtMs,
+							completionId: persisted.completionId,
+							armId: persisted.armId,
+						};
+					}
+				}
 				const agent = yield* liveAgent(notification.paneId);
 				const status = agent?.agent_status ?? "unknown";
 				if (status === "working") {
 					observedWorking = true;
+					consecutiveSettled = 0;
+					firstSettledAt = undefined;
+				} else if (
+					notification.completionSource === "rpc" &&
+					(status === "done" || status === "idle")
+				) {
+					// Herdr can briefly report a terminal pane status between a length-limited response
+					// and Pi's automatic compaction retry. When this subagent has a direct result socket,
+					// only agent_settled can complete the watcher. Polling remains active for blockers.
 					consecutiveSettled = 0;
 					firstSettledAt = undefined;
 				} else if (status === "done" || status === "blocked" || status === "idle") {
@@ -273,8 +325,7 @@ const waitForNotificationState: (
 		);
 
 		return yield* poll;
-	},
-);
+	});
 
 const readPaneTail = (paneId: string): Effect.Effect<string, never, NotificationRequirements> =>
 	runHerdr([
@@ -292,15 +343,23 @@ const readPaneTail = (paneId: string): Effect.Effect<string, never, Notification
 
 const watchSubagent: (
 	notification: ArmedNotification,
-) => Effect.Effect<WatchedNotification, never, NotificationRequirements> = Effect.fnUntraced(
+) => Effect.Effect<WatchCompletion, never, NotificationRequirements> = Effect.fnUntraced(
 	function* (notification) {
 		const observed = yield* waitForNotificationState(notification);
+		if (typeof observed !== "string") {
+			return {
+				name: notification.name,
+				result: observed,
+			};
+		}
 		const paneTail = yield* readPaneTail(notification.paneId);
 		return {
-			...notification,
-			state: observed === "blocked" ? "blocked" : "done",
-			observed,
-			paneTail,
+			notification: {
+				...notification,
+				state: observed === "blocked" ? "blocked" : "done",
+				observed,
+				paneTail,
+			},
 		};
 	},
 );
@@ -394,10 +453,9 @@ export const createSubagentNotificationManager = (
 	const watchers = new Map<string, WatcherSlot>();
 	const groups = new Map<string, CompletionGroup>();
 	const keyToGroup = new Map<string, string>();
-	// Content fingerprints of already-delivered external results, per subagent name. A subagent
-	// process can re-emit agent_end with an unchanged final message after a re-arm (fresh
-	// sentAtMs defeats the armedAtMs guard); identical redelivery is always stale.
-	const deliveredExternal = new Map<string, string>();
+	const deliveredCompletionIds = new Set<string>();
+	const deliveredArmIds = new Set<string>();
+	const pendingExternal = new Map<string, ExternalNotificationResult[]>();
 	let nextBatchId = 1;
 	let currentArmBatch: PendingArmBatch | undefined;
 
@@ -558,6 +616,7 @@ export const createSubagentNotificationManager = (
 			existing.controller.abort();
 			watchers.delete(key);
 		}
+		pendingExternal.delete(key);
 		removeKeyFromCurrentBatch(key);
 		removeKeyFromGroup(key);
 	};
@@ -610,6 +669,93 @@ export const createSubagentNotificationManager = (
 		maybeDeliverCompletedGroup(group);
 	};
 
+	const completionIdentity = (name: string, result: ExternalNotificationResult): string =>
+		result.completionId ?? `legacy:${name}:${result.sentAtMs}:${result.status}`;
+
+	const rememberDeliveredArm = (armId: string): void => {
+		deliveredArmIds.add(armId);
+		if (deliveredArmIds.size <= MAX_TRACKED_DELIVERED_ARMS) {
+			return;
+		}
+		const oldest = deliveredArmIds.values().next();
+		if (!oldest.done) {
+			deliveredArmIds.delete(oldest.value);
+		}
+	};
+
+	const queuePendingExternal = (key: string, result: ExternalNotificationResult): void => {
+		const identity = completionIdentity(key, result);
+		const pending = pendingExternal.get(key) ?? [];
+		if (pending.some((candidate) => completionIdentity(key, candidate) === identity)) {
+			return;
+		}
+		pendingExternal.set(key, [...pending, result].slice(-32));
+	};
+
+	const processExternalResult = (name: string, result: ExternalNotificationResult): boolean => {
+		const key = watcherKey(name);
+		const identity = completionIdentity(name, result);
+		if (deliveredCompletionIds.has(identity)) {
+			return false;
+		}
+		const slot = watchers.get(key);
+		if (!slot) {
+			queuePendingExternal(key, result);
+			return false;
+		}
+		if (result.sentAtMs < slot.armedAtMs) {
+			return false;
+		}
+		if (result.armId && slot.acceptedArmIds.size > 0 && !slot.acceptedArmIds.has(result.armId)) {
+			queuePendingExternal(key, result);
+			return false;
+		}
+		deliveredCompletionIds.add(identity);
+		if (result.armId) {
+			rememberDeliveredArm(result.armId);
+		}
+		slot.controller.abort();
+		processCompletion(
+			externalDeliveryFor(key, {
+				name: slot.name,
+				paneId: slot.paneId,
+				summarySource: slot.summarySource,
+				state: result.status,
+				finalMessage: truncateForModel(result.finalMessage).text,
+			}),
+		);
+		return true;
+	};
+
+	const startWatcher = (slot: WatcherSlot, notification: ArmedNotification): void => {
+		runPromise(watchSubagent(notification), { signal: slot.controller.signal })
+			.then((completion) => {
+				if (watchers.get(slot.key) !== slot) {
+					return;
+				}
+				if (completion.result && completion.name) {
+					const consumed = processExternalResult(completion.name, completion.result);
+					if (!consumed && watchers.get(slot.key) === slot) {
+						startWatcher(slot, notification);
+					}
+					return;
+				}
+				if (completion.notification) {
+					for (const armId of slot.acceptedArmIds) {
+						rememberDeliveredArm(armId);
+					}
+					processCompletion(watchedDeliveryFor(slot.key, completion.notification));
+				}
+			})
+			.catch(() => {
+				if (watchers.get(slot.key) === slot) {
+					watchers.delete(slot.key);
+					removeKeyFromCurrentBatch(slot.key);
+					removeKeyFromGroup(slot.key);
+				}
+			});
+	};
+
 	const manager: SubagentNotificationManager = {
 		beginBatchMember(name) {
 			addKeyToCurrentBatch(watcherKey(name));
@@ -619,6 +765,7 @@ export const createSubagentNotificationManager = (
 			if (watchers.has(key)) {
 				return;
 			}
+			pendingExternal.delete(key);
 			removeKeyFromCurrentBatch(key);
 			removeKeyFromGroup(key);
 		},
@@ -639,7 +786,8 @@ export const createSubagentNotificationManager = (
 				name: notification.name,
 				paneId: notification.paneId,
 				summarySource: notification.summarySource,
-				armedAtMs: notificationClock.nowMillis(),
+				armedAtMs: notification.acceptResultsSinceMs ?? notificationClock.nowMillis(),
+				acceptedArmIds: new Set(notification.expectedArmId ? [notification.expectedArmId] : []),
 				controller,
 			};
 			watchers.set(key, slot);
@@ -651,57 +799,63 @@ export const createSubagentNotificationManager = (
 			if (!reservedInCurrentBatch && !reservedInGroup) {
 				addKeyToCurrentBatch(key);
 			}
-			runPromise(watchSubagent(notification), { signal: controller.signal })
-				.then((watched) => {
-					if (watchers.get(key) !== slot) {
-						return;
+			const armedNotification: ArmedNotification = {
+				...notification,
+				acceptResultsSinceMs: slot.armedAtMs,
+			};
+			startWatcher(slot, armedNotification);
+			const pending = pendingExternal.get(key) ?? [];
+			pendingExternal.delete(key);
+			for (let index = 0; index < pending.length; index += 1) {
+				const result = pending[index];
+				if (!result) {
+					continue;
+				}
+				if (processExternalResult(notification.name, result)) {
+					for (const remaining of pending.slice(index + 1)) {
+						queuePendingExternal(key, remaining);
 					}
-					processCompletion(watchedDeliveryFor(key, watched));
-				})
-				.catch(() => {
-					if (watchers.get(key) === slot) {
-						watchers.delete(key);
-						removeKeyFromCurrentBatch(key);
-						removeKeyFromGroup(key);
-					}
-				});
+					break;
+				}
+			}
+		},
+		acceptArm(target, armId) {
+			let accepted = false;
+			for (const slot of watchers.values()) {
+				if (slot.name === target || slot.paneId === target) {
+					slot.acceptedArmIds.add(armId);
+					accepted = true;
+				}
+			}
+			return accepted;
+		},
+		hasDeliveredArm(armId) {
+			return deliveredArmIds.has(armId);
 		},
 		deliverExternal(name, result) {
-			const key = watcherKey(name);
-			const slot = watchers.get(key);
-			if (!slot) {
-				return;
-			}
-			if (result.sentAtMs < slot.armedAtMs) {
-				return;
-			}
-			const fingerprint = `${result.status}:${result.finalMessage}`;
-			if (deliveredExternal.get(name) === fingerprint) {
-				// Duplicate of an already-delivered result: drop it WITHOUT consuming the watcher, so
-				// the genuinely-new completion of the current turn can still notify.
-				return;
-			}
-			deliveredExternal.set(name, fingerprint);
-			slot.controller.abort();
-			processCompletion(
-				externalDeliveryFor(key, {
-					name: slot.name,
-					paneId: slot.paneId,
-					summarySource: slot.summarySource,
-					state: result.status,
-					finalMessage: truncateForModel(result.finalMessage).text,
-				}),
-			);
+			processExternalResult(name, result);
 		},
 		cancel(target) {
 			if (!target) {
 				return;
 			}
+			const matchingKeys = new Set<string>();
 			for (const slot of watchers.values()) {
 				if (slot.name === target || slot.paneId === target) {
-					cancelKey(slot.key);
+					matchingKeys.add(slot.key);
 				}
 			}
+			for (const group of groups.values()) {
+				for (const delivery of group.completed.values()) {
+					if (delivery.name === target || delivery.paneId === target) {
+						matchingKeys.add(delivery.key);
+					}
+				}
+			}
+			for (const key of matchingKeys) {
+				cancelKey(key);
+			}
+			pendingExternal.delete(watcherKey(target));
 		},
 		cancelAll() {
 			for (const slot of watchers.values()) {
@@ -719,7 +873,9 @@ export const createSubagentNotificationManager = (
 			}
 			groups.clear();
 			keyToGroup.clear();
-			deliveredExternal.clear();
+			deliveredCompletionIds.clear();
+			deliveredArmIds.clear();
+			pendingExternal.clear();
 		},
 	};
 
