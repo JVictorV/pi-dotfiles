@@ -8,7 +8,6 @@ sync-pocock-skills
 tmux
 ui
 
-stack
 herdr-subagents
 lsp
 review
