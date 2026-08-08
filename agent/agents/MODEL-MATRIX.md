@@ -46,9 +46,9 @@ token shape:
 ## Selection procedure
 
 1. **Classify difficulty.** Hard reasoning / correctness-gating / high-leverage
-   work (root-cause, review, taste, planning) routes to Sol. Terra is for
-   well-scoped implementation and tests where the output has a verification
-   harness.
+   work (root-cause, review, taste, planning) routes to Sol. All role defaults
+   use Sol. Terra remains an explicit override for well-scoped implementation
+   and tests where the output has a verification harness.
 2. **Choose effort before model.** `low` or `medium` routes to Sol. Terra is
    eligible only with `high` or `xhigh`; the extension rejects lower or missing
    effort for Terra.
@@ -64,24 +64,23 @@ token shape:
 
 ## Recommended defaults by role (already applied in the agent `.md` files)
 
-| Role        | Model     | Thinking | Rationale                                                        |
-| ----------- | --------- | -------- | ---------------------------------------------------------------- |
-| scout       | **sol**   | low      | quick recon still benefits from the reliable default             |
-| researcher  | **sol**   | medium   | conclusions lack an automatic verification harness               |
-| worker      | **terra** | xhigh    | well-scoped implementation with tests and caller review          |
-| test-writer | **terra** | xhigh    | edge-case reasoning plus an executable verification harness      |
-| planner     | **sol**   | xhigh    | high leverage, low volume — bad plans cascade into worker spawns |
-| debugger    | **sol**   | xhigh    | hard root-cause reasoning                                        |
-| reviewer    | **sol**   | high     | correctness/security safety net; a human reads the output        |
-| critic      | **sol**   | high     | taste judgment; a human reads the output                         |
+| Role        | Model   | Thinking | Rationale                                                        |
+| ----------- | ------- | -------- | ---------------------------------------------------------------- |
+| scout       | **sol** | low      | quick recon still benefits from the reliable default             |
+| researcher  | **sol** | medium   | conclusions lack an automatic verification harness               |
+| worker      | **sol** | medium   | general implementation with tests and caller review              |
+| test-writer | **sol** | medium   | focused tests have an executable verification harness            |
+| planner     | **sol** | high     | high leverage, low volume — bad plans cascade into worker spawns |
+| debugger    | **sol** | xhigh    | hard root-cause reasoning                                        |
+| reviewer    | **sol** | high     | correctness/security safety net; a human reads the output        |
+| critic      | **sol** | high     | taste judgment; a human reads the output                         |
 
-**Effort policy:** Terra has a hard floor of `high`; use `xhigh` for its default
-implementation and test-writing roles. The extension rejects Terra with missing,
-`low`, or `medium` thinking. DeepSWE quality numbers were measured at `[max]`
-effort, reasoning is a small cost slice, and higher effort tends to finish in
-fewer turns — reducing cache-read. `off`/`minimal` remain banned for every
-subagent. Lowering effort to save cost forfeits measured quality and risks rework
-loops, the actual dominant cost.
+**Effort policy:** All role defaults use Sol. Workers and test writers default to
+`medium`, and planners default to `high`. Terra remains available as an explicit
+override, but it has a hard floor of `high`; the extension rejects Terra with
+missing, `low`, or `medium` thinking. DeepSWE quality numbers were measured at
+`[max]` effort, so raise effort when task complexity or observed quality requires
+it. `off`/`minimal` remain banned for every subagent.
 
 ## When to reach for Grok 4.5
 

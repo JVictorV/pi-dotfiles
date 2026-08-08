@@ -35,7 +35,7 @@ Stay in-context (no subagents) when the task is a small focused edit, a quick qu
 
 ## Model selection
 
-Agent types carry routed model defaults (see `~/.pi/agent/agents/MODEL-MATRIX.md`): Sol for scouting, research, planning, debugging, review, and taste; Terra for implementation and tests at high effort or above. Prefer the agent-type default and override `model` only when the matrix favors it for the specific task.
+Agent types carry routed model defaults (see `~/.pi/agent/agents/MODEL-MATRIX.md`). All configured roles default to Sol with role-specific thinking levels. Terra remains available as an explicit override for implementation and tests at high effort or above. Prefer the agent-type default and override `model` only when the matrix favors it for the specific task.
 
 Application rules:
 
@@ -44,7 +44,7 @@ Application rules:
 - When difficulty is ambiguous, choose Sol. If a Terra subagent fails or returns low-quality work, re-spawn the retry on Sol instead of retrying Terra.
 - Other logged-in models are allowed when the matrix favors them.
 - Only use `low`, `medium`, `high`, or `xhigh` thinking — never `off` or `minimal`.
-- Use `low` for quick scouting, `medium` for research and ordinary analysis, `high` for review and taste judgment, and `xhigh` for implementation, test-writing, planning, and debugging.
+- Use `low` for quick scouting. Use `medium` for research, ordinary analysis, implementation, and test-writing. Use `high` for review, taste judgment, and planning. Use `xhigh` for debugging.
 
 ## Tool-first workflow
 
@@ -161,10 +161,10 @@ Preferred default roles:
 
 - `scout` — read-only codebase reconnaissance; defaults to Sol with `low` thinking.
 - `researcher` — cited web research; defaults to Sol with `medium` thinking.
-- `planner` — read-only implementation planning; defaults to Sol with `xhigh` thinking.
+- `planner` — read-only implementation planning; defaults to Sol with `high` thinking.
 - `reviewer` — read-only code review with P0-P3 findings; defaults to Sol with `high` thinking.
-- `worker` — general implementation worker; defaults to Terra with `xhigh` thinking.
-- `test-writer` — writes tests through real seams; defaults to Terra with `xhigh` thinking.
+- `worker` — general implementation worker; defaults to Sol with `medium` thinking.
+- `test-writer` — writes tests through real seams; defaults to Sol with `medium` thinking.
 - `debugger` — root-cause diagnosis with temporary instrumentation; defaults to Sol with `xhigh` thinking.
 - `critic` — high-taste critique of UI/copy/API/design alternatives; defaults to Sol with `high` thinking.
 

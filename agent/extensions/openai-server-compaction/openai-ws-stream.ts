@@ -23,8 +23,9 @@ import {
   type StreamFunction,
 } from "@earendil-works/pi-ai";
 import { streamSimpleOpenAIResponses } from "@earendil-works/pi-ai/compat";
-import { loadConfig } from "./config.ts";
+import { isRecord, loadConfig } from "./config.ts";
 import {
+  applyRemoteHistoryPayloadPatch,
   isDirectOpenAIResponsesModel,
   modelKey,
   thinkingLevelToResponsesReasoning,
@@ -719,6 +720,51 @@ function buildFullInput(context: Context, model: ReplayModelInfo): InputItem[] {
   return convertMessagesToInputItems(context.messages, model);
 }
 
+/**
+ * Apply persisted remote history or incremental continuation to an HTTP Responses payload.
+ *
+ * @param params - The payload and active continuation state.
+ * @returns A patched payload, or the original non-object value.
+ */
+export function applyHttpContinuationPayloadPatch(params: {
+  payload: unknown;
+  context: Context;
+  model: ReplayModelInfo;
+  currentModelKey: string;
+  remoteCompactionState: ReturnType<typeof getRemoteCompactionState>;
+  continuationState: ReturnType<typeof getContinuationState>;
+}): unknown {
+  if (!isRecord(params.payload)) return params.payload;
+
+  const payload = { ...params.payload };
+  if (
+    params.remoteCompactionState &&
+    params.remoteCompactionState.modelKey === params.currentModelKey
+  ) {
+    return applyRemoteHistoryPayloadPatch({
+      payload,
+      explicitHistory: normalizeResponseItemsForPrompt(
+        params.remoteCompactionState.explicitHistory,
+        params.model,
+      ),
+    });
+  }
+
+  if (
+    typeof payload.previous_response_id === "string" &&
+    params.continuationState?.modelKey === params.currentModelKey &&
+    typeof params.continuationState.contextLength === "number" &&
+    params.continuationState.contextLength > 0
+  ) {
+    const newMessages = params.context.messages.slice(params.continuationState.contextLength);
+    if (newMessages.length > 0) {
+      payload.input = convertMessagesToInputItems(newMessages, params.model);
+    }
+  }
+
+  return payload;
+}
+
 async function fallbackToHttp(
   model: ResponsesModel,
   context: Context,
@@ -730,29 +776,18 @@ async function fallbackToHttp(
   const remoteCompactionState = sessionId ? getRemoteCompactionState(sessionId) : undefined;
   const continuationState = sessionId ? getContinuationState(sessionId) : undefined;
   const originalOnPayload = options?.onPayload;
+  const currentModelKey = modelKey(model);
   const mergedOptions = {
     ...(signal ? { ...options, signal } : options),
     onPayload: async (payload: unknown, payloadModel: Model<any>) => {
-      let nextPayload = payload;
-      if (payload && typeof payload === "object") {
-        const payloadObj = { ...(payload as Record<string, unknown>) };
-        if (remoteCompactionState && remoteCompactionState.modelKey === modelKey(model)) {
-          payloadObj.input = normalizeResponseItemsForPrompt(remoteCompactionState.explicitHistory, model) as unknown[];
-          delete payloadObj.previous_response_id;
-          nextPayload = payloadObj;
-        } else if (
-          typeof payloadObj.previous_response_id === "string" &&
-          continuationState?.modelKey === modelKey(model) &&
-          typeof continuationState.contextLength === "number" &&
-          continuationState.contextLength > 0
-        ) {
-          const newMessages = context.messages.slice(continuationState.contextLength);
-          if (newMessages.length > 0) {
-            payloadObj.input = convertMessagesToInputItems(newMessages, model) as unknown[];
-            nextPayload = payloadObj;
-          }
-        }
-      }
+      const nextPayload = applyHttpContinuationPayloadPatch({
+        payload,
+        context,
+        model,
+        currentModelKey,
+        remoteCompactionState,
+        continuationState,
+      });
       const chained = await originalOnPayload?.(nextPayload, payloadModel);
       return chained ?? nextPayload;
     },

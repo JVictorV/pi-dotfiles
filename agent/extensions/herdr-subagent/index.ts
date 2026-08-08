@@ -246,7 +246,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			"Call herdr_subagent with action=status before controlling existing panel-backed subagents.",
 			"When using herdr_subagent action=spawn, prefer the agent type's model default; before overriding it, read ~/.pi/agent/agents/MODEL-MATRIX.md and pick per its matrix. Use openai-codex/gpt-5.6-sol by default. Never suggest or select Luna for subagents. Terra is allowed only with high or xhigh thinking; other logged-in models remain available when the matrix favors them.",
 			"Only use low, medium, high, or xhigh thinking for herdr_subagent spawns; never use off or minimal.",
-			"Use low thinking for quick scouting, medium for research and ordinary analysis, high for review and taste judgment, and xhigh for implementation, test-writing, planning, and debugging. Low/medium tasks use Sol, never Terra.",
+			"Use low thinking for quick scouting. Use medium for research, ordinary analysis, implementation, and test-writing. Use high for review, taste judgment, and planning. Use xhigh for debugging. Low/medium tasks use Sol, never Terra.",
 			"When task difficulty is ambiguous, choose Sol; under-provisioning costs rework loops, over-provisioning costs cents.",
 			"If a Terra subagent fails or returns low-quality work, re-spawn the retry on Sol instead of retrying Terra.",
 			"Prefer one herdr_subagent spawn per task, with tab labels like agent: <name>; inspect a subagent panel before trusting its result.",
