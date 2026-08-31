@@ -31,9 +31,9 @@ const resolutionCandidates = (
 		return [target];
 	}
 	if (entry.terminalId) {
-		return presentUnique([entry.terminalId, target]);
+		return presentUnique([entry.terminalId, entry.label, target]);
 	}
-	return presentUnique([entry.target, entry.paneId, target]);
+	return presentUnique([entry.target, entry.paneId, entry.label, target]);
 };
 
 export const resolvePane: (

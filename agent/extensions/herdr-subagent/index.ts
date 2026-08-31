@@ -7,6 +7,7 @@ import { Clock, Effect, Layer, ManagedRuntime } from "effect";
 
 import { executeAction } from "./actions";
 import {
+	currentPane,
 	herdrSubagentName,
 	herdrSubagentResultSocket,
 	isHerdrSubagentSession,
@@ -17,11 +18,15 @@ import { registerOverviewWidget } from "./overview-widget";
 import { textContent } from "./output";
 import {
 	notifySubagentFinished,
+	publishResultSocket,
+	readPublishedResultSocket,
 	readSubagentCompletionArm,
 	startSubagentRpcServer,
 	subagentRpcSocketPath,
+	unpublishResultSocket,
 	type SubagentRpcServer,
 } from "./subagent-rpc";
+import { entryPhase, findEntryForPane, listEntries } from "./store";
 import {
 	ACTIONS,
 	AGENT_SCOPES,
@@ -142,9 +147,70 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 	let sendQueue: Promise<void> = Promise.resolve();
 	const unavailableResultSocketPath = subagentRpcSocketPath("unavailable");
 	const directResultNames = new Set<string>();
+	// Orchestrator-side durable wiring. The owner publication lets resumed subagent sessions
+	// find this process's result socket after spawn-time env vars died with an earlier run.
+	let ownerPaneId: string | undefined;
+	// Resumed-subagent identity cache. Only a definitive lookup outcome is cached; a failed
+	// `pane current` stays uncached so a later settle can retry once herdr is reachable.
+	let registrySelfResolved = false;
+	let registrySelfName: string | undefined;
+	let registrySelfOwnerPaneId: string | undefined;
+	const adoptOrphanedRegistryEntries = async (socketPath: string): Promise<void> => {
+		await nodeRuntime
+			.runPromise(
+				Effect.gen(function* () {
+					const pane = yield* currentPane().pipe(Effect.catch(() => Effect.succeed(undefined)));
+					const paneId = pane?.pane_id;
+					if (!paneId) {
+						return;
+					}
+					ownerPaneId = paneId;
+					yield* publishResultSocket(paneId, socketPath);
+					// Entries owned by this pane outlived the previous orchestrator process.
+					// Seeding them keeps automatic settled-result delivery armed after a reopen.
+					const entries = yield* listEntries;
+					for (const entry of entries) {
+						if (entryPhase(entry) === "active" && entry.ownerPaneId === paneId) {
+							directResultNames.add(entry.name);
+						}
+					}
+				}),
+			)
+			.catch(() => undefined);
+	};
+	const ensureRegistrySelf = async (): Promise<void> => {
+		if (registrySelfResolved || !isRunningInsideHerdr()) {
+			return;
+		}
+		await nodeRuntime
+			.runPromise(
+				Effect.gen(function* () {
+					const pane = yield* currentPane().pipe(Effect.catch(() => Effect.succeed(undefined)));
+					if (!pane) {
+						return;
+					}
+					registrySelfResolved = true;
+					const match = findEntryForPane(yield* listEntries, pane);
+					if (!match) {
+						return;
+					}
+					registrySelfName = match.name;
+					registrySelfOwnerPaneId = match.ownerPaneId;
+				}),
+			)
+			.catch(() => undefined);
+	};
+	const effectiveSubagentName = async (): Promise<string | undefined> => {
+		const envName = herdrSubagentName();
+		if (envName) {
+			return envName;
+		}
+		await ensureRegistrySelf();
+		return registrySelfName;
+	};
 	const refreshCompletionArm = async (): Promise<void> => {
-		const name = herdrSubagentName();
-		if (!isHerdrSubagentSession() || !name) {
+		const name = await effectiveSubagentName();
+		if (!name) {
 			return;
 		}
 		latestCompletionArmId = await Effect.runPromise(readSubagentCompletionArm(name));
@@ -172,10 +238,11 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 						}),
 					)
 					.then(
-						(server) => {
+						async (server) => {
 							rpcServerStarting = false;
 							rpcServer = server;
 							resultSocketPath = server.socketPath;
+							await adoptOrphanedRegistryEntries(server.socketPath);
 						},
 						() => {
 							rpcServerStarting = false;
@@ -185,26 +252,34 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 		});
 		pi.on("input", refreshCompletionArm);
 		pi.on("agent_start", async () => {
-			if (!isHerdrSubagentSession()) {
-				return;
-			}
 			latestFinalAssistantText = undefined;
 			await refreshCompletionArm();
 		});
 		pi.on("agent_end", (event) => {
-			if (!isHerdrSubagentSession()) {
-				return;
-			}
 			const finalMessage = finalAssistantText(event).trim();
 			latestFinalAssistantText = finalMessage.length > 0 ? finalMessage : undefined;
 		});
 		pi.on("agent_settled", async () => {
-			const socketPath = herdrSubagentResultSocket();
-			const name = herdrSubagentName();
 			const finalMessage = latestFinalAssistantText;
 			latestFinalAssistantText = undefined;
-			if (!isHerdrSubagentSession() || !socketPath || !name || !finalMessage) {
+			if (!isRunningInsideHerdr() || !finalMessage) {
 				return;
+			}
+			await ensureRegistrySelf();
+			const name = herdrSubagentName() ?? registrySelfName;
+			if (!name) {
+				return;
+			}
+			// The published socket tracks the live orchestrator process; the spawn-time env var can
+			// point at a socket removed by an earlier parent incarnation. With neither, fall back to
+			// an unreachable path so the settled result still lands in the durable completion outbox.
+			const publishedSocketPath = registrySelfOwnerPaneId
+				? await Effect.runPromise(readPublishedResultSocket(registrySelfOwnerPaneId))
+				: undefined;
+			const socketPath =
+				publishedSocketPath ?? herdrSubagentResultSocket() ?? unavailableResultSocketPath;
+			if (!latestCompletionArmId) {
+				await refreshCompletionArm();
 			}
 			await Effect.runPromise(
 				Effect.gen(function* () {
@@ -225,12 +300,20 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			directResultNames.clear();
 			latestFinalAssistantText = undefined;
 			latestCompletionArmId = undefined;
+			registrySelfResolved = false;
+			registrySelfName = undefined;
+			registrySelfOwnerPaneId = undefined;
+			const adoptedOwnerPaneId = ownerPaneId;
+			ownerPaneId = undefined;
 			const server = rpcServer;
 			rpcServer = undefined;
 			rpcServerStarting = false;
 			resultSocketPath = undefined;
 			if (server) {
 				discardPromise(server.close());
+			}
+			if (adoptedOwnerPaneId) {
+				discardPromise(nodeRuntime.runPromise(unpublishResultSocket(adoptedOwnerPaneId)));
 			}
 		});
 	}

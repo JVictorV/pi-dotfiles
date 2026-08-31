@@ -11,11 +11,10 @@
 				"FIGMA_API_KEY": "$env:FIGMA_API_KEY"
 			}
 		},
-		"ghidra": {
-			"command": "/home/ubuntu/.local/opt/ghidra-headless-mcp/.venv/bin/ghidra-headless-mcp",
-			"args": ["--ghidra-install-dir", "/home/ubuntu/.local/opt/ghidra"],
-			"env": {
-				"TMPDIR": "/home/ubuntu/ghidra-work/tmp"
+		"x64dbg": {
+			"url": "http://127.0.0.1:9094/",
+			"headers": {
+				"Authorization": "Bearer 5682e304b4a9d949176a3fea4f1e0d49"
 			}
 		}
 	}

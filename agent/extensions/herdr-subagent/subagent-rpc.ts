@@ -261,6 +261,65 @@ const serverLayer = (
 	);
 };
 
+const OwnerSocketPublication = Schema.fromJsonString(Schema.Struct({ socketPath: Schema.String }));
+const decodeOwnerSocketPublication = Schema.decodeUnknownEffect(OwnerSocketPublication);
+
+const ownerPublicationPath = (ownerId: string): string =>
+	path.join(rpcDirectory(), `owner-${safeFilePart(ownerId)}.json`);
+
+/**
+ * Publish the live orchestrator result socket for a herdr pane.
+ *
+ * Spawn-time env vars die with the original processes, so resumed sessions read this
+ * publication to re-attach children to a reopened orchestrator's new socket.
+ *
+ * @param ownerId - Pane id of the orchestrator session.
+ * @param socketPath - Live unix socket path of the orchestrator's result server.
+ * @returns True when the publication was written.
+ */
+export const publishResultSocket = (
+	ownerId: string,
+	socketPath: string,
+): Effect.Effect<boolean, never> =>
+	writePrivateRuntimeFile(ownerPublicationPath(ownerId), JSON.stringify({ socketPath }));
+
+/**
+ * Read the published result socket path for a herdr pane.
+ *
+ * @param ownerId - Pane id of the orchestrator session.
+ * @returns The published socket path, or undefined when absent or invalid.
+ */
+export const readPublishedResultSocket: (
+	ownerId: string,
+) => Effect.Effect<string | undefined, never> = Effect.fnUntraced(function* (ownerId) {
+	const text = yield* Effect.tryPromise({
+		try: () => readFile(ownerPublicationPath(ownerId), "utf8"),
+		catch: () => undefined,
+	}).pipe(Effect.catch(() => Effect.succeed(undefined)));
+	if (text === undefined) {
+		return undefined;
+	}
+	return yield* decodeOwnerSocketPublication(text).pipe(
+		Effect.map((publication) => publication.socketPath),
+		Effect.catch(() => Effect.succeed(undefined)),
+	);
+});
+
+/**
+ * Remove the published result socket path for a herdr pane.
+ *
+ * @param ownerId - Pane id of the orchestrator session being shut down.
+ * @returns Nothing; failures are ignored.
+ */
+export const unpublishResultSocket = (ownerId: string): Effect.Effect<void, never> =>
+	Effect.tryPromise({
+		try: () => rm(ownerPublicationPath(ownerId), { force: true }),
+		catch: () => undefined,
+	}).pipe(
+		Effect.catch(() => Effect.void),
+		Effect.asVoid,
+	);
+
 /**
  * Derive the unix socket path for one orchestrator session.
  *

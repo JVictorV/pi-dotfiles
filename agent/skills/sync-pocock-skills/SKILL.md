@@ -132,10 +132,10 @@ bash "$SKILL_ROOT/scripts/make-patch.sh" \
 
 | Claude Code pattern                     | Pi replacement                                                                                              |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `Agent tool with subagent_type=Explore` | Walk the codebase using `read`, `grep`, `find`, and `bash`.                                                 |
-| Spawn parallel sub-agents               | Produce the alternatives independently from the original brief; do not let one alternative anchor the next. |
-| Generic `sub-agent` / `subagent`        | Remove it or replace it with direct-agent instructions.                                                     |
-| Check `CLAUDE.md` first                 | Check `AGENTS.md` first and `CLAUDE.md` as fallback.                                                        |
+| `Agent tool with subagent_type=Explore` | Use a read-only `scout` through `herdr_subagent` for broad exploration; use `read`, `grep`, `find`, and `bash` directly for focused work. |
+| Spawn parallel sub-agents               | Use parallel panel-backed agents through `herdr_subagent`, then inspect and close each panel. Use isolated sequential passes if unavailable. |
+| Generic `sub-agent` / `subagent`        | Map it to the appropriate `herdr_subagent` role and lifecycle, or direct work when delegation overhead is not justified. |
+| Check `CLAUDE.md` first                 | Check `AGENTS.md` first and `CLAUDE.md` as fallback. |
 
 ### 6. Verify and report
 

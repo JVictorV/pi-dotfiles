@@ -1,10 +1,5 @@
 --- upstream/grilling/SKILL.md
 +++ ours/grilling/SKILL.md
-@@ -7,6 +7,6 @@
-
- Ask the questions one at a time, waiting for feedback on each question before continuing. Asking multiple questions at once is bewildering.
-
--If a *fact* can be found by exploring the environment (filesystem, tools, etc.), look it up rather than asking me. The *decisions*, though, are mine — put each one to me and wait for my answer.
-+If a _fact_ can be found by exploring the environment (filesystem, tools, etc.), look it up rather than asking me. The _decisions_, though, are mine — put each one to me and wait for my answer.
-
- Do not act on it until I confirm we have reached a shared understanding.
+@@ -26 +26 @@
+-Finding _facts_ is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), dispatch a sub-agent to find it; don't ask the user for anything you could look up yourself. Don't block on it: a running exploration is an unsettled prerequisite, so only the questions downstream of it wait for the sub-agent to report; ask the rest of the frontier now. The _decisions_ are the user's: put each to them and wait.
++Finding _facts_ is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), launch a `scout` agent with `herdr_subagent` when the tool is available; otherwise investigate directly with your tools. Keep working while the scout runs: treat its result as an unsettled prerequisite, ask the rest of the frontier, and inspect its panel after the completion notification before trusting the result. The _decisions_ are the user's: put each to them and wait.

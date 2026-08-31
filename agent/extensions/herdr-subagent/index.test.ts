@@ -33,6 +33,7 @@ import { createSubagentNotificationManager } from "./notifications";
 import { decodeRegistryEntry } from "./schemas";
 import {
 	notifySubagentFinished,
+	readPublishedResultSocket,
 	readSubagentCompletionArm,
 	SubagentCompletionDeliveryFailed,
 	startSubagentRpcServer,
@@ -1757,6 +1758,142 @@ describe("herdr_subagent extension", () => {
 			await rm(root, { recursive: true, force: true });
 		}
 	}, 8_000);
+
+	const writeOrphanedRegistryEntry = async (registryDir: string): Promise<void> => {
+		await mkdir(registryDir, { recursive: true });
+		await writeFile(
+			path.join(registryDir, "worker-a.json"),
+			`${JSON.stringify(
+				{
+					name: "worker-a",
+					phase: "active",
+					ownerPaneId: "wTest:p0",
+					target: "term-subagent",
+					paneId: "wTest:p1",
+					terminalId: "term-subagent",
+					tabId: "wTest:t2",
+					workspaceId: "wTest",
+					cwd: "/workspace",
+					label: "agent: worker-a",
+					taskFile: "/task-worker-a.md",
+					createdAt: "2026-01-01T00:00:00.000Z",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+				null,
+				2,
+			)}\n`,
+			"utf8",
+		);
+	};
+
+	// Unix sockets cannot exceed the ~107-char path limit, so these tests use short /tmp roots
+	// instead of makeTempRoot (whose $TMPDIR base makes rpc socket paths too long to bind).
+	test("a reopened orchestrator adopts orphaned subagents and resumed children redeliver results", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-resume-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			await installFakeHerdr(root);
+			setEnv("HERDR_ENV", "1");
+			setEnv("FAKE_HERDR_AGENT_STATUS", "working");
+			setSubagentSession(undefined);
+			const runtimeDir = path.join(agentDir, "herdr-subagents");
+			await writeOrphanedRegistryEntry(path.join(runtimeDir, "registry"));
+
+			// Reopened orchestrator session: fresh process, no spawn-time env anywhere.
+			const parent = await loadToolWithFakePi(agentDir);
+			await parent.dispatchAsync(
+				"session_start",
+				{ type: "session_start" },
+				{ mode: "print", hasUI: false },
+			);
+			let publishedSocketPath = "";
+			await vi.waitFor(
+				async () => {
+					const socketPath = await runHerdrSubagentEffect(readPublishedResultSocket("wTest:p0"));
+					expect(socketPath).toBeDefined();
+					publishedSocketPath = socketPath ?? "";
+					expect(publishedSocketPath).toMatch(/\.sock$/u);
+				},
+				{ timeout: 2_000, interval: 10 },
+			);
+			await access(publishedSocketPath);
+
+			// Seeded ownership keeps automatic delivery available without a fresh spawn.
+			const sendResult = await parent.tool.execute(
+				"tool-call-send",
+				{ action: "send", target: "worker-a", message: "Continue after the restart." },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			);
+			const sendText = sendResult.content.map((part) => part.text).join("");
+			expect(sendText).not.toContain("Automatic settled-result delivery is unavailable");
+
+			// Subagent resumed with pi --session in its pane: no identity or socket env vars.
+			setEnv("FAKE_HERDR_PANE_CURRENT_PANE_ID", "wTest:p1");
+			setEnv("FAKE_HERDR_PANE_CURRENT_TERMINAL_ID", "term-subagent");
+			const child = await loadToolWithFakePi(agentDir);
+			await child.dispatchAsync("agent_start");
+			child.dispatch("agent_end", {
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "STATUS: done\nresumed final report" }],
+					},
+				],
+			});
+			child.dispatch("agent_settled");
+			await vi.waitFor(
+				() => {
+					expect(parent.sentMessages).toHaveLength(1);
+				},
+				{ timeout: 3_000, interval: 20 },
+			);
+			const content = firstMessageContent(parent.sentMessages[0]?.message);
+			expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
+			expect(content).toContain("resumed final report");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 15_000);
+
+	test("orchestrator shutdown removes the published result socket", async () => {
+		const root = await mkdtemp(path.join("/tmp", "pi-hsa-pub-"));
+		try {
+			const agentDir = path.join(root, "agent");
+			await installFakeHerdr(root);
+			setEnv("HERDR_ENV", "1");
+			const loaded = await loadToolWithFakePi(agentDir);
+			await loaded.dispatchAsync(
+				"session_start",
+				{ type: "session_start" },
+				{ mode: "print", hasUI: false },
+			);
+			const publicationPath = path.join(
+				agentDir,
+				"herdr-subagents",
+				"rpc",
+				// safeFilePart normalizes the colon in the pane id.
+				"owner-wTest-p0.json",
+			);
+			await vi.waitFor(
+				async () => {
+					await access(publicationPath);
+				},
+				{ timeout: 2_000, interval: 10 },
+			);
+
+			await loaded.dispatchAsync("session_shutdown");
+			await vi.waitFor(
+				async () => {
+					await expect(access(publicationPath)).rejects.toThrow();
+				},
+				{ timeout: 2_000, interval: 10 },
+			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	}, 10_000);
 
 	test("concurrent sends preserve the completion arm for the last follow-up", async () => {
 		const root = await mkdtemp(path.join("/tmp", "pi-hsa-send-"));

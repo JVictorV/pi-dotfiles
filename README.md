@@ -117,8 +117,9 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
   `domain-modeling`, `grill-with-docs`, `grilling`, `handoff`, `implement`,
   `improve-codebase-architecture`, `prototype`, `research`,
   `resolving-merge-conflicts`, `setup-matt-pocock-skills`, `tdd`, `teach`,
-  `to-spec`, `to-tickets`, `triage`, `wayfinder`, `writing-great-skills`) is
-  installed and patched via the sync skill.
+  `to-questionnaire`, `to-spec`, `to-tickets`, `triage`, `wait-what`,
+  `wayfinder`, `wizard`, `writing-for-agents`) is installed and patched via
+  the sync skill.
 
 ## Settings highlights (`agent/settings.json`)
 

@@ -49,11 +49,23 @@ fi
 
 # Generate unified diff (patch format, from upstream to ours). Use stable labels
 # so regenerated patches do not churn on temp paths or timestamps.
-diff -u \
+diff -U0 \
   --label "upstream/$SKILL_NAME/$REL_PATH" \
   --label "ours/$SKILL_NAME/$REL_PATH" \
   "$UPSTREAM_FILE" \
   "$COMPARE_OUR_FILE" > "$PATCH_FILE" || true
+
+# GNU patch accepts empty context lines without the conventional single-space
+# prefix. Removing that prefix keeps generated .patch files free of trailing
+# whitespace while preserving their hunk structure.
+python3 - "$PATCH_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+patch_file = Path(sys.argv[1])
+lines = patch_file.read_text().splitlines(keepends=True)
+patch_file.write_text("".join("\n" if line == " \n" else line for line in lines))
+PY
 
 echo "Created: $PATCH_FILE"
 echo "Lines changed: $(grep -c '^[-+]' "$PATCH_FILE" | head -1)"

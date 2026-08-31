@@ -128,11 +128,15 @@ const originalEnv = {
 	FAKE_HERDR_WAIT_HANG: envRecord().FAKE_HERDR_WAIT_HANG,
 	FAKE_HERDR_AGENT_STATUS: envRecord().FAKE_HERDR_AGENT_STATUS,
 	FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE: envRecord().FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
+	FAKE_HERDR_AGENT_GET_REQUIRED_TARGET: envRecord().FAKE_HERDR_AGENT_GET_REQUIRED_TARGET,
+	FAKE_HERDR_AGENT_GET_TERMINAL_ID: envRecord().FAKE_HERDR_AGENT_GET_TERMINAL_ID,
 	FAKE_HERDR_PANE_RUN_FAIL: envRecord().FAKE_HERDR_PANE_RUN_FAIL,
 	FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY: envRecord().FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY,
 	FAKE_HERDR_PANE_RUN_DELAY_MESSAGE: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MESSAGE,
 	FAKE_HERDR_PANE_RUN_DELAY_MS: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MS,
 	FAKE_HERDR_PANE_CURRENT_FAIL: envRecord().FAKE_HERDR_PANE_CURRENT_FAIL,
+	FAKE_HERDR_PANE_CURRENT_PANE_ID: envRecord().FAKE_HERDR_PANE_CURRENT_PANE_ID,
+	FAKE_HERDR_PANE_CURRENT_TERMINAL_ID: envRecord().FAKE_HERDR_PANE_CURRENT_TERMINAL_ID,
 	FAKE_HERDR_AGENT_LIST_ENABLE: envRecord().FAKE_HERDR_AGENT_LIST_ENABLE,
 	FAKE_HERDR_AGENT_LIST_FAIL: envRecord().FAKE_HERDR_AGENT_LIST_FAIL,
 	FAKE_HERDR_AGENT_LIST_TERMINAL_ID: envRecord().FAKE_HERDR_AGENT_LIST_TERMINAL_ID,
@@ -343,11 +347,15 @@ const restoreEnv = (): void => {
 		"FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE",
 		originalEnv.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
 	);
+	setEnv("FAKE_HERDR_AGENT_GET_REQUIRED_TARGET", originalEnv.FAKE_HERDR_AGENT_GET_REQUIRED_TARGET);
+	setEnv("FAKE_HERDR_AGENT_GET_TERMINAL_ID", originalEnv.FAKE_HERDR_AGENT_GET_TERMINAL_ID);
 	setEnv("FAKE_HERDR_PANE_RUN_FAIL", originalEnv.FAKE_HERDR_PANE_RUN_FAIL);
 	setEnv("FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY", originalEnv.FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY);
 	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MESSAGE);
 	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MS);
 	setEnv("FAKE_HERDR_PANE_CURRENT_FAIL", originalEnv.FAKE_HERDR_PANE_CURRENT_FAIL);
+	setEnv("FAKE_HERDR_PANE_CURRENT_PANE_ID", originalEnv.FAKE_HERDR_PANE_CURRENT_PANE_ID);
+	setEnv("FAKE_HERDR_PANE_CURRENT_TERMINAL_ID", originalEnv.FAKE_HERDR_PANE_CURRENT_TERMINAL_ID);
 	setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", originalEnv.FAKE_HERDR_AGENT_LIST_ENABLE);
 	setEnv("FAKE_HERDR_AGENT_LIST_FAIL", originalEnv.FAKE_HERDR_AGENT_LIST_FAIL);
 	setEnv("FAKE_HERDR_AGENT_LIST_TERMINAL_ID", originalEnv.FAKE_HERDR_AGENT_LIST_TERMINAL_ID);
@@ -422,7 +430,7 @@ if (args[0] === "pane" && args[1] === "current") {
     process.stderr.write("pane current failed");
     process.exit(1);
   }
-  writeJson({ result: { pane: { pane_id: "wTest:p0", terminal_id: "term-root", tab_id: "wTest:t1", workspace_id: "wTest", cwd: "/workspace", foreground_cwd: "/workspace" } } });
+  writeJson({ result: { pane: { pane_id: process.env.FAKE_HERDR_PANE_CURRENT_PANE_ID || "wTest:p0", terminal_id: process.env.FAKE_HERDR_PANE_CURRENT_TERMINAL_ID || "term-root", tab_id: "wTest:t1", workspace_id: "wTest", cwd: "/workspace", foreground_cwd: "/workspace" } } });
   process.exit(0);
 }
 if (args[0] === "tab" && args[1] === "create") {
@@ -465,8 +473,14 @@ if (args[0] === "tab" && args[1] === "get") {
   process.exit(0);
 }
 if (args[0] === "agent" && args[1] === "get") {
+  const requiredTarget = process.env.FAKE_HERDR_AGENT_GET_REQUIRED_TARGET;
+  if (requiredTarget && args[2] !== requiredTarget) {
+    process.stderr.write("unknown agent: " + args[2]);
+    process.exit(1);
+  }
   const agentStatus = nextAgentStatus();
-  writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: args[2], tab_id: "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" } } });
+  const terminalId = process.env.FAKE_HERDR_AGENT_GET_TERMINAL_ID || args[2];
+  writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: terminalId, tab_id: "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" } } });
   process.exit(0);
 }
 if (args[0] === "agent" && args[1] === "list") {

@@ -6,3 +6,4 @@ zoom-out	-	removed	mattpocock-skills@1.0.0	Remove the local skill; upstream remo
 caveman	-	removed	mattpocock-skills@1.0.0	Remove the local skill; upstream says it was never intended to be public.
 to-issues	to-tickets	replaced	main@d574778	Unified planning skills (386d4ff): install to-tickets, remove to-issues.
 to-prd	to-spec	replaced	main@d574778	Unified planning skills (386d4ff): install to-spec, remove to-prd.
+writing-great-skills	writing-for-agents	renamed	main@77d207e	Breaking rename: broaden the reference from skills to all agent-facing documents and move skill-only mechanics to SKILL-MECHANICS.md.

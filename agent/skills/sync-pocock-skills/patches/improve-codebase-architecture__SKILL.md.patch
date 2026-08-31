@@ -1,25 +1,17 @@
 --- upstream/improve-codebase-architecture/SKILL.md
 +++ ours/improve-codebase-architecture/SKILL.md
-@@ -17,14 +17,14 @@
-
- ### 1. Explore
-
--**Scope before you scan — YAGNI.** Deepening a module pays off by making future changes to it easier, so put extra weight on the parts of the codebase that have recently changed. Decide *where* to look before you look:
-+**Scope before you scan — YAGNI.** Deepening a module pays off by making future changes to it easier, so put extra weight on the parts of the codebase that have recently changed. Decide _where_ to look before you look:
-
- - If the user named a direction — a module, a subsystem, a pain point — take it, and skip the inference below.
- - Otherwise, walk back a good stretch of the commit history (`git log --oneline`) to find the codebase's hot spots — the files and areas that keep coming up — and let those paths pull your attention first. If the changes are scattered with no clear hot spot, widen the net.
-
- Read the project's domain glossary (`CONTEXT.md`) and any ADRs in the area you're touching first.
-
--Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Don't follow rigid heuristics — explore organically and note where you experience friction:
-+Then walk the codebase using your tools (`read`, `grep`, `find`, `bash`). Don't follow rigid heuristics — explore organically and note where you experience friction:
-
- - Where does understanding one concept require bouncing between many small modules?
- - Where are modules **shallow** — interface nearly as complex as the implementation?
-@@ -68,4 +68,4 @@
- - **Naming a deepened module after a concept not in `CONTEXT.md`?** Add the term to `CONTEXT.md`. Create the file lazily if it doesn't exist.
- - **Sharpening a fuzzy term during the conversation?** Update `CONTEXT.md` right there.
- - **User rejects the candidate with a load-bearing reason?** Offer an ADR, framed as: _"Want me to record this as an ADR so future architecture reviews don't re-suggest it?"_ Only offer when the reason would actually be needed by a future explorer to avoid re-suggesting the same thing — skip ephemeral reasons ("not worth it right now") and self-evident ones.
--- **Want to explore alternative interfaces for the deepened module?** Run the `/codebase-design` skill and use its design-it-twice parallel sub-agent pattern.
-+- **Want to explore alternative interfaces for the deepened module?** Run the `/codebase-design` skill and use its design-it-twice process.
+@@ -13 +13 @@
+-- Call the Skill tool with "codebase-design" for the architecture vocabulary (**module**, **interface**, **depth**, **seam**, **adapter**, **leverage**, **locality**) and its principles (the deletion test, "the interface is the test surface", "one adapter = hypothetical seam, two = real"). Use these terms exactly in every suggestion, and don't drift into "component," "service," "API," or "boundary."
++- Run the `/codebase-design` skill for the architecture vocabulary (**module**, **interface**, **depth**, **seam**, **adapter**, **leverage**, **locality**) and its principles (the deletion test, "the interface is the test surface", "one adapter = hypothetical seam, two = real"). Use these terms exactly in every suggestion, and don't drift into "component," "service," "API," or "boundary."
+@@ -27 +27 @@
+-Then spawn a sub-agent to walk the codebase. Don't follow rigid heuristics; explore organically and note where you experience friction:
++If `herdr_subagent` is available, call its `status` action and launch a read-only `scout` agent with `thinking: medium` to walk the codebase. Give it the scoped paths, domain glossary, relevant ADRs, and the questions below. Rely on its completion notification, inspect its panel before using the findings, and close it after harvesting the report. Otherwise, walk the codebase directly with `read`, `grep`, `find`, and read-only `bash` commands. Don't follow rigid heuristics; explore organically and note where you experience friction:
+@@ -64 +64 @@
+-Once the user picks a candidate, call the Skill tool with "grilling" to walk the decision tree with them: constraints, dependencies, the shape of the deepened module, what sits behind the seam, what tests survive.
++Once the user picks a candidate, run the `/grilling` skill to walk the decision tree with them: constraints, dependencies, the shape of the deepened module, what sits behind the seam, what tests survive.
+@@ -66 +66 @@
+-Side effects happen inline as decisions crystallize; call the Skill tool with "domain-modeling" to keep the domain model current as you go:
++Side effects happen inline as decisions crystallize; run the `/domain-modeling` skill to keep the domain model current as you go:
+@@ -71 +71 @@
+-- **Want to explore alternative interfaces for the deepened module?** Call the Skill tool with "codebase-design" and use its design-it-twice parallel sub-agent pattern.
++- **Want to explore alternative interfaces for the deepened module?** Run the `/codebase-design` skill and use its design-it-twice `herdr_subagent` process.

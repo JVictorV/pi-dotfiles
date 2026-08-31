@@ -15,7 +15,7 @@ import {
 	writeTextFile,
 } from "./runtime-files";
 import { decodeJsonString, decodeRegistryEntry } from "./schemas";
-import type { HerdrAgent } from "./schemas";
+import type { HerdrAgent, HerdrPane } from "./schemas";
 import { isSubagentName } from "./subagent-name";
 import type { RegistryEntry } from "./types";
 
@@ -308,6 +308,34 @@ export const findEntry = (
 	}
 	return entries.find(
 		(entry) => entry.target === target || entry.paneId === target || entry.tabId === target,
+	);
+};
+
+/**
+ * Find a registry entry whose recorded pane or terminal identity matches a live herdr pane.
+ *
+ * Resumed subagent sessions no longer carry spawn-time env vars; matching the current
+ * pane back to its entry restores the subagent name and orchestrator linkage.
+ *
+ * @param entries - Entries to search.
+ * @param pane - The herdr pane the current pi session runs in.
+ * @returns The matched entry, if any.
+ */
+export const findEntryForPane = (
+	entries: ReadonlyArray<RegistryEntry>,
+	pane: HerdrPane,
+): RegistryEntry | undefined => {
+	const paneId = pane.pane_id;
+	if (paneId) {
+		const byPaneId = entries.find((entry) => entry.paneId === paneId);
+		if (byPaneId) {
+			return byPaneId;
+		}
+	}
+	const terminalId = pane.terminal_id;
+	return entries.find(
+		(entry) =>
+			terminalId !== undefined && (entry.terminalId === terminalId || entry.target === terminalId),
 	);
 };
 

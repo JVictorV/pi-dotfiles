@@ -1,3 +1,10 @@
+# Operator environment
+
+My dev machine runs Linux. Manual tests against the game run on my Windows
+PC — reach it with `ssh maven`. When a task needs running Windows binaries
+(loader, injector, game-side verification), do it over SSH on `maven`; don't
+assume local execution is possible.
+
 # TypeScript Coding Standards
 
 These standards describe how to design and write TypeScript code in this codebase. They are especially intended for agents: before adding patterns, libraries, adapters, or abstractions, read the existing code and prefer the local convention unless it conflicts with the safety/correctness principles below.
