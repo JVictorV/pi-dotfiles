@@ -8,7 +8,7 @@ compatibility: Requires running inside herdr (HERDR_ENV=1), the herdr_subagent e
 
 Use this skill when the current pi session is acting as a lightweight orchestrator for other pi agents in herdr.
 
-This only works inside herdr: the `herdr_subagent` tool refuses every action when `HERDR_ENV` is not `1`. If that happens, tell the user and stop.
+This only works inside herdr: the `herdr_subagent` tool refuses every action when `HERDR_ENV` is not `1`. If herdr is unavailable, stop using the orchestration tool and continue independently authorized work directly. Report the limit when it affects the result. If the requested outcome requires herdr panels, report that blocker.
 
 ## Mental model
 

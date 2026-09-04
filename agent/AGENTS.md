@@ -5,6 +5,13 @@ PC — reach it with `ssh maven`. When a task needs running Windows binaries
 (loader, injector, game-side verification), do it over SSH on `maven`; don't
 assume local execution is possible.
 
+# Task execution
+
+- Treat action requests such as “can you fix…” as instructions to do the work. Complete the authorized work, including appropriate verification, rather than stopping at a plan or partial result.
+- Make reasonable assumptions for routine gaps. Before asking a question, complete the authorized work that does not depend on its answer. Ask when the answer would materially change the outcome or authorization is missing for a destructive or external action.
+- Treat skill steps as workflow defaults. Explicit user instructions take precedence over those defaults, subject to higher-priority instructions and tool permissions. Preserve deliberate interactive workflows, delegated edit limits, and stops caused by unavailable required project instructions.
+- If a skill causes a pause, unfinished work, or a departure from the user's request, link the exact `SKILL.md`, quote the relevant instruction, and explain its effect. Distinguish the instruction from your interpretation.
+
 # TypeScript Coding Standards
 
 These standards describe how to design and write TypeScript code in this codebase. They are especially intended for agents: before adding patterns, libraries, adapters, or abstractions, read the existing code and prefer the local convention unless it conflicts with the safety/correctness principles below.
@@ -27,6 +34,7 @@ New code paths, modules, adapters, and services should generally follow these st
 - Keep changes narrowly scoped to the requested behavior. Do not include unrelated refactors, renames, metadata churn, speculative features, or incidental cleanup.
 - Add an abstraction only when it removes real complexity, eliminates meaningful duplication, or matches an established local pattern. Do not introduce abstractions merely for hypothetical reuse or future extensibility.
 - Scale tests with risk and blast radius. Keep tests focused for narrow changes; broaden them only for shared behavior, cross-module contracts, regressions, or critical user workflows.
+- After appropriate checks pass, repeat or broaden them only for new changes, failures, or unresolved concerns. Then complete the task.
 - Do not test static declarations, implementation details, removed behavior, trivial forwarding code, or invariants already guaranteed by types and boundary parsers.
 - When requirements are unclear, implement the minimum behavior needed for correctness. Do not invent additional policy, edge cases, configuration, extensibility, or fallback behavior without a concrete requirement.
 

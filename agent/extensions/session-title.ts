@@ -18,6 +18,7 @@
  *   falls back to the currently active model when none is available/authed.
  */
 
+import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import { type Api, complete, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Clock, Effect, Option, Schema } from "effect";
@@ -37,7 +38,7 @@ const PREFERRED_TITLE_MODELS: ReadonlyArray<{ provider: string; id: string }> = 
 type ResolvedModel = {
 	model: Model<Api>;
 	apiKey: string;
-	headers: Record<string, string> | undefined;
+	headers: ProviderHeaders | undefined;
 };
 
 /** Typed failure for any step of title generation (resolution or completion). */

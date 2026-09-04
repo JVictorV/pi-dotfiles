@@ -325,7 +325,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 		promptSnippet:
 			"Spawn, inspect, command, wait on, focus, and close pi subagents in herdr tabs/panels",
 		promptGuidelines: [
-			"Use herdr_subagent when the user asks to orchestrate subagents, spawn panel-backed agents, inspect agent panels, or coordinate work across herdr.",
+			"Use herdr_subagent when the user asks to orchestrate subagents or when delegating independent work can save time or improve quality. Use it to spawn panel-backed agents, inspect agent panels, or coordinate work across herdr.",
 			"Call herdr_subagent with action=status before controlling existing panel-backed subagents.",
 			"When using herdr_subagent action=spawn, prefer the agent type's model default; before overriding it, read ~/.pi/agent/agents/MODEL-MATRIX.md and pick per its matrix. Use openai-codex/gpt-5.6-sol by default. Never suggest or select Luna for subagents. Terra is allowed only with high or xhigh thinking; other logged-in models remain available when the matrix favors them.",
 			"Only use low, medium, high, or xhigh thinking for herdr_subagent spawns; never use off or minimal.",
