@@ -19,3 +19,6 @@
 [submodule ".repos/pi-openai-server-compaction"]
 	path = .repos/pi-openai-server-compaction
 	url = https://github.com/algal/pi-openai-server-compaction.git
+[submodule ".repos/herdr-ts-sdk"]
+	path = .repos/herdr-ts-sdk
+	url = https://github.com/dmmulroy/herdr-ts-sdk.git
