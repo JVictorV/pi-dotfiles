@@ -4,6 +4,7 @@ import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
 
 import { buildTaskPrompt, discoverAgents, formatAgentTypes } from "./agents";
+import type { CompletionArm } from "./completion";
 import {
 	failAction,
 	HerdrNotAvailable,
@@ -51,7 +52,6 @@ import {
 	updateEntryHints,
 } from "./store";
 import { deleteRuntimeFiles, writeRuntimeFile } from "./runtime-files";
-import { readSubagentCompletionArm, writeSubagentCompletionArm } from "./subagent-rpc";
 import * as SubagentName from "./subagent-name";
 import {
 	cleanupWorktree,
@@ -120,10 +120,11 @@ export type ActionOutcome = Omit<ToolResult, "details"> & {
 
 type HerdrActionRequirements = HerdrSdk | FileSystem | Path;
 
-interface HerdrActionEnvironment {
+/** Action inputs supplied by the session-scoped completion coordinator. */
+export interface HerdrActionEnvironment {
 	readonly resultSocketPath?: string;
-	readonly completionArmId?: string;
-	readonly onCompletionArmPrepared?: (resolved: ResolvedPane, armId: string) => void;
+	/** Action-scoped arm that must wrap pane input for spawn and send. */
+	readonly completionArm?: CompletionArm;
 }
 
 const DEFAULT_INSPECT_LINES = 120;
@@ -486,13 +487,10 @@ const commandSpawn: (
 				.map(([key, value]) => `${key}=${shellQuote(value)}`)
 				.join(" ");
 			const command = `export ${exports} && ${commandParts.map(shellQuote).join(" ")}`;
-			if (environment.completionArmId) {
-				const armed = yield* writeSubagentCompletionArm(name, environment.completionArmId);
-				if (!armed) {
-					return yield* failAction(`Could not arm direct result delivery for ${name}.`);
-				}
-			}
-			yield* runInPane(paneId, command);
+			const paneInput = runInPane(paneId, command);
+			yield* environment.completionArm
+				? environment.completionArm.runInput({ name, paneId }, paneInput)
+				: paneInput;
 
 			const createdAt = yield* nowIso;
 			const updatedAt = yield* nowIso;
@@ -574,23 +572,10 @@ const commandSend: (
 		}
 		const entries = yield* listEntries;
 		const resolved = yield* resolvePane(target, entries);
-		const previousArmId = environment.completionArmId
-			? yield* readSubagentCompletionArm(resolved.name)
-			: undefined;
-		if (environment.completionArmId) {
-			environment.onCompletionArmPrepared?.(resolved, environment.completionArmId);
-			const armed = yield* writeSubagentCompletionArm(resolved.name, environment.completionArmId);
-			if (!armed) {
-				return yield* failAction(`Could not arm direct result delivery for ${resolved.name}.`);
-			}
-		}
-		const sendResult = yield* runInPane(resolved.paneId, params.message).pipe(Effect.result);
-		if (Result.isFailure(sendResult)) {
-			if (environment.completionArmId) {
-				yield* writeSubagentCompletionArm(resolved.name, previousArmId ?? "");
-			}
-			return yield* Effect.fail(sendResult.failure);
-		}
+		const paneInput = runInPane(resolved.paneId, params.message);
+		yield* environment.completionArm
+			? environment.completionArm.runInput(resolved, paneInput)
+			: paneInput;
 		return {
 			content: [textContent(`Sent message to ${resolved.name} (${resolved.paneId}).`)],
 			details: { action: "send", resolved },

@@ -1,12 +1,11 @@
-import { randomUUID } from "node:crypto";
-
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { herdrSdkLayerFromOptions } from "@herdr/sdk";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Clock, ConfigProvider, Duration, Effect, Layer, ManagedRuntime } from "effect";
 
-import { DEFAULT_SUBAGENT_MODEL, executeAction } from "./actions";
+import { DEFAULT_SUBAGENT_MODEL } from "./actions";
+import { createSubagentCompletionCoordinator } from "./completion";
 import {
 	configurationProvider,
 	herdrSubagentName,
@@ -112,14 +111,15 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 	const notifications = createSubagentNotificationManager(pi, (effect, options) =>
 		nodeRuntime.runPromise(effect, options),
 	);
+	const completion = createSubagentCompletionCoordinator(notifications, (effect, options) =>
+		nodeRuntime.runPromise(effect, options),
+	);
 	let rpcServer: SubagentRpcServer | undefined;
 	let rpcServerStarting = false;
 	let resultSocketPath: string | undefined;
 	let latestFinalAssistantText: string | undefined;
 	let latestCompletionArmId: string | undefined;
-	let sendQueue: Promise<void> = Promise.resolve();
 	const unavailableResultSocketPath = subagentRpcSocketPath("unavailable");
-	const directResultNames = new Set<string>();
 	// Orchestrator-side durable wiring. The owner publication lets resumed subagent sessions
 	// find this process's result socket after spawn-time env vars died with an earlier run.
 	let ownerPaneId: string | undefined;
@@ -144,7 +144,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 					const entries = yield* listEntries;
 					for (const entry of entries) {
 						if (entryPhase(entry) === "active" && entry.ownerPaneId === paneId) {
-							directResultNames.add(entry.name);
+							completion.adoptDirectResult(entry.name);
 						}
 					}
 				}),
@@ -279,7 +279,7 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			stopped = true;
 			notifications.cancelAll();
 			await rpcStartup?.catch(() => undefined);
-			directResultNames.clear();
+			completion.reset();
 			latestFinalAssistantText = undefined;
 			latestCompletionArmId = undefined;
 			registrySelfResolved = false;
@@ -404,150 +404,27 @@ export default function herdrSubagentExtension(pi: ExtensionAPI) {
 			// the random unavailable path makes the child use the durable completion outbox instead
 			// of trusting transient pane status during automatic compaction.
 			const actionResultSocketPath = resultSocketPath ?? unavailableResultSocketPath;
-			const acknowledgeInspection =
-				params.action === "inspect" ? notifications.beginInspection() : undefined;
-			const acceptResultsSinceMs = Date.now();
-			const completionArmId =
-				actionResultSocketPath &&
-				params.notify !== false &&
-				(params.action === "spawn" || params.action === "send")
-					? randomUUID()
-					: undefined;
-			const reservedSpawnName =
-				params.action === "spawn" && params.notify !== false && typeof params.name === "string"
-					? params.name
-					: undefined;
-			let spawnReservationArmed = false;
-			let provisionalSendWatcherArmed = false;
-			if (reservedSpawnName) {
-				notifications.beginBatchMember(reservedSpawnName);
-			}
-			const executeWithNotifications = () => {
-				return nodeRuntime
-					.runPromise(
-						executeAction(params, ctx, {
-							resultSocketPath: actionResultSocketPath,
-							completionArmId,
-							onCompletionArmPrepared(resolved, armId) {
-								const acceptedByExistingWatcher = notifications.acceptArm(resolved.name, armId);
-								if (
-									!acceptedByExistingWatcher &&
-									params.notify !== false &&
-									directResultNames.has(resolved.name)
-								) {
-									provisionalSendWatcherArmed = true;
-									notifications.arm({
-										name: resolved.name,
-										paneId: resolved.paneId,
-										summarySource: params.message ?? "subagent follow-up message",
-										completionSource: "rpc",
-										acceptResultsSinceMs,
-										expectedArmId: armId,
-									});
-								}
-							},
-						}),
-						{ signal },
-					)
-					.then((result) => {
-						const details = result.details;
-						const completionArrivedDuringAction = completionArmId
-							? notifications.hasDeliveredArm(completionArmId)
-							: false;
-						let automaticNotificationUnavailable = false;
-						if (details.action === "spawn" && details.entry && actionResultSocketPath) {
-							directResultNames.add(details.entry.name);
-						}
-						if (details.action === "spawn" && details.entry && params.notify !== false) {
-							notifications.arm({
-								name: details.entry.name,
-								paneId: details.entry.paneId ?? details.entry.target ?? details.entry.name,
-								summarySource: params.task ?? "spawned subagent task",
-								completionSource: directResultNames.has(details.entry.name) ? "rpc" : "poll",
-								acceptResultsSinceMs,
-								expectedArmId: completionArmId,
-							});
-							spawnReservationArmed = true;
-						} else if (reservedSpawnName) {
-							notifications.releaseBatchMember(reservedSpawnName);
-						}
-						if (details.action === "send") {
-							if (params.notify === false) {
-								notifications.cancel(details.resolved.paneId);
-							} else if (directResultNames.has(details.resolved.name)) {
-								if (!provisionalSendWatcherArmed && !completionArrivedDuringAction) {
-									notifications.arm({
-										name: details.resolved.name,
-										paneId: details.resolved.paneId,
-										summarySource: params.message ?? "subagent follow-up message",
-										completionSource: "rpc",
-										acceptResultsSinceMs,
-										expectedArmId: completionArmId,
-									});
-								}
-							} else {
-								notifications.cancel(details.resolved.paneId);
-								automaticNotificationUnavailable = true;
-							}
-						}
-						if (details.action === "wait") {
-							notifications.cancel(details.resolved.paneId);
-						}
-						if (details.action === "close") {
-							notifications.cancel(
-								details.entry?.paneId ?? details.resolved?.paneId ?? params.target ?? params.name,
-							);
-							const closedName = details.entry?.name ?? details.resolved?.name ?? params.name;
-							if (closedName) {
-								directResultNames.delete(closedName);
-							}
-						}
-						if (
-							(details.action === "spawn" && details.entry) ||
-							details.action === "send" ||
-							details.action === "close"
-						) {
-							// Registry just changed; refresh the widget immediately instead of
-							// waiting out the idle poll cadence.
-							overviewWidget.poke();
-						}
-						if (automaticNotificationUnavailable) {
-							return {
-								...result,
-								content: [
-									...result.content,
-									textContent(
-										"Automatic settled-result delivery is unavailable for this unmanaged pane. Use action=wait when you need completion.",
-									),
-								],
-							};
-						}
-						if (!result.isError && details.action === "inspect" && acknowledgeInspection) {
-							const consumedCompletions = acknowledgeInspection(
-								details.resolved.name,
-								details.resolved.paneId,
-								result.content.map((part) => part.text).join("\n"),
-							);
-							return { ...result, details: { ...details, consumedCompletions } };
-						}
-						return result;
-					});
-			};
-			const execution =
-				params.action === "send"
-					? sendQueue.then(executeWithNotifications)
-					: executeWithNotifications();
-			if (params.action === "send") {
-				sendQueue = execution.then(
-					() => undefined,
-					() => undefined,
-				);
-			}
-			return execution.finally(() => {
-				if (reservedSpawnName && !spawnReservationArmed) {
-					notifications.releaseBatchMember(reservedSpawnName);
-				}
-			});
+			return completion
+				.execute(params, ctx, { signal, resultSocketPath: actionResultSocketPath })
+				.then(({ result, registryChanged, automaticNotificationUnavailable }) => {
+					if (registryChanged) {
+						// Registry just changed; refresh the widget immediately instead of
+						// waiting out the idle poll cadence.
+						overviewWidget.poke();
+					}
+					if (automaticNotificationUnavailable) {
+						return {
+							...result,
+							content: [
+								...result.content,
+								textContent(
+									"Automatic settled-result delivery is unavailable for this unmanaged pane. Use action=wait when you need completion.",
+								),
+							],
+						};
+					}
+					return result;
+				});
 		},
 	});
 }

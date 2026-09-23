@@ -4,6 +4,14 @@ Personal configuration for the pi coding agent, including extensions, skills, se
 
 ## Language
 
+**Subagent Completion**:
+The settled report for one subagent turn. A progress sample or an idle pane is not a subagent completion.
+_Avoid_: Pane status, progress update
+
+**Completion Arm**:
+The identity that associates a subagent completion with a spawn or follow-up attempt. A failed send can still have a completion if the subagent received its input.
+_Avoid_: Pane ID, session ID
+
 **Status Line**:
 A single-line pi UI strip below the editor that summarizes the active session and local environment.
 _Avoid_: Footer, prompt, toolbar
