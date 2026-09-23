@@ -3,16 +3,11 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Effect } from "effect";
 import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
-import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+import type { HerdrSdk } from "@herdr/sdk";
 
-import {
-	currentPane,
-	decodeHerdrJson,
-	isHerdrSubagentSession,
-	isRunningInsideHerdr,
-} from "./herdr-cli";
+import { isHerdrSubagentSession, isRunningInsideHerdr } from "./environment";
+import { currentPane, listAgents } from "./herdr-client";
 import { buildOverview, type Overview, type OverviewTheme, renderOverview } from "./overview";
-import { decodeAgentListResponse } from "./schemas";
 import { listEntries } from "./store";
 import type { RegistryEntry } from "./types";
 
@@ -67,7 +62,7 @@ const overviewWidget =
 const DEFAULT_ACTIVE_POLL_MS = 1_000;
 const DEFAULT_IDLE_POLL_MS = 15_000;
 
-type OverviewWidgetRequirements = ChildProcessSpawner | FileSystem | Path;
+type OverviewWidgetRequirements = HerdrSdk | FileSystem | Path;
 type RunPromise = <A>(effect: Effect.Effect<A, unknown, OverviewWidgetRequirements>) => Promise<A>;
 
 const entriesForOwner = (
@@ -172,8 +167,7 @@ export const registerOverviewWidget = (
 							if (entries.length === 0) {
 								return { entries, agents: [] };
 							}
-							const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
-							return { entries, agents: response.result.agents };
+							return { entries, agents: yield* listAgents() };
 						}),
 					),
 				)

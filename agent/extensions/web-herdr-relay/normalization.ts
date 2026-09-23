@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { stripVTControlCharacters } from 'node:util'
 
 /** Maximum text retained from one Pi field before relay serialization. */
 export const MAXIMUM_RELAY_TEXT_LENGTH = 16_000
@@ -27,6 +28,8 @@ export type RelayModelOption = {
 /** A browser-safe transcript message. */
 export type RelayMessage = {
   readonly compaction?: { readonly tokensBefore: number }
+  /** Sanitized model failure detail, separate from any partial reply. */
+  readonly errorMessage?: string
   readonly id: string
   readonly images?: ReadonlyArray<RelayImageMetadata>
   readonly isError?: boolean
@@ -405,6 +408,26 @@ function collapseUploadedFiles(text: string): string {
   return content.length === 0 ? summary : `${summary}\n\n${content}`
 }
 
+function assistantErrorMessage(
+  value: unknown,
+  sessionPaths: ReadonlyArray<string>,
+): string {
+  if (typeof value !== 'string') return 'Pi could not complete the response.'
+  // Provider failures can echo credentials. Remove credential fields and common
+  // token forms before bounding the text, so truncation cannot expose a prefix.
+  const sanitized = stripVTControlCharacters(value)
+    .replace(/\b(?:Bearer|Basic)\s+[^\s"',;<>]+/gi, '[redacted credential]')
+    .replace(/((?:["']?)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|client[_-]?secret)(?:["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&,;]+)(?:\s+[^\r\n]*)?/gi, '$1[redacted credential]')
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, '[redacted credential]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted credential]')
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted credential]@')
+  // Browser schemas count UTF-16 code units. Keep supplementary characters within
+  // that limit without splitting a surrogate pair.
+  const bounded = boundedText(sanitized, MAXIMUM_RELAY_TEXT_LENGTH, sessionPaths)
+  const text = bounded.slice(0, MAXIMUM_RELAY_TEXT_LENGTH).replace(/[\uD800-\uDBFF]$/, '')
+  return text.trim() || 'Pi could not complete the response.'
+}
+
 /** Normalize a persisted or streaming Pi message for browser display. */
 export function normalizeMessage(
   id: string,
@@ -438,7 +461,12 @@ export function normalizeMessage(
       'assistant',
       extractText(record.content, sessionPaths),
       timestamp,
-      thinking === undefined ? undefined : { thinking },
+      {
+        ...(thinking === undefined ? {} : { thinking }),
+        ...(record.stopReason === 'error'
+          ? { isError: true, errorMessage: assistantErrorMessage(record.errorMessage, sessionPaths) }
+          : {}),
+      },
     )
   }
   if (record.role === 'toolResult') {
@@ -562,7 +590,7 @@ export function normalizeActiveBranch(
       )
       if (
         message !== undefined &&
-        (message.text.length > 0 || message.thinking !== undefined || message.images !== undefined)
+        (message.text.length > 0 || message.thinking !== undefined || message.images !== undefined || message.errorMessage !== undefined)
       ) {
         messages.push(message)
       }
@@ -739,13 +767,14 @@ function createMessage(
   role: RelayMessage['role'],
   text: string,
   timestamp: number,
-  extra?: Pick<RelayMessage, 'images' | 'isError' | 'thinking' | 'toolCallId'>,
+  extra?: Pick<RelayMessage, 'errorMessage' | 'images' | 'isError' | 'thinking' | 'toolCallId'>,
 ): RelayMessage {
   return {
     id: boundedIdentifier(id, 'message'),
     role,
     text,
     timestamp,
+    ...(extra?.errorMessage === undefined ? {} : { errorMessage: extra.errorMessage }),
     ...(extra?.images === undefined ? {} : { images: extra.images }),
     ...(extra?.thinking === undefined ? {} : { thinking: extra.thinking }),
     ...(extra?.toolCallId === undefined ? {} : { toolCallId: boundedIdentifier(extra.toolCallId, 'tool') }),

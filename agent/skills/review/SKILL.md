@@ -1,6 +1,7 @@
 ---
 name: review
-description: Alias for the code-review skill. Use when the user says /review or asks to review a diff, PR, branch, or changes since a fixed point.
+description: Alias for the code-review skill.
+disable-model-invocation: true
 ---
 
 # Review

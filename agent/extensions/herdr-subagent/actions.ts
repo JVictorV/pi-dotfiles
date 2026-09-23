@@ -1,12 +1,11 @@
+import type { HerdrSdk, HerdrUnsupportedProtocol } from "@herdr/sdk";
 import { Clock, Effect, Result } from "effect";
 import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
-import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
 import { buildTaskPrompt, discoverAgents, formatAgentTypes } from "./agents";
 import {
 	failAction,
-	HerdrCommandFailed,
 	HerdrNotAvailable,
 	type HerdrSubagentError,
 	SubagentRecursionDenied,
@@ -16,15 +15,24 @@ import {
 	WaitTimedOut,
 } from "./errors";
 import {
-	currentPane,
-	decodeHerdrJson,
 	isHerdrSubagentSession,
 	isHerdrSubagentSpawnAllowed,
 	isRunningInsideHerdr,
+} from "./environment";
+import {
+	closePane,
+	closeTab,
+	createTab,
+	currentPane,
+	focusAgent,
+	listAgents,
 	liveAgent,
-	runHerdr,
+	readPane,
+	renamePane,
+	runInPane,
 	tabExists,
-} from "./herdr-cli";
+	waitForAgentStatus,
+} from "./herdr-client";
 import { resolveModelReference } from "./model-resolver";
 import { requireTarget, resolvePane } from "./pane";
 import { textContent, truncateForModel } from "./output";
@@ -52,11 +60,13 @@ import {
 	type WorktreeCleanupResult,
 	type WorktreeInfo,
 } from "./worktree";
-import { decodeAgentListResponse, decodeTabCreateResponse } from "./schemas";
 import {
 	isSubagentThinking,
 	SUBAGENT_THINKING_LEVELS,
 	type AgentDefinition,
+	type AgentDiscovery,
+	type PaneReadSource,
+	type WaitStatus,
 	type HerdrSubagentAction,
 	type HerdrSubagentParams,
 	type PiToolContext,
@@ -65,7 +75,50 @@ import {
 	type ToolResult,
 } from "./types";
 
-type HerdrActionRequirements = ChildProcessSpawner | FileSystem | Path;
+/** Typed action results. Details retain the public tool serialization shape. */
+export type ActionOutcome = Omit<ToolResult, "details"> & {
+	readonly details:
+		| { readonly action: "status"; readonly entries: ReadonlyArray<RegistryEntry> }
+		| {
+				readonly action: "agent-types";
+				readonly projectAgentsDir: string | null;
+				readonly agents: AgentDiscovery["agents"];
+		  }
+		| { readonly action: "spawn"; readonly entry: RegistryEntry; readonly projectAgentsDir?: never }
+		| { readonly action: "spawn"; readonly projectAgentsDir: string | null; readonly entry?: never }
+		| {
+				readonly action: "inspect";
+				readonly target: string;
+				readonly resolved: ResolvedPane;
+				readonly source: PaneReadSource;
+				readonly lines: number;
+				readonly truncated: boolean;
+				readonly consumedCompletions?: ReadonlyArray<string>;
+		  }
+		| { readonly action: "send"; readonly resolved: ResolvedPane }
+		| {
+				readonly action: "wait";
+				readonly resolved: ResolvedPane;
+				readonly status: WaitStatus;
+				readonly observed?: "done" | "idle";
+		  }
+		| { readonly action: "focus"; readonly target: string }
+		| {
+				readonly action: "close";
+				readonly entry: RegistryEntry;
+				readonly resolved?: never;
+				readonly stale?: true;
+				readonly worktreeCleanup: WorktreeCleanupResult | undefined;
+		  }
+		| {
+				readonly action: "close";
+				readonly resolved: ResolvedPane;
+				readonly entry?: never;
+				readonly worktreeCleanup: WorktreeCleanupResult | undefined;
+		  };
+};
+
+type HerdrActionRequirements = HerdrSdk | FileSystem | Path;
 
 interface HerdrActionEnvironment {
 	readonly resultSocketPath?: string;
@@ -78,6 +131,8 @@ const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
 const WAIT_POLL_INTERVAL_MS = 2_000;
 const WAIT_IDLE_CONFIRMATIONS = 2;
 const TERRA_MODEL_ID = "gpt-5.6-terra";
+/** Model used when neither spawn parameters nor an agent definition selects one. */
+export const DEFAULT_SUBAGENT_MODEL = "openai-codex/gpt-6-astra";
 
 type RecursionGuardedAction = "spawn" | "send" | "close" | "focus";
 
@@ -119,79 +174,75 @@ const isTerraModelReference = (model: string | undefined): boolean =>
 
 const isRegistryReservation = (entry: RegistryEntry): boolean => entryPhase(entry) === "reserved";
 
-const commandStatus: Effect.Effect<
-	ToolResult,
-	HerdrCommandFailed | HerdrSubagentError,
-	HerdrActionRequirements
-> = Effect.gen(function* () {
-	const entries = [...(yield* listEntries)];
-	const response = yield* decodeHerdrJson(["agent", "list"], decodeAgentListResponse);
-	const liveAgents = response.result.agents;
-	const seenNames = new Set<string>();
-	const rows: string[] = [];
+const commandStatus: Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> =
+	Effect.gen(function* () {
+		const entries = [...(yield* listEntries)];
+		const liveAgents = yield* listAgents();
+		const seenNames = new Set<string>();
+		const rows: string[] = [];
 
-	const replaceEntry = (updated: RegistryEntry): void => {
-		const index = entries.findIndex((entry) => entry.name === updated.name);
-		if (index >= 0) {
-			entries[index] = updated;
-		}
-	};
+		const replaceEntry = (updated: RegistryEntry): void => {
+			const index = entries.findIndex((entry) => entry.name === updated.name);
+			if (index >= 0) {
+				entries[index] = updated;
+			}
+		};
 
-	for (const match of matchEntriesToAgents(entries, liveAgents)) {
-		const agent = match.agent;
-		if (!agent) {
-			continue;
-		}
-		const terminalId = agent.terminal_id;
-		const paneId = agent.pane_id;
-		const tabId = agent.tab_id;
-		const matched = match.entry;
-		if (matched && paneId) {
-			seenNames.add(matched.name);
-			const updated: RegistryEntry = {
-				...matched,
-				phase: "active",
-				target: terminalId ?? paneId,
-				terminalId: terminalId ?? matched.terminalId,
-				paneId,
-				tabId: tabId ?? matched.tabId,
-				workspaceId: agent.workspace_id ?? matched.workspaceId,
-				updatedAt: yield* nowIso,
-			};
-			replaceEntry(updated);
-			yield* updateEntryHints(updated);
-		}
-		const name = matched?.name ?? "-";
-		const status = agent.agent_status ?? "unknown";
-		const focus = agent.focused ? "*" : " ";
-		const cwd = agent.foreground_cwd ?? agent.cwd ?? "";
-		rows.push(
-			`${focus} ${name.padEnd(22)} ${status.padEnd(8)} ${(paneId ?? "").padEnd(12)} ${cwd}`,
-		);
-	}
-
-	for (const entry of entries) {
-		if (!seenNames.has(entry.name) && !isRegistryReservation(entry)) {
+		for (const match of matchEntriesToAgents(entries, liveAgents)) {
+			const agent = match.agent;
+			if (!agent) {
+				continue;
+			}
+			const terminalId = agent.terminal_id;
+			const paneId = agent.pane_id;
+			const tabId = agent.tab_id;
+			const matched = match.entry;
+			if (matched && paneId) {
+				seenNames.add(matched.name);
+				const updated: RegistryEntry = {
+					...matched,
+					phase: "active",
+					target: terminalId ?? paneId,
+					terminalId: terminalId ?? matched.terminalId,
+					paneId,
+					tabId: tabId ?? matched.tabId,
+					workspaceId: agent.workspace_id ?? matched.workspaceId,
+					updatedAt: yield* nowIso,
+				};
+				replaceEntry(updated);
+				yield* updateEntryHints(updated);
+			}
+			const name = matched?.name ?? "-";
+			const status = agent.agent_status ?? "unknown";
+			const focus = agent.focused ? "*" : " ";
+			const cwd = agent.foreground_cwd ?? agent.cwd ?? "";
 			rows.push(
-				`  ${entry.name.padEnd(22)} missing  ${(entry.paneId ?? "").padEnd(12)} ${entry.cwd}`,
+				`${focus} ${name.padEnd(22)} ${status.padEnd(8)} ${(paneId ?? "").padEnd(12)} ${cwd}`,
 			);
 		}
-	}
 
-	const text =
-		rows.length > 0
-			? `F NAME                   STATUS   PANE         CWD\n${rows.join("\n")}`
-			: "No herdr agents found.";
-	return {
-		content: [textContent(text)],
-		details: { action: "status", entries },
-	};
-});
+		for (const entry of entries) {
+			if (!seenNames.has(entry.name) && !isRegistryReservation(entry)) {
+				rows.push(
+					`  ${entry.name.padEnd(22)} missing  ${(entry.paneId ?? "").padEnd(12)} ${entry.cwd}`,
+				);
+			}
+		}
+
+		const text =
+			rows.length > 0
+				? `F NAME                   STATUS   PANE         CWD\n${rows.join("\n")}`
+				: "No herdr agents found.";
+		return {
+			content: [textContent(text)],
+			details: { action: "status", entries },
+		};
+	});
 
 const commandAgentTypes: (
 	params: HerdrSubagentParams,
 	ctxCwd: string,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params, ctxCwd) {
 		const discovery = yield* discoverAgents(ctxCwd, params.agentScope ?? "user");
 		return {
@@ -230,7 +281,7 @@ const cleanupFailedSpawn: (
 ) => Effect.Effect<void, never, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (name, tabId, filePaths, worktree) {
 		if (tabId) {
-			yield* runHerdr(["tab", "close", tabId]).pipe(Effect.catch(() => Effect.void));
+			yield* closeTab(tabId).pipe(Effect.catch(() => Effect.void));
 		}
 		if (worktree) {
 			yield* removeWorktree(worktree.cwd, worktree.info.path);
@@ -264,7 +315,7 @@ const commandSpawn: (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
 	environment: HerdrActionEnvironment,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params, ctx, environment) {
 		const rawName = params.name;
 		const task = params.task;
@@ -317,7 +368,7 @@ const commandSpawn: (
 			}
 		}
 
-		const requestedModel = params.model ?? agent?.model;
+		const requestedModel = params.model ?? agent?.model ?? DEFAULT_SUBAGENT_MODEL;
 		let model: string | undefined;
 		if (requestedModel && ctx.modelRegistry) {
 			const resolvedModel = resolveModelReference(requestedModel, ctx.modelRegistry);
@@ -373,7 +424,7 @@ const commandSpawn: (
 		let createdTabId: string | undefined;
 		let createdWorktree: { readonly cwd: string; readonly info: WorktreeInfo } | undefined;
 		const spawnAfterReservation: Effect.Effect<
-			ToolResult,
+			ActionOutcome,
 			HerdrSubagentError,
 			HerdrActionRequirements
 		> = Effect.gen(function* () {
@@ -383,38 +434,24 @@ const commandSpawn: (
 				createdWorktree = { cwd, info: worktree };
 			}
 			const spawnCwd = worktree?.workPath ?? cwd;
-			const resultSocketEnv = environment.resultSocketPath
-				? ["--env", `HERDR_SUBAGENT_RESULT_SOCK=${environment.resultSocketPath}`]
-				: [];
-			const createArgs = [
-				"tab",
-				"create",
-				"--workspace",
-				spawnWorkspaceId,
-				"--cwd",
-				spawnCwd,
-				"--label",
-				label,
-				"--env",
-				`HERDR_SUBAGENT_NAME=${name}`,
-				"--env",
-				`HERDR_SUBAGENT_ALLOW_SPAWN=${allowSpawn ? "1" : "0"}`,
+			const resultSocketEnv: Readonly<Record<string, string>> = environment.resultSocketPath
+				? { HERDR_SUBAGENT_RESULT_SOCK: environment.resultSocketPath }
+				: {};
+			const spawnEnvironment: Readonly<Record<string, string>> = {
+				HERDR_SUBAGENT_NAME: name,
+				HERDR_SUBAGENT_ALLOW_SPAWN: allowSpawn ? "1" : "0",
 				...resultSocketEnv,
-				"--no-focus",
-			];
-			const created = yield* decodeHerdrJson(createArgs, decodeTabCreateResponse);
-			const rootPane = created.result.root_pane ?? created.result.pane;
-			const tab = created.result.tab;
-			const tabId = tab?.tab_id ?? rootPane?.tab_id;
+			};
+			const created = yield* createTab({
+				workspaceId: spawnWorkspaceId,
+				cwd: spawnCwd,
+				label,
+			});
+			const tabId = created.tab.id;
 			createdTabId = tabId;
-			const paneId = rootPane?.pane_id;
-			if (!paneId) {
-				return yield* failAction(
-					`Could not find root pane in herdr response:\n${JSON.stringify(created, null, 2)}`,
-				);
-			}
-			const terminalId = rootPane?.terminal_id;
-			yield* runHerdr(["pane", "rename", paneId, label]).pipe(Effect.catch(() => Effect.void));
+			const paneId = created.rootPane.id;
+			const terminalId = created.rootPane.terminalId;
+			yield* renamePane(paneId, label).pipe(Effect.catch(() => Effect.void));
 
 			const taskFile = yield* writeRuntimeFile(
 				"task",
@@ -442,14 +479,20 @@ const commandSpawn: (
 				commandParts.push("--append-system-prompt", systemPromptFile);
 			}
 			commandParts.push(`@${taskFile}`);
-			const command = commandParts.map(shellQuote).join(" ");
+			// SDK 0.8.2 recursively snake-cases env dictionary keys. Export in the
+			// pane's shell instead, preserving exact names for pi and later restarts.
+			// Keys are extension-owned constants; every value is shell-quoted.
+			const exports = Object.entries(spawnEnvironment)
+				.map(([key, value]) => `${key}=${shellQuote(value)}`)
+				.join(" ");
+			const command = `export ${exports} && ${commandParts.map(shellQuote).join(" ")}`;
 			if (environment.completionArmId) {
 				const armed = yield* writeSubagentCompletionArm(name, environment.completionArmId);
 				if (!armed) {
 					return yield* failAction(`Could not arm direct result delivery for ${name}.`);
 				}
 			}
-			yield* runHerdr(["pane", "run", paneId, command]);
+			yield* runInPane(paneId, command);
 
 			const createdAt = yield* nowIso;
 			const updatedAt = yield* nowIso;
@@ -479,7 +522,7 @@ const commandSpawn: (
 			return {
 				content: [
 					textContent(
-						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${spawnCwd}\n\nNext: you will receive a subagent_result follow-up when ${name} finishes or blocks. Do not poll wait or duplicate the work; use wait only when you explicitly need to block.`,
+						`Spawned ${name} in herdr panel.\nTarget: ${entry.target}\nPane: ${paneId}\nTab: ${tabId ?? "unknown"}\nWorkspace: ${spawnWorkspaceId}\nCWD: ${spawnCwd}\n\nNext: you will receive a subagent_result notification when ${name} finishes or blocks. Do not poll wait or duplicate the work; use wait only when you explicitly need to block.`,
 					),
 				],
 				details: { action: "spawn", entry },
@@ -494,7 +537,7 @@ const commandSpawn: (
 
 const commandInspect: (
 	params: HerdrSubagentParams,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params) {
 		const target = requireTarget(params);
 		if (!target) {
@@ -504,16 +547,8 @@ const commandInspect: (
 		const resolved = yield* resolvePane(target, entries);
 		const lines = params.lines ?? DEFAULT_INSPECT_LINES;
 		const source = params.source ?? "recent-unwrapped";
-		const outcome = yield* runHerdr([
-			"pane",
-			"read",
-			resolved.paneId,
-			"--source",
-			source,
-			"--lines",
-			String(lines),
-		]);
-		const truncated = truncateForModel(outcome.stdout, lines);
+		const outcome = yield* readPane(resolved.paneId, source, lines);
+		const truncated = truncateForModel(outcome.text, lines);
 		return {
 			content: [textContent(truncated.text)],
 			details: {
@@ -522,7 +557,7 @@ const commandInspect: (
 				resolved,
 				source,
 				lines,
-				truncated: truncated.truncated,
+				truncated: truncated.truncated || outcome.truncated,
 			},
 		};
 	},
@@ -531,7 +566,7 @@ const commandInspect: (
 const commandSend: (
 	params: HerdrSubagentParams,
 	environment: HerdrActionEnvironment,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params, environment) {
 		const target = requireTarget(params);
 		if (!target || !params.message) {
@@ -549,9 +584,7 @@ const commandSend: (
 				return yield* failAction(`Could not arm direct result delivery for ${resolved.name}.`);
 			}
 		}
-		const sendResult = yield* runHerdr(["pane", "run", resolved.paneId, params.message]).pipe(
-			Effect.result,
-		);
+		const sendResult = yield* runInPane(resolved.paneId, params.message).pipe(Effect.result);
 		if (Result.isFailure(sendResult)) {
 			if (environment.completionArmId) {
 				yield* writeSubagentCompletionArm(resolved.name, previousArmId ?? "");
@@ -585,67 +618,70 @@ const startupIdleStabilityMs = (timeoutMs: number): number =>
 const waitForFinished: (
 	resolved: ResolvedPane,
 	timeoutMs: number,
-) => Effect.Effect<{ readonly observed: "done" | "idle" }, WaitTimedOut, HerdrActionRequirements> =
-	Effect.fnUntraced(function* (resolved, timeoutMs) {
-		const startedAt = yield* Clock.currentTimeMillis;
-		// Scale the poll interval down for short timeouts so a quick wait can still
-		// confirm consecutive idle polls before the deadline.
-		const pollMs = Math.max(100, Math.min(WAIT_POLL_INTERVAL_MS, Math.floor(timeoutMs / 5)));
-		const neverWorkedIdleMs = startupIdleStabilityMs(timeoutMs);
-		let consecutiveIdle = 0;
-		let firstIdleAt: number | undefined;
-		let observedWorking = false;
-		let lastStatus = "unknown";
-		const poll: Effect.Effect<
-			{ readonly observed: "done" | "idle" },
-			WaitTimedOut,
-			HerdrActionRequirements
-		> = Effect.suspend(() =>
-			Effect.gen(function* () {
-				const agent = yield* liveAgent(resolved.paneId);
-				lastStatus = agent?.agent_status ?? "unknown";
-				if (lastStatus === "done") {
-					return { observed: "done" };
-				}
-				if (lastStatus === "working") {
-					observedWorking = true;
-				}
-				if (lastStatus === "idle") {
-					const now = yield* Clock.currentTimeMillis;
-					firstIdleAt ??= now;
-					consecutiveIdle += 1;
-					if (observedWorking) {
-						if (consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS) {
-							return { observed: "idle" };
-						}
-					} else if (
-						consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS &&
-						now - firstIdleAt >= neverWorkedIdleMs
-					) {
+) => Effect.Effect<
+	{ readonly observed: "done" | "idle" },
+	WaitTimedOut | HerdrUnsupportedProtocol,
+	HerdrActionRequirements
+> = Effect.fnUntraced(function* (resolved, timeoutMs) {
+	const startedAt = yield* Clock.currentTimeMillis;
+	// Scale the poll interval down for short timeouts so a quick wait can still
+	// confirm consecutive idle polls before the deadline.
+	const pollMs = Math.max(100, Math.min(WAIT_POLL_INTERVAL_MS, Math.floor(timeoutMs / 5)));
+	const neverWorkedIdleMs = startupIdleStabilityMs(timeoutMs);
+	let consecutiveIdle = 0;
+	let firstIdleAt: number | undefined;
+	let observedWorking = false;
+	let lastStatus = "unknown";
+	const poll: Effect.Effect<
+		{ readonly observed: "done" | "idle" },
+		WaitTimedOut | HerdrUnsupportedProtocol,
+		HerdrActionRequirements
+	> = Effect.suspend(() =>
+		Effect.gen(function* () {
+			const agent = yield* liveAgent(resolved.paneId);
+			lastStatus = agent?.agent_status ?? "unknown";
+			if (lastStatus === "done") {
+				return { observed: "done" };
+			}
+			if (lastStatus === "working") {
+				observedWorking = true;
+			}
+			if (lastStatus === "idle") {
+				const now = yield* Clock.currentTimeMillis;
+				firstIdleAt ??= now;
+				consecutiveIdle += 1;
+				if (observedWorking) {
+					if (consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS) {
 						return { observed: "idle" };
 					}
-				} else {
-					consecutiveIdle = 0;
-					firstIdleAt = undefined;
+				} else if (
+					consecutiveIdle >= WAIT_IDLE_CONFIRMATIONS &&
+					now - firstIdleAt >= neverWorkedIdleMs
+				) {
+					return { observed: "idle" };
 				}
-				const now = yield* Clock.currentTimeMillis;
-				const elapsed = now - startedAt;
-				const remaining = timeoutMs - elapsed;
-				if (remaining <= 0) {
-					return yield* new WaitTimedOut({
-						message: `wait timed out after ${timeoutMs}ms; last agent status: ${lastStatus}. Inspect ${resolved.name} to check progress, then re-wait.`,
-					});
-				}
-				yield* Effect.sleep(Math.min(pollMs, remaining));
-				return yield* poll;
-			}),
-		);
-		return yield* poll;
-	});
+			} else {
+				consecutiveIdle = 0;
+				firstIdleAt = undefined;
+			}
+			const now = yield* Clock.currentTimeMillis;
+			const elapsed = now - startedAt;
+			const remaining = timeoutMs - elapsed;
+			if (remaining <= 0) {
+				return yield* new WaitTimedOut({
+					message: `wait timed out after ${timeoutMs}ms; last agent status: ${lastStatus}. Inspect ${resolved.name} to check progress, then re-wait.`,
+				});
+			}
+			yield* Effect.sleep(Math.min(pollMs, remaining));
+			return yield* poll;
+		}),
+	);
+	return yield* poll;
+});
 
 const commandWait: (
 	params: HerdrSubagentParams,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params) {
 		const target = requireTarget(params);
 		if (!target) {
@@ -670,10 +706,7 @@ const commandWait: (
 				details: { action: "wait", resolved, status, observed: outcome.observed },
 			};
 		}
-		yield* runHerdr(
-			["wait", "agent-status", resolved.paneId, "--status", status, "--timeout", String(timeoutMs)],
-			timeoutMs + 1_000,
-		);
+		yield* waitForAgentStatus(resolved.paneId, status, timeoutMs);
 		return {
 			content: [
 				textContent(
@@ -687,7 +720,7 @@ const commandWait: (
 
 const commandFocus: (
 	params: HerdrSubagentParams,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params) {
 		const target = requireTarget(params);
 		if (!target) {
@@ -697,7 +730,7 @@ const commandFocus: (
 		const entries = namedEntry ? undefined : yield* listEntries;
 		const entry = namedEntry ?? findEntry(entries ?? [], target);
 		const focusTarget = entry?.target ?? entry?.terminalId ?? target;
-		yield* runHerdr(["agent", "focus", focusTarget]);
+		yield* focusAgent(focusTarget);
 		return {
 			content: [textContent(`Focused ${target}.`)],
 			details: { action: "focus", target: focusTarget },
@@ -707,7 +740,7 @@ const commandFocus: (
 
 const commandClose: (
 	params: HerdrSubagentParams,
-) => Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
+) => Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> = Effect.fnUntraced(
 	function* (params) {
 		const target = requireTarget(params);
 		if (!target) {
@@ -716,7 +749,7 @@ const commandClose: (
 		const entries = yield* listEntries;
 		const entry = findEntry(entries, target);
 		if (entry?.tabId) {
-			const closeResult = yield* runHerdr(["tab", "close", entry.tabId]).pipe(Effect.result);
+			const closeResult = yield* closeTab(entry.tabId).pipe(Effect.result);
 			const closeFailure = Result.isFailure(closeResult) ? closeResult.failure : undefined;
 			if (closeFailure) {
 				// The tab may already be gone (for example, closed manually in herdr's UI).
@@ -750,7 +783,7 @@ const commandClose: (
 			};
 		}
 		const resolved = yield* resolvePane(target, entries);
-		yield* runHerdr(["pane", "close", resolved.paneId]);
+		yield* closePane(resolved.paneId);
 		// A registry entry without a tabId can still reference this pane; clean it up
 		// so the closed pane does not leave a permanently "missing" name behind.
 		const paneEntry = entry ?? findEntry(entries, resolved.paneId);
@@ -770,7 +803,7 @@ const runAction = (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
 	environment: HerdrActionEnvironment,
-): Effect.Effect<ToolResult, HerdrSubagentError, HerdrActionRequirements> => {
+): Effect.Effect<ActionOutcome, HerdrSubagentError, HerdrActionRequirements> => {
 	switch (params.action) {
 		case "status":
 			return commandStatus;
@@ -793,12 +826,13 @@ const runAction = (
 	}
 };
 
+/** Execute an action and preserve its typed outcome for notification coordination. */
 export const executeAction: (
 	params: HerdrSubagentParams,
 	ctx: PiToolContext,
 	environment?: HerdrActionEnvironment,
-) => Effect.Effect<ToolResult, HerdrSubagentToolError, HerdrActionRequirements> = Effect.fnUntraced(
-	function* (params, ctx, environment = {}) {
+) => Effect.Effect<ActionOutcome, HerdrSubagentToolError, HerdrActionRequirements> =
+	Effect.fnUntraced(function* (params, ctx, environment = {}) {
 		if (!isRunningInsideHerdr()) {
 			return yield* new HerdrNotAvailable({
 				message:
@@ -807,6 +841,4 @@ export const executeAction: (
 		}
 		yield* guardSubagentRecursion(params.action);
 		return yield* runAction(params, ctx, environment);
-	},
-	Effect.mapError(toToolError),
-);
+	}, Effect.mapError(toToolError));

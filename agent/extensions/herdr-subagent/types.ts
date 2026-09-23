@@ -87,11 +87,6 @@ export interface HerdrSubagentParams {
 	readonly notify?: boolean;
 }
 
-export interface CommandSuccess {
-	readonly stdout: string;
-	readonly stderr: string;
-}
-
 export type RegistryEntry = Schema.Schema.Type<typeof RegistryEntrySchema>;
 
 export interface AgentDefinition {

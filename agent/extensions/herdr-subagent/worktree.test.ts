@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
+	type WireRequest,
 	cleanupHarness,
 	installFakeHerdr,
 	loadTool,
 	makeContext,
 	makeTempRoot,
-	readHerdrCalls,
+	readHerdrRequests,
 	runHerdrSubagentEffect,
 	setEnv,
 	writeAgent,
@@ -52,15 +53,8 @@ const git = (cwd: string, args: ReadonlyArray<string>): string =>
 		.toString()
 		.trim();
 
-const tabCreateCalls = (
-	calls: ReadonlyArray<ReadonlyArray<string>>,
-): ReadonlyArray<ReadonlyArray<string>> =>
-	calls.filter((args) => args[0] === "tab" && args[1] === "create");
-
-const argAfter = (args: ReadonlyArray<string>, flag: string): string | undefined => {
-	const index = args.indexOf(flag);
-	return index >= 0 ? args[index + 1] : undefined;
-};
+const tabCreateCalls = (calls: ReadonlyArray<WireRequest>): ReadonlyArray<WireRequest> =>
+	calls.filter((request) => request.method === "tab.create");
 
 const readRegistryEntry = async (agentDir: string, name: string): Promise<RegistryEntry> => {
 	const text = await readFile(
@@ -206,9 +200,9 @@ describe("git worktree isolation", () => {
 		}
 		expect(spawned.content[0]?.text).toContain(`CWD: ${worktree.workPath}`);
 		expect(worktree.workPath).toBe(join(worktree.path, "packages", "api"));
-		const creates = tabCreateCalls(await readHerdrCalls(log));
+		const creates = tabCreateCalls(readHerdrRequests(log));
 		expect(creates).toHaveLength(1);
-		expect(argAfter(creates[0] ?? [], "--cwd")).toBe(worktree.workPath);
+		expect(creates[0]?.params.cwd).toBe(worktree.workPath);
 
 		await writeFile(join(worktree.workPath, "agent.txt"), "preserved by close\n", "utf8");
 		const closed = await tool.execute(
@@ -316,7 +310,7 @@ describe("git worktree isolation", () => {
 				makeContext(root),
 			),
 		).rejects.toThrow(/inside a git repository/);
-		expect(tabCreateCalls(await readHerdrCalls(log))).toHaveLength(0);
+		expect(tabCreateCalls(readHerdrRequests(log))).toHaveLength(0);
 		await expect(
 			access(join(agentDir, "herdr-subagents", "registry", "worker-a.json")),
 		).rejects.toThrow();

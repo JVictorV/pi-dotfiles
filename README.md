@@ -19,6 +19,36 @@ pi   # follow the login prompt, or set provider API keys
 
 pi restores vendored tool binaries (`fd`, `rg`) on demand.
 
+### Herdr subagents
+
+`agent/extensions/herdr-subagent/` uses the Effect-native `@herdr/sdk` over the
+local Unix socket. It no longer starts `herdr` CLI subprocesses for panel control.
+Registry recovery, worktree isolation, pi launch commands, and settled-result
+notifications remain local extension behavior.
+
+**Requires Herdr wire protocol 21.** The released Herdr `0.8.2` server uses
+protocol 20 and is not compatible. Update to a protocol-21 build before reloading
+this extension. Protocol failures are reported without a CLI fallback.
+
+The extension uses `HERDR_PANE_ID` to identify its own pane. It never substitutes
+the focused pane. Socket selection follows the SDK's `HERDR_SOCKET_PATH` and
+`HERDR_SESSION` configuration.
+
+The unpublished SDK is installed from a committed archive. See
+[`vendor/README.md`](vendor/README.md) for provenance and rebuild instructions.
+
+Completed subagent reports arrive before the parent's next model response, not
+after all parent work finishes. Use a complete final report directly. Inspect
+panes for progress, missing details, or separate verification. Polling samples and
+truncated reports still require inspection.
+
+An inspection records which known complete reports it returned. The context
+filter removes those report copies from later notifications, including after a
+reload or context reset. If a completion arrives during inspection, it keeps the
+new completion notice without repeating report text already in context.
+It preserves unread reports and later completions.
+Closing a panel alone does not mark its report as read. Stored history is unchanged.
+
 ### Figma MCP
 
 `agent/mcp.json` configures a Figma MCP server via
@@ -93,17 +123,19 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 
 ## Extensions
 
-`agent/extensions/*.ts` — auto-discovered and loaded on start (or `/reload`).
+Pi discovers `agent/extensions/*.ts` and `agent/extensions/*/index.ts` on start or
+`/reload`. Restart Pi after dependency upgrades; `/reload` can retain previously
+loaded dependency modules.
 
-| Extension                   | Purpose                                                                                                                                                                                                                                                              |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git-interceptor.ts`        | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                                                                               |
-| `whimsical.ts`              | Shows a random casino-themed "working" message each turn.                                                                                                                                                                                                            |
-| `notify.ts`                 | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
-| `sound.ts`                  | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
-| `lsp/`                      | LSP Extension: read-only language-server-backed code navigation, hover/type info, symbols, call hierarchy, diagnostics, persisted per-repo spawn permissions, and passive sync for files touched by tools.                                                           |
-| `openai-server-compaction/` | Vendored [OpenAI server-compaction extension](https://github.com/algal/pi-openai-server-compaction): Responses v2 artifacts, portable Pi summaries, `previous_response_id` continuity, and WebSocket fallback.                                                       |
-| `statusline.ts`             | Single-line status bar (`belowEditor` widget): model · thinking · dir · git branch/changes · LSP clients · context %. Ported from a Claude Code `ccstatusline` config. Also hides the built-in footer.                                                               |
+| Extension            | Purpose                                                                                                                                                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git-interceptor.ts` | Prevents git editor hangs (`GIT_EDITOR=true`) and blocks `--no-verify` hook bypassing.                                                                                                                                                                               |
+| `whimsical.ts`       | Shows a random casino-themed "working" message each turn.                                                                                                                                                                                                            |
+| `notify.ts`          | Desktop banner when the agent finishes a turn, via [growlrrr](https://github.com/moltenbits/growlrrr) (`grrr --appId pi`, click reactivates the Ghostty tab); silent `osascript` fallback. See [Desktop notifications & sound](#desktop-notifications--sound-macos). |
+| `sound.ts`           | Plays `agent/sounds/idle.ogg` via `afplay` when the agent finishes a turn.                                                                                                                                                                                           |
+| `lsp/`               | Language-server navigation, diagnostics, approved edits, and persisted per-repository permissions. See its [README](agent/extensions/lsp/README.md).                                                                                                                 |
+| `smart-context/`     | Model-written checkpoints, local history retrieval, and context resets without server compaction. See its [README](agent/extensions/smart-context/README.md).                                                                                                        |
+| `statusline/`        | Modular status line below the editor. It replaces the visible built-in footer while reading its extension statuses.                                                                                                                                                  |
 
 ## Skills
 
@@ -113,19 +145,20 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
   from upstream, applies pi-specific patches, flags new skills. Invoke with "sync skills".
 - **`effect`** — production Effect v4 guidance from
   [kitlangton/skills](https://github.com/kitlangton/skills).
-- The upstream set (`code-review`, `codebase-design`, `diagnosing-bugs`,
-  `domain-modeling`, `grill-with-docs`, `grilling`, `handoff`, `implement`,
-  `improve-codebase-architecture`, `prototype`, `research`,
-  `resolving-merge-conflicts`, `setup-matt-pocock-skills`, `tdd`, `teach`,
-  `to-questionnaire`, `to-spec`, `to-tickets`, `triage`, `wait-what`,
-  `wayfinder`, `wizard`, `writing-for-agents`) is installed and patched via
-  the sync skill.
+- Browse [`agent/skills/`](agent/skills/) for the installed skills. Vendored Pocock
+  skills are maintained through the sync skill rather than edited directly.
 
-## Settings highlights (`agent/settings.json`)
+## Configuration and instructions
 
-- Default model: `anthropic/claude-opus-4-8`, thinking level `high`.
-- `"skills": ["!**/.agents/skills/**"]` — disables `~/.agents/skills/` so the
-  copies in `~/.pi/agent/skills/` take precedence (no duplicates).
+- [`agent/settings.json`](agent/settings.json) owns the current model, thinking,
+  theme, package, and skill settings. It excludes `~/.agents/skills/` so this
+  repository's skill copies take precedence.
+- Subagent role defaults live in [`agent/agents/`](agent/agents/). See
+  [`MODEL-MATRIX.md`](agent/agents/MODEL-MATRIX.md) before overriding them.
+- [`agent/AGENTS.md`](agent/AGENTS.md) contains global task and safety rules.
+  TypeScript work loads the [core standards](agent/instructions/typescript.md), then
+  only the reference sections relevant to the task.
+- Future standards discussions are recorded in [`docs/standards-backlog.md`](docs/standards-backlog.md), not loaded as task instructions.
 
 ## Notes
 
@@ -143,9 +176,10 @@ control Ghostty (needed for `--reactivate` to focus the exact window/tab).
 Inspired by these pi/dotfiles setups and codebases:
 
 - [dmmulroy/.dotfiles](https://github.com/dmmulroy/.dotfiles/tree/main) — vendored at [`.repos/dmmulroy-dotfiles`](.repos/dmmulroy-dotfiles)
+- [dmmulroy/herdr-ts-sdk](https://github.com/dmmulroy/herdr-ts-sdk) — typed Effect socket SDK used by `agent/extensions/herdr-subagent/`; tracked at [`.repos/herdr-ts-sdk`](.repos/herdr-ts-sdk)
 - [EduSantosBrito/pi-dotfiles](https://github.com/EduSantosBrito/pi-dotfiles) — vendored at [`.repos/edusantosbrito-pi-dotfiles`](.repos/edusantosbrito-pi-dotfiles)
 - [anomalyco/opencode](https://github.com/anomalyco/opencode) — inspiration for ported behavior and architecture; vendored at [`.repos/opencode`](.repos/opencode)
-- [algal/pi-openai-server-compaction](https://github.com/algal/pi-openai-server-compaction) — source for `agent/extensions/openai-server-compaction/`; tracked at [`.repos/pi-openai-server-compaction`](.repos/pi-openai-server-compaction) for re-sync
+- [algal/pi-openai-server-compaction](https://github.com/algal/pi-openai-server-compaction) — previous server-compaction implementation; retained at [`.repos/pi-openai-server-compaction`](.repos/pi-openai-server-compaction) for reference
 
 All are tracked as git submodules under `.repos/` for reference. Run
 `git submodule update --init` after cloning to populate them.

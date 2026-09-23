@@ -10,9 +10,6 @@ export interface RuntimeState {
 	broken: Map<string, string>;
 	spawning: Map<string, Deferred.Deferred<LspClient | undefined, LspError>>;
 	shuttingDown: boolean;
-	activeOperations: number;
-	disposeRequested: boolean;
-	disposed: boolean;
 }
 
 export const makeRuntimeState = (): RuntimeState => ({
@@ -21,7 +18,4 @@ export const makeRuntimeState = (): RuntimeState => ({
 	broken: new Map(),
 	spawning: new Map(),
 	shuttingDown: false,
-	activeOperations: 0,
-	disposeRequested: false,
-	disposed: false,
 });

@@ -1,29 +1,49 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { env as processEnv } from "node:process";
 
+import { herdrSdkLayerFromOptions, HerdrSdk } from "@herdr/sdk";
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { ConfigProvider, Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+import { vi } from "@effect/vitest";
 
+import { configurationProvider } from "./environment";
 import type { ModelRegistryForResolution } from "./model-resolver";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
-type HerdrRuntimeRequirements = ChildProcessSpawner | FileSystem | Path;
+type HerdrRuntimeRequirements = ChildProcessSpawner | FileSystem | HerdrSdk | Path;
+
+/** One NDJSON request captured by the temporary Herdr protocol server. */
+export type WireRequest = {
+	readonly id: string;
+	readonly method: string;
+	readonly params: Readonly<Record<string, unknown>>;
+};
 
 const nodeLayer = Layer.provideMerge(
 	NodeChildProcessSpawner.layer,
 	Layer.mergeAll(NodeFileSystem.layer, NodePath.layer),
 );
-const nodeRuntime = ManagedRuntime.make(nodeLayer);
 
-/** Run a herdr-subagent Effect using the same Node runtime layers as the extension entrypoint. */
+/** Run an extension Effect with fresh Node and Herdr SDK layers for the active test server. */
 export const runHerdrSubagentEffect = <A>(
 	effect: Effect.Effect<A, unknown, HerdrRuntimeRequirements>,
-): Promise<A> => nodeRuntime.runPromise(effect);
+	options?: { readonly signal?: AbortSignal },
+): Promise<A> => {
+	const socketPath = activeServers.at(-1)?.socketPath ?? path.join(tmpdir(), "no-live-herdr.sock");
+	const configLayer = ConfigProvider.layer(configurationProvider());
+	const layer = Layer.merge(nodeLayer, herdrSdkLayerFromOptions({ socketPath })).pipe(
+		Layer.provideMerge(configLayer),
+	);
+	const runtime = ManagedRuntime.make(layer);
+	return runtime.runPromise(effect, options).finally(() => runtime.dispose());
+};
 
 /** Result shape returned by a pi tool execution in herdr-subagent tests. */
 export interface ToolResult {
@@ -57,7 +77,8 @@ export type SessionEvent =
 	| "input"
 	| "agent_start"
 	| "agent_end"
-	| "agent_settled";
+	| "agent_settled"
+	| "context";
 
 export interface SentCustomMessage {
 	readonly message: unknown;
@@ -93,6 +114,11 @@ export interface LoadedTool {
 	readonly sentMessages: SentCustomMessage[];
 	/** User messages injected through pi.sendUserMessage. */
 	readonly sentUserMessages: SentUserMessage[];
+	/** Apply the registered model-context handlers to a fresh message array. */
+	transformContext(
+		messages: ReadonlyArray<unknown>,
+		branch?: ReadonlyArray<SessionEntry>,
+	): Promise<ReadonlyArray<unknown>>;
 	/** Dispatch a fake session lifecycle or agent event without awaiting handlers. */
 	dispatch(event: SessionEvent, payload?: unknown, ctx?: unknown): void;
 	/** Dispatch a fake session lifecycle or agent event and await asynchronous handlers. */
@@ -115,60 +141,67 @@ type ExtensionFactory = (pi: FakePi) => void;
 
 const envRecord = (): Record<string, string | undefined> => processEnv;
 
-const originalEnv = {
-	HERDR_ENV: envRecord().HERDR_ENV,
-	HERDR_SUBAGENT_NAME: envRecord().HERDR_SUBAGENT_NAME,
-	HERDR_SUBAGENT_ALLOW_SPAWN: envRecord().HERDR_SUBAGENT_ALLOW_SPAWN,
-	HERDR_SUBAGENT_RESULT_SOCK: envRecord().HERDR_SUBAGENT_RESULT_SOCK,
-	PATH: envRecord().PATH,
-	PI_CODING_AGENT_DIR: envRecord().PI_CODING_AGENT_DIR,
-	FAKE_HERDR_LOG: envRecord().FAKE_HERDR_LOG,
-	FAKE_HERDR_TAB_CLOSE_FAIL: envRecord().FAKE_HERDR_TAB_CLOSE_FAIL,
-	FAKE_HERDR_TAB_GET_FAIL: envRecord().FAKE_HERDR_TAB_GET_FAIL,
-	FAKE_HERDR_WAIT_HANG: envRecord().FAKE_HERDR_WAIT_HANG,
-	FAKE_HERDR_AGENT_STATUS: envRecord().FAKE_HERDR_AGENT_STATUS,
-	FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE: envRecord().FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
-	FAKE_HERDR_AGENT_GET_REQUIRED_TARGET: envRecord().FAKE_HERDR_AGENT_GET_REQUIRED_TARGET,
-	FAKE_HERDR_AGENT_GET_TERMINAL_ID: envRecord().FAKE_HERDR_AGENT_GET_TERMINAL_ID,
-	FAKE_HERDR_PANE_RUN_FAIL: envRecord().FAKE_HERDR_PANE_RUN_FAIL,
-	FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY: envRecord().FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY,
-	FAKE_HERDR_PANE_RUN_DELAY_MESSAGE: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MESSAGE,
-	FAKE_HERDR_PANE_RUN_DELAY_MS: envRecord().FAKE_HERDR_PANE_RUN_DELAY_MS,
-	FAKE_HERDR_PANE_CURRENT_FAIL: envRecord().FAKE_HERDR_PANE_CURRENT_FAIL,
-	FAKE_HERDR_PANE_CURRENT_PANE_ID: envRecord().FAKE_HERDR_PANE_CURRENT_PANE_ID,
-	FAKE_HERDR_PANE_CURRENT_TERMINAL_ID: envRecord().FAKE_HERDR_PANE_CURRENT_TERMINAL_ID,
-	FAKE_HERDR_AGENT_LIST_ENABLE: envRecord().FAKE_HERDR_AGENT_LIST_ENABLE,
-	FAKE_HERDR_AGENT_LIST_FAIL: envRecord().FAKE_HERDR_AGENT_LIST_FAIL,
-	FAKE_HERDR_AGENT_LIST_TERMINAL_ID: envRecord().FAKE_HERDR_AGENT_LIST_TERMINAL_ID,
-	FAKE_HERDR_AGENT_LIST_PANE_ID: envRecord().FAKE_HERDR_AGENT_LIST_PANE_ID,
-	FAKE_HERDR_AGENT_LIST_TAB_ID: envRecord().FAKE_HERDR_AGENT_LIST_TAB_ID,
-};
+const controlledEnvironmentNames = [
+	"HERDR_ENV",
+	"HERDR_PANE_ID",
+	"HERDR_SOCKET_PATH",
+	"HERDR_SUBAGENT_NAME",
+	"HERDR_SUBAGENT_ALLOW_SPAWN",
+	"HERDR_SUBAGENT_RESULT_SOCK",
+	"PATH",
+	"PI_CODING_AGENT_DIR",
+	"FAKE_HERDR_PROTOCOL",
+	"FAKE_HERDR_MALFORMED_RESPONSE",
+	"FAKE_HERDR_TAB_CLOSE_FAIL",
+	"FAKE_HERDR_TAB_GET_FAIL",
+	"FAKE_HERDR_TAB_GET_MALFORMED",
+	"FAKE_HERDR_WAIT_HANG",
+	"FAKE_HERDR_AGENT_STATUS",
+	"FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE",
+	"FAKE_HERDR_AGENTS",
+	"FAKE_HERDR_PANE_RUN_FAIL",
+	"FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY",
+	"FAKE_HERDR_PANE_RUN_DELAY_MESSAGE",
+	"FAKE_HERDR_PANE_RUN_DELAY_MS",
+	"FAKE_HERDR_PANE_CURRENT_FAIL",
+	"FAKE_HERDR_PANE_CURRENT_PANE_ID",
+	"FAKE_HERDR_PANE_CURRENT_TERMINAL_ID",
+	"FAKE_HERDR_AGENT_LIST_FAIL",
+	"FAKE_HERDR_AGENT_LIST_TERMINAL_ID",
+	"FAKE_HERDR_AGENT_LIST_PANE_ID",
+	"FAKE_HERDR_AGENT_LIST_TAB_ID",
+];
+
+const originalEnv = Object.fromEntries(
+	controlledEnvironmentNames.map((name) => [name, envRecord()[name]]),
+);
+
+interface TestServer {
+	readonly socketPath: string;
+	readonly requests: WireRequest[];
+	close(): Promise<void>;
+}
 
 let tempRoots: string[] = [];
 let loadedTools: LoadedTool[] = [];
+let activeServers: TestServer[] = [];
 
-/** Restore environment variables and remove temporary roots created by this harness. */
+/** Restore environment variables and remove all temporary sockets and roots. */
 export const cleanupHarness = async (): Promise<void> => {
-	for (const loaded of loadedTools) {
-		loaded.dispatch("session_shutdown");
-	}
+	for (const loaded of loadedTools) await loaded.dispatchAsync("session_shutdown");
 	loadedTools = [];
+	const servers = activeServers;
+	activeServers = [];
+	await Promise.all(servers.map((server) => server.close()));
 	restoreEnv();
 	const roots = tempRoots;
 	tempRoots = [];
-	for (const root of roots) {
-		await rm(root, { recursive: true, force: true });
-	}
+	for (const root of roots) await rm(root, { recursive: true, force: true });
 };
 
 /** Set or unset an environment variable for the current test process. */
 export const setEnv = (name: string, value: string | undefined): void => {
-	const env = envRecord();
-	if (value === undefined) {
-		delete env[name];
-		return;
-	}
-	env[name] = value;
+	vi.stubEnv(name, value);
 };
 
 /** Simulate whether the current pi session is a spawned herdr subagent session. */
@@ -178,8 +211,8 @@ export const setSubagentSession = (name: string | undefined, allowSpawn = false)
 };
 
 /** Create a temporary root directory that will be removed by cleanupHarness. */
-export const makeTempRoot = async (): Promise<string> => {
-	const root = await mkdtemp(path.join(tmpdir(), "pi-herdr-subagent-test-"));
+export const makeTempRoot = async (prefix = "pi-herdr-subagent-test-"): Promise<string> => {
+	const root = await mkdtemp(path.join(tmpdir(), prefix));
 	tempRoots.push(root);
 	return root;
 };
@@ -198,6 +231,10 @@ export const makeContext = (
 /** Load the extension default export and return the captured herdr_subagent tool. */
 export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> => {
 	setEnv("PI_CODING_AGENT_DIR", agentDir);
+	setEnv(
+		"HERDR_SOCKET_PATH",
+		activeServers.at(-1)?.socketPath ?? path.join(path.dirname(agentDir), "no-herdr.sock"),
+	);
 	const registered: ToolDefinition[] = [];
 	const sentMessages: SentCustomMessage[] = [];
 	const sentUserMessages: SentUserMessage[] = [];
@@ -252,10 +289,19 @@ export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> 
 		pi,
 		sentMessages,
 		sentUserMessages,
-		dispatch(event, payload, ctx) {
-			for (const handler of handlers.get(event) ?? []) {
-				handler(payload ?? { type: event }, ctx);
+		async transformContext(messages, branch = []) {
+			let current = [...messages];
+			for (const handler of handlers.get("context") ?? []) {
+				const result = await handler(
+					{ type: "context", messages: current },
+					{ sessionManager: { getBranch: () => branch } },
+				);
+				if (isRecord(result) && Array.isArray(result.messages)) current = result.messages;
 			}
+			return current;
+		},
+		dispatch(event, payload, ctx) {
+			for (const handler of handlers.get(event) ?? []) handler(payload ?? { type: event }, ctx);
 		},
 		async dispatchAsync(event, payload, ctx) {
 			await Promise.all(
@@ -268,35 +314,24 @@ export const loadToolWithFakePi = async (agentDir: string): Promise<LoadedTool> 
 };
 
 /** Load the extension default export and return the captured herdr_subagent tool. */
-export const loadTool = async (agentDir: string): Promise<ToolDefinition> => {
-	const loaded = await loadToolWithFakePi(agentDir);
-	return loaded.tool;
-};
+export const loadTool = async (agentDir: string): Promise<ToolDefinition> =>
+	(await loadToolWithFakePi(agentDir)).tool;
 
-/** Install a fake herdr binary on PATH and return its binary directory and call log path. */
+/** Start a real temporary Unix socket server that speaks Herdr protocol 21. */
 export const installFakeHerdr = async (
 	root: string,
 ): Promise<{ readonly bin: string; readonly log: string }> => {
-	const bin = path.join(root, "bin");
-	const log = path.join(root, "herdr.log");
-	await mkdir(bin, { recursive: true });
-	const script = path.join(bin, "herdr");
-	await writeFile(script, fakeHerdrScript(), { encoding: "utf8", mode: 0o755 });
-	await chmod(script, 0o755);
-	setEnv("FAKE_HERDR_LOG", log);
-	setEnv("PATH", `${bin}${path.delimiter}${originalEnv.PATH ?? ""}`);
+	const server = await startTestServer(root);
+	activeServers.push(server);
+	setEnv("HERDR_SOCKET_PATH", server.socketPath);
+	setEnv("HERDR_PANE_ID", "wTest:p0");
 	setSubagentSession(undefined);
-	return { bin, log };
+	return { bin: path.dirname(server.socketPath), log: server.socketPath };
 };
 
-/** Read the fake herdr call log as tab-separated argument arrays. */
-export const readHerdrCalls = async (log: string): Promise<string[][]> => {
-	const text = await readFile(log, "utf8").catch(() => "");
-	return text
-		.split("\n")
-		.filter((line) => line.length > 0)
-		.map((line) => line.split("\t"));
-};
+/** Return captured SDK wire requests for one test server. */
+export const readHerdrRequests = (socketPath: string): ReadonlyArray<WireRequest> =>
+	activeServers.find((server) => server.socketPath === socketPath)?.requests ?? [];
 
 /** Write a fake agent definition into a test agent directory. */
 export const writeAgent = async (
@@ -315,52 +350,21 @@ export const writeAgent = async (
 	);
 };
 
-/** Return the first pane run command captured from fake herdr calls. */
-export const runCommandFromCalls = (
-	calls: ReadonlyArray<ReadonlyArray<string>>,
-): string | undefined => {
-	const runCall = calls.find((args) => args[0] === "pane" && args[1] === "run");
-	return runCall?.[3];
+/** Return the first pane input text sent through the SDK. */
+export const firstRunCommand = (requests: ReadonlyArray<WireRequest>): string | undefined => {
+	const text = requests.find((request) => request.method === "pane.send_input")?.params.text;
+	return typeof text === "string" ? text : undefined;
 };
 
-/** Return the last pane run command captured from fake herdr calls. */
-export const lastRunCommandFromCalls = (
-	calls: ReadonlyArray<ReadonlyArray<string>>,
-): string | undefined => {
-	const runCalls = calls.filter((args) => args[0] === "pane" && args[1] === "run");
-	return runCalls.at(-1)?.[3];
+/** Return the last pane input text sent through the SDK. */
+export const lastRunCommand = (requests: ReadonlyArray<WireRequest>): string | undefined => {
+	const text = requests.filter((request) => request.method === "pane.send_input").at(-1)
+		?.params.text;
+	return typeof text === "string" ? text : undefined;
 };
 
 const restoreEnv = (): void => {
-	setEnv("HERDR_ENV", originalEnv.HERDR_ENV);
-	setEnv("HERDR_SUBAGENT_NAME", originalEnv.HERDR_SUBAGENT_NAME);
-	setEnv("HERDR_SUBAGENT_ALLOW_SPAWN", originalEnv.HERDR_SUBAGENT_ALLOW_SPAWN);
-	setEnv("HERDR_SUBAGENT_RESULT_SOCK", originalEnv.HERDR_SUBAGENT_RESULT_SOCK);
-	setEnv("PATH", originalEnv.PATH);
-	setEnv("PI_CODING_AGENT_DIR", originalEnv.PI_CODING_AGENT_DIR);
-	setEnv("FAKE_HERDR_LOG", originalEnv.FAKE_HERDR_LOG);
-	setEnv("FAKE_HERDR_TAB_CLOSE_FAIL", originalEnv.FAKE_HERDR_TAB_CLOSE_FAIL);
-	setEnv("FAKE_HERDR_TAB_GET_FAIL", originalEnv.FAKE_HERDR_TAB_GET_FAIL);
-	setEnv("FAKE_HERDR_WAIT_HANG", originalEnv.FAKE_HERDR_WAIT_HANG);
-	setEnv("FAKE_HERDR_AGENT_STATUS", originalEnv.FAKE_HERDR_AGENT_STATUS);
-	setEnv(
-		"FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE",
-		originalEnv.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE,
-	);
-	setEnv("FAKE_HERDR_AGENT_GET_REQUIRED_TARGET", originalEnv.FAKE_HERDR_AGENT_GET_REQUIRED_TARGET);
-	setEnv("FAKE_HERDR_AGENT_GET_TERMINAL_ID", originalEnv.FAKE_HERDR_AGENT_GET_TERMINAL_ID);
-	setEnv("FAKE_HERDR_PANE_RUN_FAIL", originalEnv.FAKE_HERDR_PANE_RUN_FAIL);
-	setEnv("FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY", originalEnv.FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY);
-	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MESSAGE);
-	setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", originalEnv.FAKE_HERDR_PANE_RUN_DELAY_MS);
-	setEnv("FAKE_HERDR_PANE_CURRENT_FAIL", originalEnv.FAKE_HERDR_PANE_CURRENT_FAIL);
-	setEnv("FAKE_HERDR_PANE_CURRENT_PANE_ID", originalEnv.FAKE_HERDR_PANE_CURRENT_PANE_ID);
-	setEnv("FAKE_HERDR_PANE_CURRENT_TERMINAL_ID", originalEnv.FAKE_HERDR_PANE_CURRENT_TERMINAL_ID);
-	setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", originalEnv.FAKE_HERDR_AGENT_LIST_ENABLE);
-	setEnv("FAKE_HERDR_AGENT_LIST_FAIL", originalEnv.FAKE_HERDR_AGENT_LIST_FAIL);
-	setEnv("FAKE_HERDR_AGENT_LIST_TERMINAL_ID", originalEnv.FAKE_HERDR_AGENT_LIST_TERMINAL_ID);
-	setEnv("FAKE_HERDR_AGENT_LIST_PANE_ID", originalEnv.FAKE_HERDR_AGENT_LIST_PANE_ID);
-	setEnv("FAKE_HERDR_AGENT_LIST_TAB_ID", originalEnv.FAKE_HERDR_AGENT_LIST_TAB_ID);
+	for (const name of controlledEnvironmentNames) setEnv(name, originalEnv[name]);
 };
 
 const missingTool = (message: string): ToolDefinition => ({
@@ -376,26 +380,22 @@ const loadedMissingTool = (
 	sentUserMessages: SentUserMessage[],
 	message: string,
 ): LoadedTool => {
-	const handlers = new Map<SessionEvent, SessionHandler[]>();
 	const loaded: LoadedTool = {
 		tool: missingTool(message),
 		pi,
 		sentMessages,
 		sentUserMessages,
-		dispatch(event, payload, ctx) {
-			for (const handler of handlers.get(event) ?? []) {
-				handler(payload ?? { type: event }, ctx);
-			}
+		async transformContext(messages) {
+			return messages;
 		},
-		async dispatchAsync(event, payload, ctx) {
-			await Promise.all(
-				(handlers.get(event) ?? []).map((handler) => handler(payload ?? { type: event }, ctx)),
-			);
-		},
+		dispatch() {},
+		async dispatchAsync() {},
 	};
 	loadedTools.push(loaded);
 	return loaded;
 };
+
+const parseWireJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -403,115 +403,246 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isExtensionFactory = (value: unknown): value is ExtensionFactory =>
 	typeof value === "function";
 
-const fakeHerdrScript = (): string => String.raw`#!/usr/bin/env node
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const log = process.env.FAKE_HERDR_LOG;
-if (log) fs.appendFileSync(log, args.join("\t") + "\n");
-const writeJson = (value) => process.stdout.write(JSON.stringify(value));
-const argAfter = (flag) => {
-  const index = args.indexOf(flag);
-  return index >= 0 ? args[index + 1] : undefined;
+const startTestServer = async (root: string): Promise<TestServer> => {
+	const socketPath = path.join(root, "herdr.sock");
+	const requests: WireRequest[] = [];
+	const sockets = new Set<Socket>();
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+		consumeRequests(socket, requests);
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	return {
+		socketPath,
+		requests,
+		async close() {
+			for (const socket of sockets) socket.destroy();
+			await closeServer(server);
+			await rm(socketPath, { force: true });
+		},
+	};
 };
-const nextAgentStatus = () => {
-  let agentStatus = process.env.FAKE_HERDR_AGENT_STATUS || "idle";
-  const sequenceFile = process.env.FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE;
-  if (sequenceFile && fs.existsSync(sequenceFile)) {
-    const statuses = fs.readFileSync(sequenceFile, "utf8").split(/\r?\n/).filter(Boolean);
-    if (statuses.length > 0) {
-      agentStatus = statuses.shift();
-      fs.writeFileSync(sequenceFile, statuses.length > 0 ? statuses.join("\n") + "\n" : "");
-    }
-  }
-  return agentStatus;
+
+const consumeRequests = (socket: Socket, requests: WireRequest[]): void => {
+	let input = "";
+	socket.on("data", (chunk: Buffer) => {
+		input += chunk.toString("utf8");
+		for (;;) {
+			const newline = input.indexOf("\n");
+			if (newline < 0) return;
+			const line = input.slice(0, newline);
+			input = input.slice(newline + 1);
+			handleRequestLine(socket, line, requests).then(undefined, () => socket.destroy());
+		}
+	});
 };
-if (args[0] === "pane" && args[1] === "current") {
-  if (process.env.FAKE_HERDR_PANE_CURRENT_FAIL === "1") {
-    process.stderr.write("pane current failed");
-    process.exit(1);
-  }
-  writeJson({ result: { pane: { pane_id: process.env.FAKE_HERDR_PANE_CURRENT_PANE_ID || "wTest:p0", terminal_id: process.env.FAKE_HERDR_PANE_CURRENT_TERMINAL_ID || "term-root", tab_id: "wTest:t1", workspace_id: "wTest", cwd: "/workspace", foreground_cwd: "/workspace" } } });
-  process.exit(0);
-}
-if (args[0] === "tab" && args[1] === "create") {
-  const workspace = argAfter("--workspace") || "wTest";
-  const cwd = argAfter("--cwd") || "/workspace";
-  const label = argAfter("--label") || "agent: test";
-  writeJson({ result: { root_pane: { pane_id: "wTest:p1", terminal_id: "term-subagent", tab_id: "wTest:t2", workspace_id: workspace, cwd, foreground_cwd: cwd }, tab: { tab_id: "wTest:t2", workspace_id: workspace, label } } });
-  process.exit(0);
-}
-if (args[0] === "pane" && args[1] === "run") {
-  if (process.env.FAKE_HERDR_PANE_RUN_FAIL === "1") {
-    process.stderr.write("pane run failed");
-    process.exit(1);
-  }
-  const delayMessage = process.env.FAKE_HERDR_PANE_RUN_DELAY_MESSAGE;
-  const delayMs = Number(process.env.FAKE_HERDR_PANE_RUN_DELAY_MS || "0");
-  if (delayMs > 0 && (!delayMessage || args[3] === delayMessage)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
-  }
-  if (process.env.FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY === "1") {
-    process.stderr.write("pane run failed after input");
-    process.exit(1);
-  }
-  process.exit(0);
-}
-if (args[0] === "pane" && (args[1] === "rename" || args[1] === "close")) process.exit(0);
-if (args[0] === "tab" && args[1] === "close") {
-  if (process.env.FAKE_HERDR_TAB_CLOSE_FAIL === "1") {
-    process.stderr.write("unknown tab: " + args[2]);
-    process.exit(1);
-  }
-  process.exit(0);
-}
-if (args[0] === "tab" && args[1] === "get") {
-  if (process.env.FAKE_HERDR_TAB_GET_FAIL === "1") {
-    process.stderr.write("unknown tab: " + args[2]);
-    process.exit(1);
-  }
-  writeJson({ result: { tab: { tab_id: args[2], workspace_id: "wTest" } } });
-  process.exit(0);
-}
-if (args[0] === "agent" && args[1] === "get") {
-  const requiredTarget = process.env.FAKE_HERDR_AGENT_GET_REQUIRED_TARGET;
-  if (requiredTarget && args[2] !== requiredTarget) {
-    process.stderr.write("unknown agent: " + args[2]);
-    process.exit(1);
-  }
-  const agentStatus = nextAgentStatus();
-  const terminalId = process.env.FAKE_HERDR_AGENT_GET_TERMINAL_ID || args[2];
-  writeJson({ result: { agent: { pane_id: "wTest:p1", terminal_id: terminalId, tab_id: "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" } } });
-  process.exit(0);
-}
-if (args[0] === "agent" && args[1] === "list") {
-  if (process.env.FAKE_HERDR_AGENT_LIST_FAIL === "1") {
-    process.stderr.write("agent list failed");
-    process.exit(1);
-  }
-  if (process.env.FAKE_HERDR_AGENT_LIST_ENABLE !== "1") {
-    writeJson({ result: { agents: [] } });
-    process.exit(0);
-  }
-  const agentStatus = nextAgentStatus();
-  writeJson({ result: { agents: [{ pane_id: process.env.FAKE_HERDR_AGENT_LIST_PANE_ID || "wTest:p1", terminal_id: process.env.FAKE_HERDR_AGENT_LIST_TERMINAL_ID || "term-subagent", tab_id: process.env.FAKE_HERDR_AGENT_LIST_TAB_ID || "wTest:t2", workspace_id: "wTest", agent_status: agentStatus, cwd: "/workspace", foreground_cwd: "/workspace" }] } });
-  process.exit(0);
-}
-if (args[0] === "agent" && args[1] === "focus") {
-  process.exit(0);
-}
-if (args[0] === "pane" && args[1] === "read") {
-  process.stdout.write("STATUS: done\nAll good.\n");
-  process.exit(0);
-}
-if (args[0] === "wait" && args[1] === "agent-status") {
-  if (process.env.FAKE_HERDR_WAIT_HANG === "1") {
-    process.on("SIGTERM", () => {});
-    setInterval(() => {}, 1000);
-  } else {
-    process.exit(0);
-  }
-} else {
-  process.stderr.write("unexpected fake herdr call: " + args.join(" "));
-  process.exit(2);
-}
-`;
+
+const handleRequestLine = async (
+	socket: Socket,
+	line: string,
+	requests: WireRequest[],
+): Promise<void> => {
+	const parsedJson = parseWireJson(line);
+	if (Option.isNone(parsedJson)) {
+		socket.destroy();
+		return;
+	}
+	const parsed = parsedJson.value;
+	if (!isWireRequest(parsed)) {
+		socket.destroy();
+		return;
+	}
+	requests.push(parsed);
+	const reply = await responseFor(parsed);
+	if (reply !== undefined && !socket.destroyed) {
+		socket.end(typeof reply === "string" ? reply : `${JSON.stringify(reply)}\n`);
+	}
+};
+
+const isWireRequest = (value: unknown): value is WireRequest =>
+	isRecord(value) &&
+	typeof value.id === "string" &&
+	typeof value.method === "string" &&
+	isRecord(value.params);
+
+const responseFor = async (
+	request: WireRequest,
+): Promise<Record<string, unknown> | string | undefined> => {
+	const ok = (result: Record<string, unknown>): Record<string, unknown> => ({
+		id: request.id,
+		result,
+	});
+	const fail = (message: string): Record<string, unknown> => ({
+		id: request.id,
+		error: { code: "fixture_rejected", message },
+	});
+	const params = request.params;
+	switch (request.method) {
+		case "ping":
+			if (envRecord().FAKE_HERDR_MALFORMED_RESPONSE === "1") return "{malformed\n";
+			return ok({
+				type: "pong",
+				version: "0.8.2",
+				protocol: Number(envRecord().FAKE_HERDR_PROTOCOL ?? "21"),
+			});
+		case "pane.current": {
+			if (envRecord().FAKE_HERDR_PANE_CURRENT_FAIL === "1") return fail("pane current failed");
+			const callerPaneId = String(params.caller_pane_id ?? "wTest:p0");
+			return ok({
+				type: "pane_current",
+				pane: paneFixture(callerPaneId === "wTest:p0" ? "root" : "subagent", {
+					...params,
+					pane_id: callerPaneId,
+				}),
+			});
+		}
+		case "tab.create":
+			return ok({
+				type: "tab_created",
+				root_pane: paneFixture("subagent", params),
+				tab: tabFixture(typeof params.label === "string" ? params.label : "agent: test"),
+			});
+		case "pane.send_input": {
+			const text = typeof params.text === "string" ? params.text : "";
+			if (envRecord().FAKE_HERDR_PANE_RUN_FAIL === "1") return fail("pane run failed");
+			const delayMessage = envRecord().FAKE_HERDR_PANE_RUN_DELAY_MESSAGE;
+			const delayMs = Number(envRecord().FAKE_HERDR_PANE_RUN_DELAY_MS ?? "0");
+			if (delayMs > 0 && (!delayMessage || delayMessage === text)) {
+				await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+			}
+			return envRecord().FAKE_HERDR_PANE_RUN_FAIL_AFTER_DELAY === "1"
+				? fail("pane run failed after input")
+				: ok({ type: "ok" });
+		}
+		case "pane.rename":
+			return ok({ type: "pane_info", pane: paneFixture("subagent", params) });
+		case "pane.close":
+			return ok({ type: "ok" });
+		case "tab.close":
+			return envRecord().FAKE_HERDR_TAB_CLOSE_FAIL === "1"
+				? fail(`unknown tab: ${String(params.tab_id ?? "")}`)
+				: ok({ type: "ok" });
+		case "tab.get":
+			if (envRecord().FAKE_HERDR_TAB_GET_MALFORMED === "1") return "{malformed\n";
+			return envRecord().FAKE_HERDR_TAB_GET_FAIL === "1"
+				? {
+						id: request.id,
+						error: {
+							code: "tab_not_found",
+							message: `unknown tab: ${String(params.tab_id ?? "")}`,
+						},
+					}
+				: ok({ type: "tab_info", tab: tabFixture("agent: test") });
+		case "agent.get":
+		case "agent.focus":
+		case "agent.wait": {
+			// Protocol 21 native targets do not include stable terminal ids. Those
+			// must resolve through agent.list, and unknown panes must stay missing.
+			const target = String(params.target ?? "");
+			if (envRecord().FAKE_HERDR_AGENTS === "none" || target !== agentPaneId()) {
+				return {
+					id: request.id,
+					error: { code: "agent_not_found", message: `agent target ${target} not found` },
+				};
+			}
+			if (request.method === "agent.wait" && envRecord().FAKE_HERDR_WAIT_HANG === "1")
+				return undefined;
+			return ok({ type: "agent_info", agent: await agentFixture() });
+		}
+		case "agent.list":
+			if (envRecord().FAKE_HERDR_AGENT_LIST_FAIL === "1") return fail("agent list failed");
+			return ok({
+				type: "agent_list",
+				agents: envRecord().FAKE_HERDR_AGENTS === "none" ? [] : [await agentFixture()],
+			});
+		case "pane.read":
+			return ok({
+				type: "pane_read",
+				read: {
+					pane_id: String(params.pane_id ?? "wTest:p1"),
+					tab_id: "wTest:t2",
+					workspace_id: "wTest",
+					text: "STATUS: done\nAll good.\n",
+					source: params.source ?? "recent",
+					format: "text",
+					revision: 1,
+					truncated: false,
+				},
+			});
+		default:
+			return fail(`unexpected test request: ${request.method}`);
+	}
+};
+
+const paneFixture = (
+	kind: "root" | "subagent",
+	params: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> => {
+	const root = kind === "root";
+	const cwd = typeof params.cwd === "string" ? params.cwd : "/workspace";
+	return {
+		pane_id:
+			typeof params.pane_id === "string"
+				? params.pane_id
+				: root
+					? (envRecord().FAKE_HERDR_PANE_CURRENT_PANE_ID ?? "wTest:p0")
+					: "wTest:p1",
+		terminal_id: root
+			? (envRecord().FAKE_HERDR_PANE_CURRENT_TERMINAL_ID ?? "term-root")
+			: "term-subagent",
+		tab_id: root ? "wTest:t1" : "wTest:t2",
+		workspace_id: "wTest",
+		cwd,
+		foreground_cwd: cwd,
+		agent_status: "idle",
+		focused: root,
+		revision: 1,
+		label: null,
+	};
+};
+
+const agentPaneId = (): string => envRecord().FAKE_HERDR_AGENT_LIST_PANE_ID ?? "wTest:p1";
+
+const agentFixture = async (): Promise<Record<string, unknown>> => ({
+	pane_id: agentPaneId(),
+	terminal_id: envRecord().FAKE_HERDR_AGENT_LIST_TERMINAL_ID ?? "term-subagent",
+	tab_id: envRecord().FAKE_HERDR_AGENT_LIST_TAB_ID ?? "wTest:t2",
+	workspace_id: "wTest",
+	agent_status: await nextAgentStatus(),
+	cwd: "/workspace",
+	foreground_cwd: "/workspace",
+	focused: false,
+	revision: 1,
+});
+
+const tabFixture = (label: string): Record<string, unknown> => ({
+	tab_id: "wTest:t2",
+	workspace_id: "wTest",
+	label,
+	agent_status: "idle",
+	focused: false,
+	number: 2,
+	pane_count: 1,
+});
+
+const nextAgentStatus = async (): Promise<string> => {
+	let status = envRecord().FAKE_HERDR_AGENT_STATUS ?? "idle";
+	const sequenceFile = envRecord().FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE;
+	if (!sequenceFile) return status;
+	const text = await readFile(sequenceFile, "utf8").catch(() => "");
+	const statuses = text.split(/\r?\n/u).filter(Boolean);
+	const next = statuses.shift();
+	if (!next) return status;
+	status = next;
+	await writeFile(sequenceFile, statuses.length > 0 ? `${statuses.join("\n")}\n` : "", "utf8");
+	return status;
+};
+
+const closeServer = (server: Server): Promise<void> =>
+	new Promise((resolve) => {
+		server.close(() => resolve());
+	});

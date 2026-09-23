@@ -1,9 +1,9 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
@@ -134,6 +134,110 @@ describe("LSP Extension", () => {
 			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 		}
 	});
+
+	test("TypeScript navigation uses the compatible agent tsserver when the project compiler has none", async () => {
+		const project = await createProject({ servers: {}, autoAuthorize: true }, "main.ts");
+		runtimes.push(project.runtime);
+		const dependencies = join(fixtureDir, "..", "node_modules");
+		await mkdir(join(project.cwd, "node_modules"), { recursive: true });
+		await symlink(
+			join(dependencies, "typescript"),
+			join(project.cwd, "node_modules", "typescript"),
+			"dir",
+		);
+		await symlink(dependencies, join(dirname(project.agentDir), "node_modules"), "dir");
+		await writeFile(join(project.cwd, "package.json"), '{"private":true}');
+		await writeFile(project.filePath, "const answer = 42;\nconsole.log(answer);\n");
+
+		const resolution = await Effect.runPromise(
+			project.runtime.clientsForFileProgram(project.filePath, "navigation", project.ctx, {
+				prompt: true,
+			}),
+		);
+		expect(resolution.unavailable).toEqual([]);
+		const located = resolution.clients.find(({ definition }) => definition.id === "typescript");
+		expect(located).toBeDefined();
+		if (located === undefined) return;
+		const definition = await Effect.runPromise(
+			located.client.requestEffect<unknown>("textDocument/definition", {
+				textDocument: { uri: pathToFileURL(project.filePath).href },
+				position: { line: 1, character: 13 },
+			}),
+		);
+		expect(definition).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					uri: pathToFileURL(project.filePath).href,
+					range: {
+						start: { line: 0, character: 6 },
+						end: { line: 0, character: 12 },
+					},
+				}),
+			]),
+		);
+	}, 20_000);
+
+	test.each([
+		["project-local", ".", "node_modules/typescript"],
+		["ancestor workspace", "packages/app", "node_modules/typescript"],
+		["ancestor Yarn SDK", "packages/app", ".yarn/sdks/typescript"],
+	])(
+		"TypeScript navigation prefers the %s server over the agent fallback",
+		async (_label, sessionPath, modulePath) => {
+			const project = await createProject({ servers: {}, autoAuthorize: true }, "main.ts");
+			runtimes.push(project.runtime);
+			const dependencies = join(fixtureDir, "..", "node_modules");
+			const compatiblePackage = join(dependencies, "typescript-tsserver");
+			await symlink(dependencies, join(dirname(project.agentDir), "node_modules"), "dir");
+			const localPackage = join(project.cwd, modulePath);
+			await mkdir(join(localPackage, "lib"), { recursive: true });
+			await writeFile(
+				join(localPackage, "package.json"),
+				await readFile(join(compatiblePackage, "package.json")),
+			);
+			const marker = join(project.cwd, "selected-tsserver");
+			// A real tsserver entrypoint records selection before loading the installed implementation.
+			await writeFile(
+				join(localPackage, "lib", "tsserver.js"),
+				`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");\nrequire(${JSON.stringify(join(compatiblePackage, "lib", "tsserver.js"))});\n`,
+			);
+			const cwd = join(project.cwd, sessionPath);
+			await mkdir(cwd, { recursive: true });
+			await writeFile(join(cwd, "package.json"), '{"private":true}');
+			const file = join(cwd, "main.ts");
+			await writeFile(file, "const answer = 42;\nconsole.log(answer);\n");
+			const runtime = new LspRuntime({ cwd, config: { servers: {}, autoAuthorize: true } });
+			runtimes.push(runtime);
+			const resolution = await Effect.runPromise(
+				runtime.clientsForFileProgram(
+					file,
+					"navigation",
+					{ ...project.ctx, cwd },
+					{ prompt: true },
+				),
+			);
+			expect(resolution.unavailable).toEqual([]);
+			const located = resolution.clients.find(({ definition }) => definition.id === "typescript");
+			expect(located).toBeDefined();
+			if (located === undefined) return;
+			const definition = await Effect.runPromise(
+				located.client.requestEffect<unknown>("textDocument/definition", {
+					textDocument: { uri: pathToFileURL(file).href },
+					position: { line: 1, character: 13 },
+				}),
+			);
+			expect(definition).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						uri: pathToFileURL(file).href,
+						range: { start: { line: 0, character: 6 }, end: { line: 0, character: 12 } },
+					}),
+				]),
+			);
+			expect(await readFile(marker, "utf8")).toBe("started");
+		},
+		20_000,
+	);
 
 	test("runtime includes expanded built-in language servers", async () => {
 		const runtime = new LspRuntime({ cwd: process.cwd(), config: { servers: {} } });
@@ -903,6 +1007,34 @@ describe("LSP Extension", () => {
 		await once(child, "exit");
 
 		await expect(Effect.runPromise(project.runtime.shutdownProgram())).resolves.toBeUndefined();
+	});
+
+	test("shutdown is idempotent, keeps status readable, and rejects new operations", async () => {
+		const project = await createProject();
+		runtimes.push(project.runtime);
+		const serverIds = project.runtime.serverIds();
+		await Effect.runPromise(
+			project.runtime.clientsForFileProgram(project.filePath, "navigation", project.ctx, {
+				prompt: true,
+			}),
+		);
+		await Effect.runPromise(project.runtime.shutdownProgram());
+		await Effect.runPromise(project.runtime.shutdownProgram());
+		expect(project.runtime.serverIds()).toEqual(serverIds);
+		expect(project.runtime.status()).toEqual([]);
+		expect(project.runtime.runningClients("navigation")).toEqual([]);
+		expect(project.runtime.diagnostics().size).toBe(0);
+		for (const operation of [
+			project.runtime.restartProgram(),
+			project.runtime.touchRunningFileProgram(project.filePath),
+			project.runtime.clientsForFileProgram(project.filePath, "navigation", project.ctx, {
+				prompt: true,
+			}),
+		]) {
+			await expect(Effect.runPromise(operation)).rejects.toMatchObject({
+				_tag: "LspRuntimeShuttingDown",
+			});
+		}
 	});
 
 	test("shutdown prevents in-flight spawns from installing clients", async () => {

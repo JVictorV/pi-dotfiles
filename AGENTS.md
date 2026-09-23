@@ -1,8 +1,5 @@
 # ~/.pi — pi coding agent config
 
-**Generated:** 2026-06-17T13:51:57Z
-**Commit:** d8cb9ec
-
 Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) coding agent. Cloned into `~/.pi`. TypeScript extensions + on-demand skills + settings. Human-facing setup lives in `README.md` — this file is agent-facing.
 
 ## STRUCTURE
@@ -12,6 +9,7 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 ├── agent/
 │   ├── extensions/   # auto-loaded TS extensions (AGENTS.md)
 │   ├── skills/       # on-demand skills; most vendored from mattpocock/skills
+│   ├── instructions/ # language-specific standards, loaded when needed
 │   ├── settings.json # models, theme, skill/package config
 │   ├── auth.json     # API keys — GITIGNORED, never commit
 │   ├── bin/ npm/ sessions/  # all gitignored, pi-restored
@@ -21,14 +19,15 @@ Personal config for the [pi](https://github.com/earendil-works/pi-coding-agent) 
 
 ## WHERE TO LOOK
 
-| Task                             | Location                                                                  |
-| -------------------------------- | ------------------------------------------------------------------------- |
-| Add/edit an extension            | `agent/extensions/*.ts` (auto-discovered on start / `/reload`)            |
-| Change model/theme/thinking      | `agent/settings.json`                                                     |
-| Add a skill                      | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
-| Add a private/work skill         | symlink into `~/.local/share/pi-skills/` (see CONVENTIONS)                |
-| Sync Pocock skills from upstream | invoke `sync-pocock-skills` skill ("sync skills")                         |
-| Extension type defs              | `tsconfig.json` resolves `@earendil-works/pi-*`                           |
+| Task                                    | Location                                                                  |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| Add/edit an extension                   | `agent/extensions/*.ts` or `agent/extensions/*/index.ts`                  |
+| Change the main Pi model/theme/thinking | `agent/settings.json`                                                     |
+| Change subagent role defaults           | `agent/agents/*.md`; override policy in `agent/agents/MODEL-MATRIX.md`    |
+| Add a skill                             | `agent/skills/<name>/SKILL.md` (needs frontmatter `name` + `description`) |
+| Add a private/work skill                | symlink into `~/.local/share/pi-skills/` (see CONVENTIONS)                |
+| Sync Pocock skills from upstream        | invoke `sync-pocock-skills` skill ("sync skills")                         |
+| Extension type defs                     | `tsconfig.json` resolves `@earendil-works/pi-*`                           |
 
 ## CONVENTIONS
 
@@ -62,11 +61,5 @@ npm run format        # oxfmt (useTabs) repo-wide, excluding .repos submodules; 
 
 - `settings.json` `"skills": ["!**/.agents/skills/**"]` disables `~/.agents/skills/` so copies here take precedence (avoids duplicates).
 - `git-interceptor` extension injects `GIT_EDITOR=true` etc. into every bash `git` command and blocks `--no-verify` — git will never open an editor in agent sessions.
-- `.repos/` holds reference-only submodules; exclude all of them from project-wide scans:
-  - `.repos/effect` tracks `Effect-TS/effect-smol` (folder renamed to `effect`).
-  - `.repos/dmmulroy-dotfiles` tracks `dmmulroy/.dotfiles` (credited inspiration).
-  - `.repos/edusantosbrito-pi-dotfiles` tracks `EduSantosBrito/pi-dotfiles` (credited inspiration).
-  - `.repos/opencode` tracks `anomalyco/opencode` (reference for ported behavior).
-  - `.repos/codex` tracks `openai/codex` (inspiration reference).
-  - `.repos/pi-subagents` tracks `tintinweb/pi-subagents` (MIT; source of ported model-resolver, worktree-isolation, and group-join patterns in the herdr-subagent extension).
-  - `.repos/pi-openai-server-compaction` tracks `algal/pi-openai-server-compaction` (MIT; source of the vendored OpenAI server-compaction extension).
+- `.repos/` holds reference-only submodules. Exclude all of them from project-wide scans. `.gitmodules` is the source of truth for their paths and remotes.
+- `vendor/README.md` records the SDK archive's provenance, protocol requirement, and rebuild procedure. Production extensions import the installed package, not reference source.

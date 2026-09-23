@@ -52,40 +52,5 @@ const HerdrPaneSchema = Schema.Struct({
 
 export type HerdrPane = Schema.Schema.Type<typeof HerdrPaneSchema>;
 
-const HerdrTabSchema = Schema.Struct({
-	tab_id: Schema.optional(Schema.String),
-	workspace_id: Schema.optional(Schema.String),
-	label: Schema.optional(Schema.String),
-});
-
-const HerdrAgentGetResponseSchema = Schema.Struct({
-	result: Schema.Struct({ agent: HerdrAgentSchema }),
-});
-
-const HerdrAgentListResponseSchema = Schema.Struct({
-	result: Schema.Struct({ agents: Schema.Array(HerdrAgentSchema) }),
-});
-
-const HerdrPaneCurrentResponseSchema = Schema.Struct({
-	result: Schema.Struct({ pane: Schema.optional(HerdrPaneSchema) }),
-});
-
-const HerdrTabGetResponseSchema = Schema.Struct({
-	result: Schema.Struct({ tab: HerdrTabSchema }),
-});
-
-const HerdrTabCreateResponseSchema = Schema.Struct({
-	result: Schema.Struct({
-		root_pane: Schema.optional(HerdrPaneSchema),
-		pane: Schema.optional(HerdrPaneSchema),
-		tab: Schema.optional(HerdrTabSchema),
-	}),
-});
-
-export const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+export const decodeJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 export const decodeRegistryEntry = Schema.decodeUnknownEffect(RegistryEntrySchema);
-export const decodeAgentGetResponse = Schema.decodeUnknownEffect(HerdrAgentGetResponseSchema);
-export const decodeAgentListResponse = Schema.decodeUnknownEffect(HerdrAgentListResponseSchema);
-export const decodePaneCurrentResponse = Schema.decodeUnknownEffect(HerdrPaneCurrentResponseSchema);
-export const decodeTabGetResponse = Schema.decodeUnknownEffect(HerdrTabGetResponseSchema);
-export const decodeTabCreateResponse = Schema.decodeUnknownEffect(HerdrTabCreateResponseSchema);

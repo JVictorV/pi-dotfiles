@@ -2,7 +2,7 @@
 name: critic
 description: High-taste critique of UI/UX, copy, API design, and code quality trade-offs. Use for subjective comparisons and design direction, not implementation.
 tools: read, grep, find, ls
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-astra
 thinking: high
 ---
 

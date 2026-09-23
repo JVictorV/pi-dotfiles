@@ -42,7 +42,7 @@ type ResolvedModel = {
 };
 
 /** Typed failure for any step of title generation (resolution or completion). */
-class TitleError extends Schema.TaggedErrorClass<TitleError>()("TitleError", {
+class TitleError extends Schema.TaggedError<TitleError>()("TitleError", {
 	reason: Schema.String,
 }) {}
 

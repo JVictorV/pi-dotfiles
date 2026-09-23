@@ -10,7 +10,7 @@ const StorageOperation = Schema.Literals(["locate", "read", "write", "remove"]);
 type StorageOperation = typeof StorageOperation.Type;
 
 /** A classified filesystem failure while managing private project instructions. */
-export class ProjectInstructionsStorageError extends Schema.TaggedErrorClass<ProjectInstructionsStorageError>()(
+export class ProjectInstructionsStorageError extends Schema.TaggedError<ProjectInstructionsStorageError>()(
 	"ProjectInstructionsStorageError",
 	{
 		operation: StorageOperation,

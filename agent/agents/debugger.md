@@ -1,7 +1,7 @@
 ---
 name: debugger
 description: Diagnoses bugs, flaky tests, and performance regressions to root cause using a fast repro signal. Reports the smallest safe fix without applying it unless the task allows edits.
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-astra
 thinking: xhigh
 ---
 

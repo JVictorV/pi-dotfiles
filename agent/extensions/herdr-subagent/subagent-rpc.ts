@@ -40,7 +40,7 @@ const SubagentRpcs = RpcGroup.make(SubagentFinished);
 export type SubagentFinishedPayload = Rpc.PayloadConstructor<typeof SubagentFinished>;
 
 /** Expected failure while starting the session-scoped subagent result RPC server. */
-export class SubagentRpcServerStartFailed extends Schema.TaggedErrorClass<SubagentRpcServerStartFailed>()(
+export class SubagentRpcServerStartFailed extends Schema.TaggedError<SubagentRpcServerStartFailed>()(
 	"SubagentRpcServerStartFailed",
 	{
 		message: Schema.String,
@@ -50,7 +50,7 @@ export class SubagentRpcServerStartFailed extends Schema.TaggedErrorClass<Subage
 ) {}
 
 /** Failure to deliver or persist a settled subagent completion. */
-export class SubagentCompletionDeliveryFailed extends Schema.TaggedErrorClass<SubagentCompletionDeliveryFailed>()(
+export class SubagentCompletionDeliveryFailed extends Schema.TaggedError<SubagentCompletionDeliveryFailed>()(
 	"SubagentCompletionDeliveryFailed",
 	{
 		message: Schema.String,

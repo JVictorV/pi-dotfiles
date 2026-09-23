@@ -1,10 +1,12 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Clock, Effect } from "effect";
+import { stripVTControlCharacters } from "node:util";
+
+import type { ContextEvent, ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { Clock, Effect, Option, Schema } from "effect";
 import type { FileSystem } from "effect/FileSystem";
 import type { Path } from "effect/Path";
-import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+import type { HerdrSdk } from "@herdr/sdk";
 
-import { liveAgent, runHerdr } from "./herdr-cli";
+import { liveAgent, readPane } from "./herdr-client";
 import { truncateForModel } from "./output";
 import { takePersistedSubagentCompletion } from "./subagent-rpc";
 
@@ -20,7 +22,7 @@ const MAX_TRACKED_DELIVERED_ARMS = 256;
 
 type NotificationPi = Pick<ExtensionAPI, "sendMessage">;
 
-type NotificationRequirements = ChildProcessSpawner | FileSystem | Path;
+type NotificationRequirements = HerdrSdk | FileSystem | Path;
 type RunPromise = <A>(
 	effect: Effect.Effect<A, never, NotificationRequirements>,
 	options?: { readonly signal?: AbortSignal },
@@ -49,6 +51,7 @@ interface NotificationManagerOptions {
 }
 
 interface ArmedNotification {
+	readonly completionId?: string;
 	readonly name: string;
 	readonly paneId: string;
 	readonly summarySource: string;
@@ -64,6 +67,7 @@ interface WatchedNotification extends ArmedNotification {
 }
 
 interface ExternalNotification extends ArmedNotification {
+	readonly reportKind: "final" | "sample";
 	readonly state: NotificationState;
 	readonly finalMessage: string;
 }
@@ -93,6 +97,9 @@ interface PendingArmBatch {
 }
 
 interface NotificationDelivery {
+	readonly reportKind: "final" | "sample";
+	readonly completionId: string;
+	readonly reportText: string;
 	readonly key: string;
 	readonly name: string;
 	readonly paneId: string;
@@ -130,6 +137,8 @@ export interface SubagentNotificationManager {
 	hasDeliveredArm(armId: string): boolean;
 	/** Deliver an external RPC result if, and only if, the matching watcher is armed. */
 	deliverExternal(name: string, result: ExternalNotificationResult): void;
+	/** Capture the latest known report per pane before inspection. Acknowledge only a full report in its returned text. */
+	beginInspection(): (name: string, paneId: string, text: string) => ReadonlyArray<string>;
 	/** Cancel any watcher matching a subagent name, pane id, or tool target. */
 	cancel(target: string | undefined): void;
 	/** Cancel all active notification watchers. */
@@ -159,6 +168,199 @@ const escapeXmlText = (text: string): string =>
 		.replaceAll(">", "&gt;")
 		.replaceAll('"', "&quot;");
 
+const ClosedPanelIdentity = Schema.Struct({
+	name: Schema.String,
+	paneId: Schema.optional(Schema.String),
+});
+const decodeClosedAction = Schema.decodeUnknownOption(
+	Schema.Struct({
+		action: Schema.Literal("close"),
+		entry: Schema.optional(ClosedPanelIdentity),
+		resolved: Schema.optional(ClosedPanelIdentity),
+	}),
+);
+
+const panelKey = (name: string, paneId: string): string => JSON.stringify([name, paneId]);
+
+const decodeInspection = Schema.decodeUnknownOption(
+	Schema.Struct({
+		action: Schema.Literal("inspect"),
+		resolved: ClosedPanelIdentity,
+		consumedCompletions: Schema.optional(Schema.Array(Schema.String)),
+	}),
+);
+const decodeNewWork = Schema.decodeUnknownOption(
+	Schema.Struct({
+		action: Schema.Literals(["send", "spawn"]),
+		resolved: Schema.optional(ClosedPanelIdentity),
+		entry: Schema.optional(ClosedPanelIdentity),
+	}),
+);
+const reportPattern =
+	/<subagent_result name="([^"]*)" state="(?:done|blocked)" pane="([^"]*)">([\s\S]*?)<\/subagent_result>/gu;
+const decodeXmlText = (text: string): string =>
+	text
+		.replaceAll("&quot;", '"')
+		.replaceAll("&gt;", ">")
+		.replaceAll("&lt;", "<")
+		.replaceAll("&amp;", "&");
+
+// Normalize presentation, not words or code operators. Partial or changed reports
+// must stay available. In particular, do not use fuzzy word-overlap to discard data.
+const normalizeReportText = (text: string): string => {
+	let fenced = false;
+	return stripVTControlCharacters(text)
+		.split(/\r?\n/u)
+		.map((line) => {
+			if (/^\s*(```|~~~)/u.test(line)) {
+				fenced = !fenced;
+				return "";
+			}
+			if (fenced) return line;
+			return line
+				.replace(/^\s*#{1,6}\s+/u, "")
+				.replace(/^\s*[-*+•]\s+/u, "- ")
+				.replace(/\*\*([^*\n]+)\*\*/gu, "$1")
+				.replace(/`([^`\n]+)`/gu, "$1");
+		})
+		.join(" ")
+		.replaceAll(/\s+/gu, " ")
+		.trim();
+};
+
+/** Remove already-consumed result copies while preserving unread reports and archived originals. */
+export const refreshSubagentResultGuidance = (
+	messages: ReadonlyArray<ContextEvent["messages"][number]>,
+	branch: ReadonlyArray<SessionEntry> = [],
+): ContextEvent["messages"] => {
+	const consumed = new Set<string>();
+	const closedPanels = new Set<string>();
+	const epochs = new Map<string, number>();
+	const inspections = new Map<string, Array<{ epoch: number; text: string }>>();
+	const messageEpochs = new Map<ContextEvent["messages"][number], Map<string, number>>();
+	const collectReceipt = (message: ContextEvent["messages"][number]) => {
+		if (message.role !== "toolResult" || message.toolName !== "herdr_subagent" || message.isError)
+			return;
+		const inspection = decodeInspection(message.details);
+		if (Option.isSome(inspection))
+			for (const id of inspection.value.consumedCompletions ?? []) consumed.add(id);
+	};
+	// Receipts live on the active branch, so reload/compaction do not resurrect a
+	// consumed notification. Other branches cannot suppress this branch's reports.
+	for (const entry of branch) if (entry.type === "message") collectReceipt(entry.message);
+	for (const message of messages) {
+		collectReceipt(message);
+		if (message.role === "custom" && message.customType === CUSTOM_MESSAGE_TYPE)
+			messageEpochs.set(message, new Map(epochs));
+		if (message.role !== "toolResult" || message.toolName !== "herdr_subagent" || message.isError)
+			continue;
+		const work = decodeNewWork(message.details);
+		if (Option.isSome(work)) {
+			const identity = work.value.entry ?? work.value.resolved;
+			if (identity?.paneId) {
+				const key = panelKey(escapeXmlText(identity.name), escapeXmlText(identity.paneId));
+				epochs.set(key, (epochs.get(key) ?? 0) + 1);
+			}
+		}
+		const inspected = decodeInspection(message.details);
+		if (Option.isSome(inspected) && inspected.value.resolved.paneId) {
+			const identity = inspected.value.resolved;
+			const key = panelKey(
+				escapeXmlText(identity.name),
+				escapeXmlText(inspected.value.resolved.paneId),
+			);
+			const text = normalizeReportText(
+				message.content
+					.filter((part) => part.type === "text")
+					.map((part) => part.text)
+					.join("\n"),
+			);
+			inspections.set(key, [
+				...(inspections.get(key) ?? []),
+				{ epoch: epochs.get(key) ?? 0, text },
+			]);
+		}
+		const closed = decodeClosedAction(message.details);
+		if (Option.isSome(closed))
+			for (const identity of [closed.value.entry, closed.value.resolved]) {
+				if (identity?.paneId)
+					closedPanels.add(panelKey(escapeXmlText(identity.name), escapeXmlText(identity.paneId)));
+			}
+	}
+
+	const seen = new Set<string>();
+	return messages.flatMap((message) => {
+		if (
+			message.role !== "custom" ||
+			message.customType !== CUSTOM_MESSAGE_TYPE ||
+			typeof message.content !== "string"
+		)
+			return [message];
+		let blocks = 0;
+		let remaining = 0;
+		const removedPanels = new Set<string>();
+		const originalContent = message.content;
+		let content = originalContent.replace(
+			reportPattern,
+			(block: string, name: string, paneId: string, body: string) => {
+				blocks++;
+				const key = panelKey(name, paneId);
+				const encodedId = /<completion_id>([\s\S]*?)<\/completion_id>/u.exec(body)?.[1];
+				const id = encodedId === undefined ? undefined : decodeXmlText(encodedId);
+				const payload =
+					/<(?:final_message|pane_tail)>([\s\S]*?)<\/(?:final_message|pane_tail)>/u.exec(body)?.[1];
+				const expected = payload === undefined ? "" : normalizeReportText(decodeXmlText(payload));
+				// Old queued envelopes have no completion ID. Be conservative: only an
+				// entire matching report in the same send/spawn interval counts as read.
+				const alreadyVisible =
+					expected.length > 0 &&
+					(inspections.get(key) ?? []).some(
+						(inspection) =>
+							inspection.epoch === (messageEpochs.get(message)?.get(key) ?? 0) &&
+							inspection.text.includes(expected),
+					);
+				if ((id && (consumed.has(id) || seen.has(id))) || (!id && alreadyVisible)) {
+					removedPanels.add(key);
+					return "";
+				}
+				if (id) seen.add(id);
+				remaining++;
+				if (
+					id &&
+					alreadyVisible &&
+					!originalContent.includes(
+						`<required_action tool="herdr_subagent" action="inspect" target="${name}" pane="${paneId}">`,
+					)
+				) {
+					// This completion was not known when inspection started. Preserve its
+					// new identity/state, but reference the report text already in context.
+					return block.replace(
+						/<final_message>[\s\S]*?<\/final_message>/u,
+						"<report_already_visible>The complete final report text is already present in an inspection result in this context. Use that text; this notification confirms this completion.</report_already_visible>",
+					);
+				}
+				return block;
+			},
+		);
+		if (blocks > 0 && remaining === 0) return [];
+		if (blocks !== remaining)
+			content = content.replace(
+				/(<subagent_result_group\b[^>]*\bdelivered=")\d+("[^>]*>)/u,
+				(_match: string, prefix: string, suffix: string) => `${prefix}${remaining}${suffix}`,
+			);
+		content = content.replace(
+			/<required_action tool="herdr_subagent" action="inspect" target="([^"]*)" pane="([^"]*)">[\s\S]*?<\/required_action>/gu,
+			(directive: string, name: string, paneId: string) =>
+				removedPanels.has(panelKey(name, paneId))
+					? ""
+					: closedPanels.has(panelKey(name, paneId))
+						? `<subagent_panel_closed name="${name}" pane="${paneId}">\nThis panel was already closed. Use the report above only if its findings are still needed. Do not inspect or respawn this subagent because of this delayed notification. If the report was already incorporated, no further action is needed.\n</subagent_panel_closed>`
+						: directive,
+		);
+		return [content === message.content ? message : { ...message, content }];
+	});
+};
+
 const stateVerb = (state: NotificationState): string =>
 	state === "blocked" ? "needs attention" : "finished";
 
@@ -166,14 +368,19 @@ const requiredActionFor = (notification: {
 	readonly name: string;
 	readonly paneId: string;
 	readonly state: NotificationState;
+	readonly observed?: NotificationObserved;
+	readonly reportKind?: "final" | "sample";
 }): string => {
+	if (notification.observed === "rpc" && notification.reportKind !== "sample") {
+		return `<result_guidance>Use the final report above to continue the parent task. It is the completed subagent response, not a progress sample. Inspect the pane only if you need missing detail or a separate verification. Do not reread or acknowledge a report already used.</result_guidance>`;
+	}
 	const escapedName = escapeXmlText(notification.name);
 	const nextStep =
 		notification.state === "blocked"
 			? "Evaluate the blocker, then use herdr_subagent send or focus to unblock it when possible. Otherwise, report the blocker to the user."
 			: "Evaluate the result, then use the findings to continue the parent task. Do not duplicate the subagent's completed work.";
 	return `<required_action tool="herdr_subagent" action="inspect" target="${escapedName}" pane="${escapeXmlText(notification.paneId)}">
-Call herdr_subagent with action=inspect and target="${escapedName}" now. ${nextStep} Do not stop after only acknowledging this notification.
+If this subagent was already inspected and closed, use the report above without another lookup or respawn. Otherwise, call herdr_subagent with action=inspect and target="${escapedName}". ${nextStep} Do not stop after only acknowledging an unreviewed result.
 </required_action>`;
 };
 
@@ -183,7 +390,7 @@ const watchedResultBlockFor = (notification: WatchedNotification): string => {
 		notification.observed === "idle" ? " (observed idle: pane may have been viewed)" : "";
 	const summary = `Subagent ${notification.name} ${stateVerb(notification.state)}${observedNote}: ${sourceSummary}`;
 	return `<subagent_result name="${escapeXmlText(notification.name)}" state="${notification.state}" pane="${escapeXmlText(notification.paneId)}">
-<summary>${escapeXmlText(summary)}</summary>
+${notification.completionId ? `<completion_id>${escapeXmlText(notification.completionId)}</completion_id>\n` : ""}<summary>${escapeXmlText(summary)}</summary>
 <pane_tail>
 ${escapeXmlText(notification.paneTail)}
 </pane_tail>
@@ -194,7 +401,7 @@ const externalResultBlockFor = (notification: ExternalNotification): string => {
 	const sourceSummary = summarizeSource(notification.summarySource);
 	const summary = `Subagent ${notification.name} ${stateVerb(notification.state)}: ${sourceSummary}`;
 	return `<subagent_result name="${escapeXmlText(notification.name)}" state="${notification.state}" pane="${escapeXmlText(notification.paneId)}">
-<summary>${escapeXmlText(summary)}</summary>
+${notification.completionId ? `<completion_id>${escapeXmlText(notification.completionId)}</completion_id>\n` : ""}<summary>${escapeXmlText(summary)}</summary>
 <final_message>
 ${escapeXmlText(notification.finalMessage)}
 </final_message>
@@ -205,7 +412,7 @@ const envelopeFor = (notification: WatchedNotification): string =>
 	`${watchedResultBlockFor(notification)}\n\n${requiredActionFor(notification)}`;
 
 const externalEnvelopeFor = (notification: ExternalNotification): string =>
-	`${externalResultBlockFor(notification)}\n\n${requiredActionFor(notification)}`;
+	`${externalResultBlockFor(notification)}\n\n${requiredActionFor({ ...notification, observed: "rpc" })}`;
 
 const groupGuidanceFor = (
 	deliveries: ReadonlyArray<NotificationDelivery>,
@@ -214,7 +421,7 @@ const groupGuidanceFor = (
 	const requiredActions = deliveries.map(requiredActionFor).join("\n");
 	const groupStatus = partial
 		? "Remaining grouped subagents are still running and will be re-batched."
-		: "After all required inspections, continue the parent task with the combined findings.";
+		: "Use the completed reports to continue the parent task. Inspect only progress samples or missing details.";
 	return `${requiredActions}\n${groupStatus}`;
 };
 
@@ -234,9 +441,12 @@ ${groupGuidanceFor(deliveries, partial)}`;
 
 const watchedDeliveryFor = (
 	key: string,
-	notification: WatchedNotification,
+	notification: WatchedNotification & { readonly completionId: string },
 ): NotificationDelivery => ({
 	key,
+	completionId: notification.completionId,
+	reportKind: "sample",
+	reportText: notification.paneTail,
 	name: notification.name,
 	paneId: notification.paneId,
 	state: notification.state,
@@ -247,9 +457,12 @@ const watchedDeliveryFor = (
 
 const externalDeliveryFor = (
 	key: string,
-	notification: ExternalNotification,
+	notification: ExternalNotification & { readonly completionId: string },
 ): NotificationDelivery => ({
 	key,
+	completionId: notification.completionId,
+	reportKind: notification.reportKind,
+	reportText: notification.finalMessage,
 	name: notification.name,
 	paneId: notification.paneId,
 	state: notification.state,
@@ -284,7 +497,9 @@ const waitForNotificationState: (
 						};
 					}
 				}
-				const agent = yield* liveAgent(notification.paneId);
+				const agent = yield* liveAgent(notification.paneId).pipe(
+					Effect.catch(() => Effect.succeed(undefined)),
+				);
 				const status = agent?.agent_status ?? "unknown";
 				if (status === "working") {
 					observedWorking = true;
@@ -328,16 +543,8 @@ const waitForNotificationState: (
 	});
 
 const readPaneTail = (paneId: string): Effect.Effect<string, never, NotificationRequirements> =>
-	runHerdr([
-		"pane",
-		"read",
-		paneId,
-		"--source",
-		"recent-unwrapped",
-		"--lines",
-		String(NOTIFICATION_TAIL_LINES),
-	]).pipe(
-		Effect.map((outcome) => truncateForModel(outcome.stdout, NOTIFICATION_TAIL_LINES).text),
+	readPane(paneId, "recent-unwrapped", NOTIFICATION_TAIL_LINES).pipe(
+		Effect.map((outcome) => truncateForModel(outcome.text, NOTIFICATION_TAIL_LINES).text),
 		Effect.catch(() => Effect.succeed("[pane tail unavailable]")),
 	);
 
@@ -384,7 +591,7 @@ const sendNotification = (
 						observed,
 					},
 				},
-				{ deliverAs: "followUp", triggerTurn: true },
+				{ deliverAs: "steer", triggerTurn: true },
 			);
 		},
 		catch: () => undefined,
@@ -418,7 +625,7 @@ const sendGroupedNotification = (
 						pending: pendingCount,
 					},
 				},
-				{ deliverAs: "followUp", triggerTurn: true },
+				{ deliverAs: "steer", triggerTurn: true },
 			);
 		},
 		catch: () => undefined,
@@ -456,6 +663,7 @@ export const createSubagentNotificationManager = (
 	const deliveredCompletionIds = new Set<string>();
 	const deliveredArmIds = new Set<string>();
 	const pendingExternal = new Map<string, ExternalNotificationResult[]>();
+	const readyReports = new Map<string, NotificationDelivery>();
 	let nextBatchId = 1;
 	let currentArmBatch: PendingArmBatch | undefined;
 
@@ -652,6 +860,11 @@ export const createSubagentNotificationManager = (
 	};
 
 	const processCompletion = (delivery: NotificationDelivery): void => {
+		readyReports.set(panelKey(delivery.name, delivery.paneId), delivery);
+		if (readyReports.size > MAX_TRACKED_DELIVERED_ARMS) {
+			const oldest = readyReports.keys().next();
+			if (!oldest.done) readyReports.delete(oldest.value);
+		}
 		finalizeCurrentArmBatchFor(delivery.key);
 		watchers.delete(delivery.key);
 		const groupId = keyToGroup.get(delivery.key);
@@ -715,13 +928,16 @@ export const createSubagentNotificationManager = (
 			rememberDeliveredArm(result.armId);
 		}
 		slot.controller.abort();
+		const report = truncateForModel(result.finalMessage);
 		processCompletion(
 			externalDeliveryFor(key, {
+				completionId: identity,
 				name: slot.name,
 				paneId: slot.paneId,
 				summarySource: slot.summarySource,
 				state: result.status,
-				finalMessage: truncateForModel(result.finalMessage).text,
+				finalMessage: report.text,
+				reportKind: report.truncated ? "sample" : "final",
 			}),
 		);
 		return true;
@@ -744,7 +960,12 @@ export const createSubagentNotificationManager = (
 					for (const armId of slot.acceptedArmIds) {
 						rememberDeliveredArm(armId);
 					}
-					processCompletion(watchedDeliveryFor(slot.key, completion.notification));
+					processCompletion(
+						watchedDeliveryFor(slot.key, {
+							...completion.notification,
+							completionId: `poll:${notification.expectedArmId ?? slot.armedAtMs}:${slot.paneId}:${slot.name}`,
+						}),
+					);
 				}
 			})
 			.catch(() => {
@@ -835,6 +1056,27 @@ export const createSubagentNotificationManager = (
 		deliverExternal(name, result) {
 			processExternalResult(name, result);
 		},
+		beginInspection() {
+			// Capture the latest known completion per pane before asynchronous I/O.
+			// Identical text in an older or later task is not a read receipt for it.
+			const available = [...readyReports.values()];
+			return (name, paneId, text) => {
+				const inspection = normalizeReportText(text);
+				const consumed: string[] = [];
+				for (const report of available) {
+					if (report.name !== name || report.paneId !== paneId || report.reportKind !== "final")
+						continue;
+					const expected = normalizeReportText(report.reportText);
+					if (!expected || !inspection.includes(expected)) continue;
+					consumed.push(report.completionId);
+					const groupId = keyToGroup.get(report.key);
+					const group = groupId ? groups.get(groupId) : undefined;
+					if (group?.completed.get(report.key)?.completionId === report.completionId)
+						removeKeyFromGroup(report.key);
+				}
+				return consumed;
+			};
+		},
 		cancel(target) {
 			if (!target) {
 				return;
@@ -876,6 +1118,7 @@ export const createSubagentNotificationManager = (
 			deliveredCompletionIds.clear();
 			deliveredArmIds.clear();
 			pendingExternal.clear();
+			readyReports.clear();
 		},
 	};
 

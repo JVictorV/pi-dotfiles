@@ -2,7 +2,7 @@
 name: researcher
 description: Web research specialist for library docs, API changes, error messages, dependency comparisons, and current external information. Returns compressed, cited findings and writes requested research reports.
 tools: read, grep, find, ls, websearch, webfetch, write
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-astra
 thinking: medium
 ---
 

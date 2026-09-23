@@ -1,21 +1,18 @@
 # agent/extensions — pi TypeScript extensions
 
-**Generated:** 2026-06-17T13:51:57Z
-**Commit:** d8cb9ec
-
-Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`. Loaded on session start and `/reload`. No build step — pi runs them directly.
+Pi discovers `*.ts` files and `*/index.ts` directory entrypoints. Each exports an extension factory. Source changes load on session start or `/reload`; after a dependency upgrade, restart Pi to avoid retaining old dependency modules.
 
 ## WHERE TO LOOK
 
-| Task                        | File                                                                      |
-| --------------------------- | ------------------------------------------------------------------------- |
-| Block/rewrite bash commands | `git-interceptor.ts` (`tool_call` + `isToolCallEventType("bash", event)`) |
-| Custom tool registration    | `lsp/`                                                                    |
-| OpenAI context compaction   | `openai-server-compaction/` (vendored Responses compaction extension)     |
-| Tool result safety          | `tool-result-sanitizer.ts` (guards provider-legal errored tool results)   |
-| Status bar / footer widget  | `statusline.ts` (`belowEditor` widget, registered at `session_start`)     |
-| Turn-end side effects       | `notify.ts` (OSC 777 desktop notification)                                |
-| Per-turn "working" message  | `whimsical.ts`                                                            |
+| Task                        | File                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| Block/rewrite bash commands | `git-interceptor.ts` (`tool_call` + `isToolCallEventType("bash", event)`)                     |
+| Custom tool registration    | `lsp/`                                                                                        |
+| Context resets and history  | `smart-context/` ([behavior and recovery](smart-context/README.md))                           |
+| Tool result safety          | `tool-result-sanitizer.ts` (guards provider-legal errored tool results)                       |
+| Status line                 | `statusline/` ([ADR](../../docs/adr/0001-modular-effect-first-status-line.md))                |
+| Desktop notifications       | `notify.ts` ([setup and platform limits](../../README.md#desktop-notifications--sound-macos)) |
+| Per-turn "working" message  | `whimsical.ts`                                                                                |
 
 ## CONVENTIONS
 
@@ -24,7 +21,7 @@ Auto-discovered `*.ts` files, each `export default function (pi: ExtensionAPI)`.
 - Hook into events via `pi.on("tool_call" | "session_start" | ...)`; return `{ block: true, reason }` to reject a tool call, or mutate `event.input` to rewrite it.
 - Use `isToolCallEventType("bash", event)` to narrow before touching `event.input.command`.
 - `lsp/` needs `vscode-jsonrpc` and `vscode-languageserver-types`. Runtime deps live in root `package.json`.
-- Use `effect@beta` for new non-trivial extension logic. Keep any added `@effect/*` packages version-aligned.
+- Use the root-pinned Effect version for non-trivial extension logic. Keep `@effect/*` packages version-aligned.
 
 ## EFFECT
 
@@ -42,6 +39,5 @@ Preferred patterns:
 - **Spawning interactive subprocesses** — they hang the agent. `git-interceptor` already forces `GIT_EDITOR=true`; don't undo it.
 - **Allowing `--no-verify`** — `git-interceptor` blocks it deliberately; never add an escape hatch.
 - **Widget placement matters** — `statusline` registers as a `belowEditor` widget at `session_start`. Don't move it unless you want it in another UI region.
-- **OSC notifications** — `notify.ts` uses OSC 777; unsupported on Kitty/Terminal.app/Alacritty. Don't assume delivery.
-- **Reformatting vendored compaction code** — `openai-server-compaction/` stays faithful to its reference submodule for easy re-sync and is excluded from root lint/format gates.
+- **Assuming desktop notification delivery** — `notify.ts` depends on host-specific tools. Check the implementation and root README before changing notification setup.
 - **`any`, unsafe `as` casts, or thrown exceptions in new Effect code** — use typed errors and `Effect.fail`; model failures in the error channel instead.

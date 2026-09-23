@@ -33,18 +33,15 @@ export interface WorktreeCleanupResult {
 }
 
 /** A git subprocess failed while managing an isolated worktree. */
-export class GitCommandFailed extends Schema.TaggedErrorClass<GitCommandFailed>()(
-	"GitCommandFailed",
-	{
-		message: Schema.String,
-		cwd: Schema.String,
-		args: Schema.Array(Schema.String),
-		cause: Schema.Defect(),
-	},
-) {}
+export class GitCommandFailed extends Schema.TaggedError<GitCommandFailed>()("GitCommandFailed", {
+	message: Schema.String,
+	cwd: Schema.String,
+	args: Schema.Array(Schema.String),
+	cause: Schema.Defect(),
+}) {}
 
 /** A git worktree isolation operation failed before a subagent could be safely spawned. */
-export class WorktreeIsolationFailed extends Schema.TaggedErrorClass<WorktreeIsolationFailed>()(
+export class WorktreeIsolationFailed extends Schema.TaggedError<WorktreeIsolationFailed>()(
 	"WorktreeIsolationFailed",
 	{
 		message: Schema.String,

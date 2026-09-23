@@ -116,7 +116,7 @@ Mutating operations fail in non-interactive contexts unless `autoAuthorize` is e
 
 ### Status line
 
-The extension emits `lsp:status` events consumed by `statusline.ts`. The bar shows compact LSP state as:
+The extension emits `lsp:status` events consumed by [`statusline/`](../statusline/). The status line shows compact LSP state as:
 
 ```txt
 LSP (Not running)
@@ -194,6 +194,19 @@ npm install -D @tailwindcss/language-server dockerfile-language-server-nodejs
 go install golang.org/x/tools/gopls@latest
 # install rust-analyzer via rustup or your package manager
 ```
+
+### TypeScript compiler and language server
+
+TypeScript 7 does not include `lib/tsserver.js`. `typescript-language-server` still requires that JavaScript server.
+This config installs TypeScript 6 as the runtime dependency `typescript-tsserver` (an npm alias).
+The extension supplies the alias through `tsserver.fallbackPath`, not `tsserver.path`.
+`typescript-language-server` first uses its own workspace, ancestor, and Yarn SDK discovery.
+If that finds no compatible server, it uses the alias from the project or pi config root.
+This preserves workspace selection when the pi session starts in a repository subdirectory.
+
+The `typecheck` scripts call `node node_modules/typescript/bin/tsc` explicitly to keep the TypeScript 7 compiler.
+Do not use the shared `node_modules/.bin/tsc` to select a version: both packages declare that binary name.
+Run `npm ci` after updating this config to install the server dependency.
 
 ## Binary resolution
 

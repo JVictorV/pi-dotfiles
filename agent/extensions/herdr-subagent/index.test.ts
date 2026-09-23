@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 import {
 	access,
+	chmod,
 	mkdir,
 	mkdtemp,
 	readFile,
@@ -10,19 +12,21 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import * as path from "node:path";
+import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
+	type WireRequest,
 	cleanupHarness,
 	installFakeHerdr,
-	lastRunCommandFromCalls,
+	lastRunCommand,
 	loadTool,
 	loadToolWithFakePi,
 	makeContext,
 	makeTempRoot,
-	readHerdrCalls,
-	runCommandFromCalls,
+	readHerdrRequests,
+	firstRunCommand,
 	runHerdrSubagentEffect,
 	setEnv,
 	setSubagentSession,
@@ -61,11 +65,6 @@ const firstMessageOptions = (options: unknown): Record<string, unknown> => {
 	return Object.fromEntries(Object.entries(options));
 };
 
-const tabCreateCalls = (
-	calls: ReadonlyArray<ReadonlyArray<string>>,
-): ReadonlyArray<ReadonlyArray<string>> =>
-	calls.filter((args) => args[0] === "tab" && args[1] === "create");
-
 const TEST_FRESH_SENT_AT_MS = 4_000_000_000_000;
 
 const modeBits = (mode: number): number => mode & 0o777;
@@ -85,8 +84,16 @@ const makeModelRegistry = (
 	return available ? { ...base, getAvailable: () => available } : base;
 };
 
-const resultSocketArg = (args: ReadonlyArray<string> | undefined): string | undefined =>
-	args?.find((arg) => arg.startsWith("HERDR_SUBAGENT_RESULT_SOCK="));
+const resultSocketArg = (command: string | undefined): string | undefined => {
+	const socketPath = command?.match(/HERDR_SUBAGENT_RESULT_SOCK='([^']+)'/u)?.[1];
+	return socketPath ? `HERDR_SUBAGENT_RESULT_SOCK=${socketPath}` : undefined;
+};
+
+const launchCommands = (calls: ReadonlyArray<WireRequest>): ReadonlyArray<string> =>
+	calls
+		.filter((request) => request.method === "pane.send_input")
+		.map((request) => request.params.text)
+		.filter((command): command is string => command !== undefined);
 
 const neverResolvingRunPromise = <A>(): Promise<A> => new Promise<A>(() => {});
 
@@ -101,6 +108,38 @@ describe("herdr_subagent extension", () => {
 		await expect(
 			tool.execute("tool-call", { action: "status" }, undefined, undefined, makeContext(root)),
 		).rejects.toThrow(/HERDR_ENV is not 1/);
+	});
+
+	test("surfaces protocol mismatch through foreground tool actions", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_PROTOCOL", "20");
+		const tool = await loadTool(path.join(root, "agent"));
+		const actions = [
+			{ action: "status" },
+			{ action: "inspect", target: "wTest:p1" },
+			{ action: "send", target: "worker-a", message: "Continue." },
+			{ action: "wait", target: "worker-a", timeoutMs: 100 },
+		] as const;
+
+		for (const params of actions) {
+			await expect(
+				tool.execute("tool-call", params, undefined, undefined, makeContext(root)),
+			).rejects.toThrow(/HerdrUnsupportedProtocol|protocol is unsupported/i);
+		}
+	});
+
+	test("surfaces malformed SDK responses through the tool boundary", async () => {
+		const root = await makeTempRoot();
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_MALFORMED_RESPONSE", "1");
+		const tool = await loadTool(path.join(root, "agent"));
+
+		await expect(
+			tool.execute("tool-call", { action: "status" }, undefined, undefined, makeContext(root)),
+		).rejects.toThrow(/HerdrInvalidResponse|invalid response|malformed/i);
 	});
 
 	test("model guidance excludes Luna and gates Terra by thinking level", async () => {
@@ -132,7 +171,7 @@ describe("herdr_subagent extension", () => {
 				tool.execute("tool-call", params, undefined, undefined, makeContext("/workspace")),
 			).rejects.toThrow(/STATUS: done or STATUS: blocked.*allowSpawn/);
 		}
-		expect(await readHerdrCalls(log)).toEqual([]);
+		expect(readHerdrRequests(log)).toEqual([]);
 	});
 
 	test("allows read-only actions from subagent sessions", async () => {
@@ -151,6 +190,7 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
+		setEnv("FAKE_HERDR_AGENTS", "none");
 		const status = await tool.execute(
 			"tool-call-status",
 			{ action: "status" },
@@ -158,6 +198,7 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
+		setEnv("FAKE_HERDR_AGENTS", undefined);
 		const inspected = await tool.execute(
 			"tool-call-inspect",
 			{ action: "inspect", target: "wTest:p1" },
@@ -197,6 +238,38 @@ describe("herdr_subagent extension", () => {
 		);
 
 		expect(result.content[0]?.text).toContain("Spawned child-a");
+	});
+
+	test("spawn sends protocol 21 requests with SDK wire parameters", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "Wire task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+
+		const requests = readHerdrRequests(log);
+		expect(requests[0]?.method).toBe("ping");
+		expect(requests.find((request) => request.method === "pane.current")?.params).toEqual({
+			caller_pane_id: "wTest:p0",
+		});
+		expect(requests.find((request) => request.method === "tab.create")?.params).toMatchObject({
+			workspace_id: "wTest",
+			cwd: "/workspace",
+			label: "agent: worker-a",
+			focus: false,
+		});
+		const input = requests.find((request) => request.method === "pane.send_input");
+		expect(input?.params).toMatchObject({ pane_id: "wTest:p1", keys: ["Enter"] });
+		expect(input?.params.text).toContain("pi");
 	});
 
 	test("spawn records the current pane as the registry owner", async () => {
@@ -251,10 +324,60 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
-		const creates = tabCreateCalls(await readHerdrCalls(log));
-		expect(creates).toHaveLength(2);
-		expect(creates[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=0");
-		expect(creates[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=1");
+		const commands = launchCommands(readHerdrRequests(log));
+		expect(commands).toHaveLength(2);
+		expect(commands[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN='0'");
+		expect(commands[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN='1'");
+	});
+
+	test("launch shell preserves child environment names and values", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call",
+			{
+				action: "spawn",
+				name: "worker-a",
+				agentType: "worker",
+				task: "Record the launch environment.",
+				allowSpawn: true,
+			},
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		const command = firstRunCommand(readHerdrRequests(log));
+		expect(command).toBeDefined();
+		if (!command) return;
+
+		const bin = path.join(root, "launch-bin");
+		const record = path.join(root, "launch-env.txt");
+		const fakePi = path.join(bin, "pi");
+		await mkdir(bin, { recursive: true });
+		await writeFile(
+			fakePi,
+			'#!/bin/sh\nprintf "%s\\n%s\\n%s\\n" "$HERDR_SUBAGENT_NAME" "$HERDR_SUBAGENT_ALLOW_SPAWN" "$HERDR_SUBAGENT_RESULT_SOCK" > "$RECORD"\n',
+			"utf8",
+		);
+		await chmod(fakePi, 0o755);
+		execFileSync("sh", ["-c", command], {
+			cwd: root,
+			env: {
+				...process.env,
+				PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+				RECORD: record,
+			},
+		});
+
+		const [name, allowSpawn, resultSocket] = (await readFile(record, "utf8")).trim().split("\n");
+		expect(name).toBe("worker-a");
+		expect(allowSpawn).toBe("1");
+		expect(resultSocket).toMatch(/\.sock$/u);
 	});
 
 	test("agent frontmatter allowSpawn grants child recursion unless a param overrides it", async () => {
@@ -292,10 +415,199 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
-		const creates = tabCreateCalls(await readHerdrCalls(log));
-		expect(creates).toHaveLength(2);
-		expect(creates[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=1");
-		expect(creates[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN=0");
+		const commands = launchCommands(readHerdrRequests(log));
+		expect(commands).toHaveLength(2);
+		expect(commands[0]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN='1'");
+		expect(commands[1]).toContain("HERDR_SUBAGENT_ALLOW_SPAWN='0'");
+	});
+
+	test("registry names resolve stable terminals before controlling moved panes", async () => {
+		const root = await makeTempRoot();
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		setEnv("FAKE_HERDR_AGENT_LIST_PANE_ID", "wMoved:p9");
+		const tool = await loadTool(path.join(root, "agent"));
+		const ctx = makeContext(root);
+		await tool.execute(
+			"spawn",
+			{
+				action: "spawn",
+				name: "moved-worker",
+				task: "Inspect the code.",
+				notify: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		const inspected = await tool.execute(
+			"inspect",
+			{
+				action: "inspect",
+				target: "moved-worker",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(inspected.content[0]?.text).toContain("All good.");
+		await tool.execute(
+			"send",
+			{
+				action: "send",
+				target: "moved-worker",
+				message: "Continue.",
+				notify: false,
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		await tool.execute(
+			"focus",
+			{
+				action: "focus",
+				target: "moved-worker",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		const requests = readHerdrRequests(log);
+		expect(requests.find((request) => request.method === "pane.read")?.params.pane_id).toBe(
+			"wMoved:p9",
+		);
+		expect(
+			requests.find(
+				(request) => request.method === "pane.send_input" && request.params.text === "Continue.",
+			)?.params.pane_id,
+		).toBe("wMoved:p9");
+		expect(requests.find((request) => request.method === "agent.focus")?.params.target).toBe(
+			"wMoved:p9",
+		);
+	});
+
+	test("missing agents do not resolve registry names or unknown terminal ids", async () => {
+		const root = await makeTempRoot();
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(path.join(root, "agent"));
+		const ctx = makeContext(root);
+		await tool.execute(
+			"spawn",
+			{ action: "spawn", name: "gone-worker", task: "Inspect.", notify: false },
+			undefined,
+			undefined,
+			ctx,
+		);
+		await expect(
+			tool.execute(
+				"send",
+				{ action: "send", target: "term-unknown", message: "Do not send." },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/Could not resolve subagent or pane target/);
+		setEnv("FAKE_HERDR_AGENTS", "none");
+		const status = await tool.execute("status", { action: "status" }, undefined, undefined, ctx);
+		expect(status.content[0]?.text).toContain("missing");
+		for (const target of ["gone-worker", "term-subagent"]) {
+			await expect(
+				tool.execute(
+					"send",
+					{ action: "send", target, message: "Do not send." },
+					undefined,
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow(/Could not resolve subagent or pane target/);
+		}
+		expect(
+			readHerdrRequests(log).some(
+				(request) => request.method === "pane.send_input" && request.params.text === "Do not send.",
+			),
+		).toBe(false);
+	});
+
+	test("a canceled project spawn releases its notification batch reservation", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(path.join(root, ".pi"), "project-worker", "openai-codex/gpt-6-astra");
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const loaded = await loadToolWithFakePi(agentDir);
+		const canceled = await loaded.tool.execute(
+			"cancel",
+			{
+				action: "spawn",
+				name: "canceled-worker",
+				agentType: "project-worker",
+				agentScope: "project",
+				task: "Inspect.",
+			},
+			undefined,
+			undefined,
+			{
+				...makeContext(root),
+				hasUI: true,
+				ui: { confirm: async () => false },
+			},
+		);
+		expect(canceled.content[0]?.text).toContain("Canceled:");
+		expect(canceled.details).toEqual({
+			action: "spawn",
+			projectAgentsDir: path.join(root, ".pi", "agents"),
+		});
+		expect(readHerdrRequests(log)).toEqual([]);
+		await loaded.tool.execute(
+			"spawn",
+			{ action: "spawn", name: "approved-worker", task: "Inspect." },
+			undefined,
+			undefined,
+			makeContext(root),
+		);
+		const socketPath =
+			resultSocketArg(firstRunCommand(readHerdrRequests(log)))?.replace(
+				"HERDR_SUBAGENT_RESULT_SOCK=",
+				"",
+			) ?? "";
+		const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("approved-worker"));
+		await runHerdrSubagentEffect(
+			notifySubagentFinished({
+				socketPath,
+				name: "approved-worker",
+				status: "done",
+				finalMessage: "Finished the approved work.",
+				sentAtMs: TEST_FRESH_SENT_AT_MS,
+				armId,
+			}),
+		);
+		await vi.waitFor(() => expect(loaded.sentMessages).toHaveLength(1), { timeout: 3_000 });
+		expect(firstMessageContent(loaded.sentMessages[0]?.message)).toContain(
+			"Finished the approved work.",
+		);
+	});
+
+	test("plain spawns use GPT-6 Astra instead of inheriting pi's default model", async () => {
+		const root = await makeTempRoot();
+		const { log } = await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(path.join(root, "agent"));
+
+		await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "plain-worker", task: "Inspect the code.", notify: false },
+			undefined,
+			undefined,
+			makeContext(root),
+		);
+
+		expect(firstRunCommand(readHerdrRequests(log))).toContain(
+			"'--model' 'openai-codex/gpt-6-astra'",
+		);
 	});
 
 	test("spawns a role with the role's default model", async () => {
@@ -320,7 +632,7 @@ describe("herdr_subagent extension", () => {
 		);
 
 		expect(result.content[0]?.text).toContain("Spawned worker-a");
-		const command = runCommandFromCalls(await readHerdrCalls(log));
+		const command = firstRunCommand(readHerdrRequests(log));
 		expect(command).toContain("--model");
 		expect(command).toContain("openai-codex/gpt-5.6-sol");
 	});
@@ -355,8 +667,8 @@ describe("herdr_subagent extension", () => {
 		});
 		expect(loaded.sentMessages).toHaveLength(0);
 
-		const create = tabCreateCalls(await readHerdrCalls(log))[0];
-		const socketArg = resultSocketArg(create);
+		const launchCommand = firstRunCommand(readHerdrRequests(log));
+		const socketArg = resultSocketArg(launchCommand);
 		expect(socketArg).toBeDefined();
 		const socketPath = socketArg?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
 		const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
@@ -381,17 +693,15 @@ describe("herdr_subagent extension", () => {
 		const delivered = loaded.sentMessages[0];
 		const content = firstMessageContent(delivered?.message);
 		expect(firstMessageOptions(delivered?.options)).toEqual({
-			deliverAs: "followUp",
+			deliverAs: "steer",
 			triggerTurn: true,
 		});
 		expect(content).toContain('<subagent_result name="worker-a" state="done" pane="wTest:p1">');
 		expect(content).toContain("Subagent worker-a finished");
 		expect(content).toContain("Implement the focused change");
 		expect(content).toContain("the final settled result");
-		expect(content).toContain(
-			'<required_action tool="herdr_subagent" action="inspect" target="worker-a" pane="wTest:p1">',
-		);
-		expect(content).toContain("Do not stop after only acknowledging this notification.");
+		expect(content).not.toContain('<required_action tool="herdr_subagent" action="inspect"');
+		expect(content).toContain("<final_message>");
 	}, 8_000);
 
 	test("blocked watcher notifications distinguish attention-needed state", async () => {
@@ -511,8 +821,9 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
-		const create = tabCreateCalls(await readHerdrCalls(log))[0];
-		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		const launchCommand = firstRunCommand(readHerdrRequests(log));
+		const socketPath =
+			resultSocketArg(launchCommand)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
 		const armId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
 		await runHerdrSubagentEffect(
 			notifySubagentFinished({
@@ -590,7 +901,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		try {
 			const directNotification = {
@@ -663,7 +974,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		try {
 			const directNotification = {
@@ -850,7 +1161,7 @@ describe("herdr_subagent extension", () => {
 		}
 	});
 
-	test("a watcher accepts the arm from a send whose CLI response failed", () => {
+	test("a watcher accepts the arm from a send whose SDK response failed", () => {
 		const sentMessages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
 		const manager = createSubagentNotificationManager(
 			{
@@ -1039,7 +1350,7 @@ describe("herdr_subagent extension", () => {
 			expect(content).toContain("result A");
 			expect(content).toContain("result B");
 			expect(firstMessageOptions(sentMessages[0]?.options)).toEqual({
-				deliverAs: "followUp",
+				deliverAs: "steer",
 				triggerTurn: true,
 			});
 		} finally {
@@ -1236,7 +1547,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		try {
 			manager.arm({ name: "worker-a", paneId: "wTest:p1", summarySource: "old task" });
@@ -1305,6 +1616,23 @@ describe("herdr_subagent extension", () => {
 			});
 			expect(received).toHaveLength(0);
 
+			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-reset"));
+			await loaded.dispatchAsync("agent_start");
+			loaded.dispatch("agent_end", {
+				messages: [
+					{
+						role: "assistant",
+						stopReason: "toolUse",
+						content: [
+							{ type: "text", text: "I will reset context and continue the task." },
+							{ type: "toolCall", id: "reset-context", name: "new_context", arguments: {} },
+						],
+					},
+				],
+			});
+			await loaded.dispatchAsync("agent_settled");
+			expect(received).toHaveLength(0);
+
 			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-done"));
 			await loaded.dispatchAsync("agent_start");
 			await runHerdrSubagentEffect(writeSubagentCompletionArm("worker-a", "arm-steered"));
@@ -1362,7 +1690,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		const server = await runHerdrSubagentEffect(
 			startSubagentRpcServer({
@@ -1424,7 +1752,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		const server = await runHerdrSubagentEffect(
 			startSubagentRpcServer({
@@ -1469,7 +1797,7 @@ describe("herdr_subagent extension", () => {
 					sentMessages.push({ message, options });
 				},
 			},
-			(effect) => runHerdrSubagentEffect(effect),
+			runHerdrSubagentEffect,
 		);
 		try {
 			manager.arm({
@@ -1674,7 +2002,7 @@ describe("herdr_subagent extension", () => {
 	});
 
 	test("spawn passes a durable fallback path before the live RPC server is available", async () => {
-		const root = await mkdtemp(path.join("/tmp", "pi-hsa-"));
+		const root = await mkdtemp(path.join(tmpdir(), "pi-hsa-"));
 		try {
 			const agentDir = path.join(root, "agent");
 			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
@@ -1717,11 +2045,11 @@ describe("herdr_subagent extension", () => {
 				makeContext("/workspace"),
 			);
 
-			const creates = tabCreateCalls(await readHerdrCalls(log));
-			expect(creates).toHaveLength(2);
-			const fallbackSocketArg = resultSocketArg(creates[0]);
+			const commands = launchCommands(readHerdrRequests(log));
+			expect(commands).toHaveLength(2);
+			const fallbackSocketArg = resultSocketArg(commands[0]);
 			expect(fallbackSocketArg).toBeDefined();
-			const socketArg = resultSocketArg(creates[1]);
+			const socketArg = resultSocketArg(commands[1]);
 			expect(socketArg).toBeDefined();
 			expect(socketArg).not.toBe(fallbackSocketArg);
 			const socketPath = socketArg?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
@@ -1789,7 +2117,7 @@ describe("herdr_subagent extension", () => {
 	// Unix sockets cannot exceed the ~107-char path limit, so these tests use short /tmp roots
 	// instead of makeTempRoot (whose $TMPDIR base makes rpc socket paths too long to bind).
 	test("a reopened orchestrator adopts orphaned subagents and resumed children redeliver results", async () => {
-		const root = await mkdtemp(path.join("/tmp", "pi-hsa-resume-"));
+		const root = await mkdtemp(path.join(tmpdir(), "pi-hsa-r-"));
 		try {
 			const agentDir = path.join(root, "agent");
 			await installFakeHerdr(root);
@@ -1829,9 +2157,10 @@ describe("herdr_subagent extension", () => {
 			const sendText = sendResult.content.map((part) => part.text).join("");
 			expect(sendText).not.toContain("Automatic settled-result delivery is unavailable");
 
-			// Subagent resumed with pi --session in its pane: no identity or socket env vars.
+			// Herdr still identifies the pane when the subagent resumes with pi --session.
 			setEnv("FAKE_HERDR_PANE_CURRENT_PANE_ID", "wTest:p1");
 			setEnv("FAKE_HERDR_PANE_CURRENT_TERMINAL_ID", "term-subagent");
+			setEnv("HERDR_PANE_ID", "wTest:p1");
 			const child = await loadToolWithFakePi(agentDir);
 			await child.dispatchAsync("agent_start");
 			child.dispatch("agent_end", {
@@ -1839,6 +2168,7 @@ describe("herdr_subagent extension", () => {
 					{
 						role: "assistant",
 						content: [{ type: "text", text: "STATUS: done\nresumed final report" }],
+						stopReason: "stop",
 					},
 				],
 			});
@@ -1858,7 +2188,7 @@ describe("herdr_subagent extension", () => {
 	}, 15_000);
 
 	test("orchestrator shutdown removes the published result socket", async () => {
-		const root = await mkdtemp(path.join("/tmp", "pi-hsa-pub-"));
+		const root = await mkdtemp(path.join(tmpdir(), "pi-hsa-pub-"));
 		try {
 			const agentDir = path.join(root, "agent");
 			await installFakeHerdr(root);
@@ -1896,7 +2226,7 @@ describe("herdr_subagent extension", () => {
 	}, 10_000);
 
 	test("concurrent sends preserve the completion arm for the last follow-up", async () => {
-		const root = await mkdtemp(path.join("/tmp", "pi-hsa-send-"));
+		const root = await mkdtemp(path.join(tmpdir(), "pi-hsa-send-"));
 		try {
 			const agentDir = path.join(root, "agent");
 			await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
@@ -1946,8 +2276,13 @@ describe("herdr_subagent extension", () => {
 			);
 			await vi.waitFor(
 				async () => {
-					const calls = await readHerdrCalls(log);
-					expect(calls.some((args) => args[0] === "pane" && args[3] === "message A")).toBe(true);
+					const calls = readHerdrRequests(log);
+					expect(
+						calls.some(
+							(request) =>
+								request.method === "pane.send_input" && request.params.text === "message A",
+						),
+					).toBe(true);
 				},
 				{ timeout: 1_000, interval: 10 },
 			);
@@ -2004,8 +2339,9 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 		const originalArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
-		const create = tabCreateCalls(await readHerdrCalls(log))[0];
-		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		const launchCommand = firstRunCommand(readHerdrRequests(log));
+		const socketPath =
+			resultSocketArg(launchCommand)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
 
 		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MESSAGE", "fast follow-up");
 		setEnv("FAKE_HERDR_PANE_RUN_DELAY_MS", "3000");
@@ -2079,8 +2415,9 @@ describe("herdr_subagent extension", () => {
 		);
 		const previousArmId = await runHerdrSubagentEffect(readSubagentCompletionArm("worker-a"));
 		expect(previousArmId).toMatch(/^[0-9a-f-]{36}$/u);
-		const create = tabCreateCalls(await readHerdrCalls(log))[0];
-		const socketPath = resultSocketArg(create)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
+		const launchCommand = firstRunCommand(readHerdrRequests(log));
+		const socketPath =
+			resultSocketArg(launchCommand)?.replace("HERDR_SUBAGENT_RESULT_SOCK=", "") ?? "";
 		await runHerdrSubagentEffect(
 			notifySubagentFinished({
 				socketPath,
@@ -2192,7 +2529,7 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
-		const command = lastRunCommandFromCalls(await readHerdrCalls(log));
+		const command = lastRunCommand(readHerdrRequests(log));
 		expect(command).toContain("--model");
 		expect(command).toContain("anthropic/claude-opus-4-8");
 	});
@@ -2221,7 +2558,7 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace", registry),
 		);
-		const command = lastRunCommandFromCalls(await readHerdrCalls(log));
+		const command = lastRunCommand(readHerdrRequests(log));
 		expect(command).toContain("--model");
 		expect(command).toContain("anthropic/claude-opus-4-8");
 	});
@@ -2254,7 +2591,7 @@ describe("herdr_subagent extension", () => {
 		).rejects.toThrow(
 			/Model not found: "anthropic\/missing-model"[\s\S]*anthropic\/claude-opus-4-8/,
 		);
-		expect(await readHerdrCalls(log)).toEqual([]);
+		expect(readHerdrRequests(log)).toEqual([]);
 	});
 
 	test("agent discovery skips unreadable md-shaped directory entries", async () => {
@@ -2421,7 +2758,7 @@ describe("herdr_subagent extension", () => {
 			).rejects.toThrow(/Terra requires high or xhigh thinking/);
 		}
 
-		expect(await readHerdrCalls(log)).toEqual([]);
+		expect(readHerdrRequests(log)).toEqual([]);
 	});
 
 	test("allows Terra with high or xhigh thinking", async () => {
@@ -2453,9 +2790,9 @@ describe("herdr_subagent extension", () => {
 			makeContext("/workspace"),
 		);
 
-		const commands = (await readHerdrCalls(log))
-			.filter((args) => args[0] === "pane" && args[1] === "run")
-			.map((args) => args[3] ?? "");
+		const commands = readHerdrRequests(log)
+			.filter((request) => request.method === "pane.send_input")
+			.map((request) => request.params.text ?? "");
 		expect(commands).toHaveLength(2);
 		expect(commands[0]).toContain("'high'");
 		expect(commands[1]).toContain("'xhigh'");
@@ -2476,7 +2813,7 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
-		const defaultCommand = lastRunCommandFromCalls(await readHerdrCalls(log));
+		const defaultCommand = lastRunCommand(readHerdrRequests(log));
 		expect(defaultCommand).toContain("--thinking");
 		expect(defaultCommand).toContain("'high'");
 
@@ -2493,12 +2830,12 @@ describe("herdr_subagent extension", () => {
 			undefined,
 			makeContext("/workspace"),
 		);
-		const overriddenCommand = lastRunCommandFromCalls(await readHerdrCalls(log));
+		const overriddenCommand = lastRunCommand(readHerdrRequests(log));
 		expect(overriddenCommand).toContain("'medium'");
 		expect(overriddenCommand).not.toContain("'high'");
 	});
 
-	test("a herdr call that ignores SIGTERM is SIGKILLed and reported as a timeout", async () => {
+	test("a silent Herdr socket request is reported as a timeout", async () => {
 		const root = await makeTempRoot();
 		const agentDir = path.join(root, "agent");
 		await installFakeHerdr(root);
@@ -2506,7 +2843,7 @@ describe("herdr_subagent extension", () => {
 		setEnv("FAKE_HERDR_WAIT_HANG", "1");
 		const tool = await loadTool(agentDir);
 
-		// Non-done statuses still go through the native `herdr wait agent-status`.
+		// Non-done statuses use the SDK's server-side agent wait.
 		await expect(
 			tool.execute(
 				"tool-call",
@@ -2603,7 +2940,7 @@ describe("herdr_subagent extension", () => {
 				undefined,
 				makeContext("/workspace"),
 			),
-		).rejects.toThrow(/herdr exited with code 1/);
+		).rejects.toThrow(/fixture_rejected|unknown tab/);
 
 		await expect(
 			tool.execute(
@@ -2614,6 +2951,36 @@ describe("herdr_subagent extension", () => {
 				makeContext("/workspace"),
 			),
 		).rejects.toThrow(/already registered/);
+	});
+
+	test("close preserves registry state when the existence check gets a malformed response", async () => {
+		const root = await makeTempRoot();
+		const agentDir = path.join(root, "agent");
+		await writeAgent(agentDir, "worker", "openai-codex/gpt-5.6-sol");
+		await installFakeHerdr(root);
+		setEnv("HERDR_ENV", "1");
+		const tool = await loadTool(agentDir);
+
+		await tool.execute(
+			"tool-call",
+			{ action: "spawn", name: "worker-a", agentType: "worker", task: "First task." },
+			undefined,
+			undefined,
+			makeContext("/workspace"),
+		);
+		setEnv("FAKE_HERDR_TAB_CLOSE_FAIL", "1");
+		setEnv("FAKE_HERDR_TAB_GET_MALFORMED", "1");
+
+		await expect(
+			tool.execute(
+				"tool-call-close",
+				{ action: "close", target: "worker-a" },
+				undefined,
+				undefined,
+				makeContext("/workspace"),
+			),
+		).rejects.toThrow(/invalid|response|transport/i);
+		await access(path.join(agentDir, "herdr-subagents", "registry", "worker-a.json"));
 	});
 
 	test("wait ignores transient startup idle before working", async () => {
@@ -2668,8 +3035,8 @@ describe("herdr_subagent extension", () => {
 		expect(rejected?.reason).toEqual(
 			expect.objectContaining({ message: expect.stringMatching(/already registered/) }),
 		);
-		const calls = await readHerdrCalls(log);
-		expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(1);
+		const calls = readHerdrRequests(log);
+		expect(calls.filter((request) => request.method === "tab.create")).toHaveLength(1);
 		const registryDir = path.join(agentDir, "herdr-subagents", "registry");
 		const files = await readdir(registryDir);
 		expect(files.filter((name) => name === "worker-a.json")).toHaveLength(1);
@@ -2912,8 +3279,8 @@ describe("herdr_subagent extension", () => {
 		expect(rejected?.reason).toEqual(
 			expect.objectContaining({ message: expect.stringMatching(/already registered/) }),
 		);
-		const calls = await readHerdrCalls(log);
-		expect(calls.filter((args) => args[0] === "tab" && args[1] === "create")).toHaveLength(1);
+		const calls = readHerdrRequests(log);
+		expect(calls.filter((request) => request.method === "tab.create")).toHaveLength(1);
 		expect(await readFile(path.join(registryDir, "worker-a.json"), "utf8")).toContain(
 			'"phase": "active"',
 		);
@@ -2978,7 +3345,7 @@ describe("herdr_subagent extension", () => {
 		).rejects.toThrow(
 			/Invalid subagent name bad\/name: use 1-64 characters of letters, digits, dot, underscore, or hyphen\./,
 		);
-		expect(await readHerdrCalls(log)).toEqual([]);
+		expect(readHerdrRequests(log)).toEqual([]);
 	});
 
 	test("spawn pane run failure closes the created tab and clears the reservation", async () => {
@@ -2998,10 +3365,12 @@ describe("herdr_subagent extension", () => {
 				undefined,
 				makeContext("/workspace"),
 			),
-		).rejects.toThrow(/herdr exited with code 1/);
+		).rejects.toThrow(/pane run failed/);
 
-		const calls = await readHerdrCalls(log);
-		expect(calls).toContainEqual(["tab", "close", "wTest:t2"]);
+		const calls = readHerdrRequests(log);
+		expect(calls).toContainEqual(
+			expect.objectContaining({ method: "tab.close", params: { tab_id: "wTest:t2" } }),
+		);
 		await expect(
 			readFile(path.join(agentDir, "herdr-subagents", "registry", "worker-a.json"), "utf8"),
 		).rejects.toThrow();

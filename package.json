@@ -4,38 +4,37 @@
 	"description": "Shared dependencies for ~/.pi extensions",
 	"type": "module",
 	"scripts": {
-		"typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:web-tools && npm run typecheck:openai-server-compaction",
-		"typecheck:web-tools": "tsc --noEmit -p agent/extensions/web-tools/tsconfig.json",
-		"typecheck:openai-server-compaction": "tsc --noEmit -p agent/extensions/openai-server-compaction/tsconfig.json",
+		"typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json && npm run typecheck:web-tools",
+		"typecheck:web-tools": "node node_modules/typescript/bin/tsc --noEmit -p agent/extensions/web-tools/tsconfig.json",
 		"lint": "oxlint agent/extensions",
 		"lint:fix": "oxlint --fix agent/extensions",
-		"format": "oxfmt . '!.repos/**' '!agent/extensions/web-tools/**' '!agent/extensions/openai-server-compaction/**'",
-		"format:check": "oxfmt --check . '!.repos/**' '!agent/extensions/web-tools/**' '!agent/extensions/openai-server-compaction/**'",
+		"format": "oxfmt . '!.repos/**' '!agent/extensions/web-tools/**'",
+		"format:check": "oxfmt --check . '!.repos/**' '!agent/extensions/web-tools/**'",
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@effect/platform-node": "4.0.0-beta.101",
+		"@effect/platform-node": "4.0.0-beta.105",
+		"@herdr/sdk": "file:vendor/herdr-sdk-0.8.2.tgz",
 		"@vue/language-server": "^3.3.8",
-		"effect": "^4.0.0-beta.101",
+		"effect": "4.0.0-beta.105",
 		"html-to-text": "^10.0.0",
 		"linkedom": "^0.18.13",
 		"turndown": "^7.2.0",
 		"turndown-plugin-gfm": "^1.0.2",
 		"typescript-language-server": "^5.3.0",
+		"typescript-tsserver": "npm:typescript@^6.0.3",
 		"vscode-jsonrpc": "^9.0.1",
 		"vscode-langservers-extracted": "^4.10.0",
-		"vscode-languageserver-types": "^3.18.0",
-		"ws": "^8.21.1"
+		"vscode-languageserver-types": "^3.18.0"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-agent-core": "^0.85.0",
-		"@earendil-works/pi-ai": "^0.85.0",
-		"@earendil-works/pi-coding-agent": "^0.85.0",
-		"@earendil-works/pi-server": "^0.85.0",
-		"@earendil-works/pi-tui": "^0.85.0",
-		"@effect/vitest": "^4.0.0-beta.101",
+		"@earendil-works/pi-agent-core": "^0.87.1",
+		"@earendil-works/pi-ai": "^0.87.1",
+		"@earendil-works/pi-coding-agent": "^0.87.1",
+		"@earendil-works/pi-server": "^0.87.1",
+		"@earendil-works/pi-tui": "^0.87.1",
+		"@effect/vitest": "4.0.0-beta.105",
 		"@types/turndown": "^5.0.5",
-		"@types/ws": "^8.18.1",
 		"effect-rules": "^0.3.6",
 		"oxfmt": "^0.60.0",
 		"oxlint": "^1.75.0",
@@ -43,6 +42,6 @@
 		"vitest": "^4.1.10"
 	},
 	"overrides": {
-		"@effect/platform-node-shared": "4.0.0-beta.101"
+		"@effect/platform-node-shared": "4.0.0-beta.105"
 	}
 }

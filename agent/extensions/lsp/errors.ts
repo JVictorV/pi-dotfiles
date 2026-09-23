@@ -16,11 +16,11 @@ export const lspErrorReason = (error: unknown, fallback: string): string => {
 
 // Every LSP error overrides `message` to return its `reason`. The agent harness
 // builds a failed tool's `tool_result` content from `error.message`, and a
-// `Schema.TaggedErrorClass` defaults to an empty `message`. An empty error
+// `Schema.TaggedError` defaults to an empty `message`. An empty error
 // `tool_result` is rejected by the Anthropic API ("content cannot be empty if
 // is_error is true"), so each error must carry a non-empty, diagnosable message.
 
-export class LspConfigError extends Schema.TaggedErrorClass<LspConfigError>()("LspConfigError", {
+export class LspConfigError extends Schema.TaggedError<LspConfigError>()("LspConfigError", {
 	reason: Schema.String,
 }) {
 	override get message(): string {
@@ -28,7 +28,7 @@ export class LspConfigError extends Schema.TaggedErrorClass<LspConfigError>()("L
 	}
 }
 
-export class LspPermissionFileError extends Schema.TaggedErrorClass<LspPermissionFileError>()(
+export class LspPermissionFileError extends Schema.TaggedError<LspPermissionFileError>()(
 	"LspPermissionFileError",
 	{
 		reason: Schema.String,
@@ -39,7 +39,7 @@ export class LspPermissionFileError extends Schema.TaggedErrorClass<LspPermissio
 	}
 }
 
-export class LspPermissionDenied extends Schema.TaggedErrorClass<LspPermissionDenied>()(
+export class LspPermissionDenied extends Schema.TaggedError<LspPermissionDenied>()(
 	"LspPermissionDenied",
 	{
 		serverId: Schema.String,
@@ -51,19 +51,7 @@ export class LspPermissionDenied extends Schema.TaggedErrorClass<LspPermissionDe
 	}
 }
 
-export class LspBinaryMissing extends Schema.TaggedErrorClass<LspBinaryMissing>()(
-	"LspBinaryMissing",
-	{
-		serverId: Schema.String,
-		reason: Schema.String,
-	},
-) {
-	override get message(): string {
-		return this.reason;
-	}
-}
-
-export class LspSpawnError extends Schema.TaggedErrorClass<LspSpawnError>()("LspSpawnError", {
+export class LspBinaryMissing extends Schema.TaggedError<LspBinaryMissing>()("LspBinaryMissing", {
 	serverId: Schema.String,
 	reason: Schema.String,
 }) {
@@ -72,7 +60,16 @@ export class LspSpawnError extends Schema.TaggedErrorClass<LspSpawnError>()("Lsp
 	}
 }
 
-export class LspInitializeError extends Schema.TaggedErrorClass<LspInitializeError>()(
+export class LspSpawnError extends Schema.TaggedError<LspSpawnError>()("LspSpawnError", {
+	serverId: Schema.String,
+	reason: Schema.String,
+}) {
+	override get message(): string {
+		return this.reason;
+	}
+}
+
+export class LspInitializeError extends Schema.TaggedError<LspInitializeError>()(
 	"LspInitializeError",
 	{
 		serverId: Schema.String,
@@ -84,7 +81,7 @@ export class LspInitializeError extends Schema.TaggedErrorClass<LspInitializeErr
 	}
 }
 
-export class LspRequestTimeout extends Schema.TaggedErrorClass<LspRequestTimeout>()(
+export class LspRequestTimeout extends Schema.TaggedError<LspRequestTimeout>()(
 	"LspRequestTimeout",
 	{
 		serverId: Schema.String,
@@ -97,7 +94,7 @@ export class LspRequestTimeout extends Schema.TaggedErrorClass<LspRequestTimeout
 	}
 }
 
-export class LspRequestError extends Schema.TaggedErrorClass<LspRequestError>()("LspRequestError", {
+export class LspRequestError extends Schema.TaggedError<LspRequestError>()("LspRequestError", {
 	serverId: Schema.String,
 	method: Schema.String,
 	reason: Schema.String,
@@ -107,7 +104,7 @@ export class LspRequestError extends Schema.TaggedErrorClass<LspRequestError>()(
 	}
 }
 
-export class LspClientBroken extends Schema.TaggedErrorClass<LspClientBroken>()("LspClientBroken", {
+export class LspClientBroken extends Schema.TaggedError<LspClientBroken>()("LspClientBroken", {
 	serverId: Schema.String,
 	reason: Schema.String,
 }) {
@@ -116,7 +113,7 @@ export class LspClientBroken extends Schema.TaggedErrorClass<LspClientBroken>()(
 	}
 }
 
-export class LspNoClients extends Schema.TaggedErrorClass<LspNoClients>()("LspNoClients", {
+export class LspNoClients extends Schema.TaggedError<LspNoClients>()("LspNoClients", {
 	reason: Schema.String,
 }) {
 	override get message(): string {
@@ -124,7 +121,7 @@ export class LspNoClients extends Schema.TaggedErrorClass<LspNoClients>()("LspNo
 	}
 }
 
-export class LspToolInputError extends Schema.TaggedErrorClass<LspToolInputError>()(
+export class LspToolInputError extends Schema.TaggedError<LspToolInputError>()(
 	"LspToolInputError",
 	{
 		reason: Schema.String,
@@ -135,7 +132,7 @@ export class LspToolInputError extends Schema.TaggedErrorClass<LspToolInputError
 	}
 }
 
-export class LspUnsupportedOperation extends Schema.TaggedErrorClass<LspUnsupportedOperation>()(
+export class LspUnsupportedOperation extends Schema.TaggedError<LspUnsupportedOperation>()(
 	"LspUnsupportedOperation",
 	{
 		operation: Schema.String,
@@ -147,7 +144,7 @@ export class LspUnsupportedOperation extends Schema.TaggedErrorClass<LspUnsuppor
 	}
 }
 
-export class LspMalformedResponse extends Schema.TaggedErrorClass<LspMalformedResponse>()(
+export class LspMalformedResponse extends Schema.TaggedError<LspMalformedResponse>()(
 	"LspMalformedResponse",
 	{
 		operation: Schema.String,
@@ -159,18 +156,15 @@ export class LspMalformedResponse extends Schema.TaggedErrorClass<LspMalformedRe
 	}
 }
 
-export class LspShutdownError extends Schema.TaggedErrorClass<LspShutdownError>()(
-	"LspShutdownError",
-	{
-		reason: Schema.String,
-	},
-) {
+export class LspShutdownError extends Schema.TaggedError<LspShutdownError>()("LspShutdownError", {
+	reason: Schema.String,
+}) {
 	override get message(): string {
 		return this.reason;
 	}
 }
 
-export class LspRuntimeShuttingDown extends Schema.TaggedErrorClass<LspRuntimeShuttingDown>()(
+export class LspRuntimeShuttingDown extends Schema.TaggedError<LspRuntimeShuttingDown>()(
 	"LspRuntimeShuttingDown",
 	{
 		reason: Schema.String,
@@ -181,7 +175,7 @@ export class LspRuntimeShuttingDown extends Schema.TaggedErrorClass<LspRuntimeSh
 	}
 }
 
-export class LspFilesystemError extends Schema.TaggedErrorClass<LspFilesystemError>()(
+export class LspFilesystemError extends Schema.TaggedError<LspFilesystemError>()(
 	"LspFilesystemError",
 	{
 		operation: Schema.String,
@@ -194,7 +188,7 @@ export class LspFilesystemError extends Schema.TaggedErrorClass<LspFilesystemErr
 	}
 }
 
-export class LspRuntimeError extends Schema.TaggedErrorClass<LspRuntimeError>()("LspRuntimeError", {
+export class LspRuntimeError extends Schema.TaggedError<LspRuntimeError>()("LspRuntimeError", {
 	reason: Schema.String,
 }) {
 	override get message(): string {

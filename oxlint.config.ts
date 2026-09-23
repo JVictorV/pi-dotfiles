@@ -27,7 +27,7 @@ export default defineConfig({
 			// SAFETY: HERDR_ENV is a process-boundary capability flag that must be
 			// re-read on every call; Effect ConfigProvider.fromEnv snapshots env when
 			// the provider is created, which is wrong for /reload and tests.
-			files: ["agent/extensions/herdr-subagent/herdr-cli.ts"],
+			files: ["agent/extensions/herdr-subagent/environment.ts"],
 			rules: { "effect/no-process-env": "off" },
 		},
 		{
@@ -59,6 +59,5 @@ export default defineConfig({
 		"agent/extensions/herdr-agent-state.ts",
 		// Vendored extensions are linted upstream and kept faithful for easy re-sync.
 		"agent/extensions/web-tools/**",
-		"agent/extensions/openai-server-compaction/**",
 	],
 });

@@ -1,3 +1,4 @@
+import type { HerdrConfigurationError, HerdrTransportRequestError } from "@herdr/sdk";
 import { Effect, Predicate, Schema } from "effect";
 
 import { truncateForModel } from "./output";
@@ -5,38 +6,26 @@ import { casesHandled } from "./prelude";
 import type { WorktreeIsolationFailed } from "./worktree";
 
 /** Expected failure of a herdr_subagent action, rejected at the tool boundary. */
-export class HerdrSubagentToolError extends Schema.TaggedErrorClass<HerdrSubagentToolError>()(
+export class HerdrSubagentToolError extends Schema.TaggedError<HerdrSubagentToolError>()(
 	"HerdrSubagentToolError",
 	{ message: Schema.String },
 ) {}
 
 /** The current process is not running inside herdr. */
-export class HerdrNotAvailable extends Schema.TaggedErrorClass<HerdrNotAvailable>()(
+export class HerdrNotAvailable extends Schema.TaggedError<HerdrNotAvailable>()(
 	"HerdrNotAvailable",
 	{
 		message: Schema.String,
 	},
 ) {}
 
-/** A herdr CLI invocation failed or returned unusable output. */
-export class HerdrCommandFailed extends Schema.TaggedErrorClass<HerdrCommandFailed>()(
-	"HerdrCommandFailed",
-	{
-		message: Schema.String,
-		stdout: Schema.String,
-		stderr: Schema.String,
-		code: Schema.NullOr(Schema.Number),
-		timedOut: Schema.Boolean,
-	},
-) {}
-
 /** A tool action was rejected before or between herdr calls. */
-export class ActionRejected extends Schema.TaggedErrorClass<ActionRejected>()("ActionRejected", {
+export class ActionRejected extends Schema.TaggedError<ActionRejected>()("ActionRejected", {
 	message: Schema.String,
 }) {}
 
 /** A spawned subagent attempted to recursively orchestrate subagents without an explicit grant. */
-export class SubagentRecursionDenied extends Schema.TaggedErrorClass<SubagentRecursionDenied>()(
+export class SubagentRecursionDenied extends Schema.TaggedError<SubagentRecursionDenied>()(
 	"SubagentRecursionDenied",
 	{
 		message: Schema.String,
@@ -45,7 +34,7 @@ export class SubagentRecursionDenied extends Schema.TaggedErrorClass<SubagentRec
 ) {}
 
 /** A requested spawn model could not be resolved to an available pi model. */
-export class ModelResolutionFailed extends Schema.TaggedErrorClass<ModelResolutionFailed>()(
+export class ModelResolutionFailed extends Schema.TaggedError<ModelResolutionFailed>()(
 	"ModelResolutionFailed",
 	{
 		message: Schema.String,
@@ -55,7 +44,7 @@ export class ModelResolutionFailed extends Schema.TaggedErrorClass<ModelResoluti
 ) {}
 
 /** A target name, terminal id, or pane id could not be resolved. */
-export class TargetNotResolved extends Schema.TaggedErrorClass<TargetNotResolved>()(
+export class TargetNotResolved extends Schema.TaggedError<TargetNotResolved>()(
 	"TargetNotResolved",
 	{
 		message: Schema.String,
@@ -63,25 +52,26 @@ export class TargetNotResolved extends Schema.TaggedErrorClass<TargetNotResolved
 ) {}
 
 /** Waiting for a subagent did not reach the requested terminal condition. */
-export class WaitTimedOut extends Schema.TaggedErrorClass<WaitTimedOut>()("WaitTimedOut", {
+export class WaitTimedOut extends Schema.TaggedError<WaitTimedOut>()("WaitTimedOut", {
 	message: Schema.String,
 }) {}
 
 /** A runtime file or registry write failed. */
-export class HerdrFileSystemFailed extends Schema.TaggedErrorClass<HerdrFileSystemFailed>()(
+export class HerdrFileSystemFailed extends Schema.TaggedError<HerdrFileSystemFailed>()(
 	"HerdrFileSystemFailed",
 	{ message: Schema.String, cause: Schema.Defect() },
 ) {}
 
 /** Project-local agent approval could not be collected. */
-export class SpawnRejected extends Schema.TaggedErrorClass<SpawnRejected>()("SpawnRejected", {
+export class SpawnRejected extends Schema.TaggedError<SpawnRejected>()("SpawnRejected", {
 	message: Schema.String,
 	cause: Schema.Defect(),
 }) {}
 
 export type HerdrSubagentError =
 	| HerdrNotAvailable
-	| HerdrCommandFailed
+	| HerdrTransportRequestError
+	| HerdrConfigurationError
 	| ActionRejected
 	| SubagentRecursionDenied
 	| ModelResolutionFailed
@@ -90,14 +80,6 @@ export type HerdrSubagentError =
 	| HerdrFileSystemFailed
 	| SpawnRejected
 	| WorktreeIsolationFailed;
-
-export const commandFailureText = (failure: HerdrCommandFailed): string => {
-	const output = [failure.stdout, failure.stderr]
-		.filter((part) => part.trim().length > 0)
-		.join("\n");
-	const suffix = output.trim().length > 0 ? `\n${truncateForModel(output).text}` : "";
-	return `${failure.message}${suffix}`;
-};
 
 const causeText = (cause: unknown): string => {
 	if (Predicate.isError(cause)) {
@@ -121,8 +103,17 @@ const messageWithCause = (message: string, cause: unknown): string =>
 
 export const toToolError = (failure: HerdrSubagentError): HerdrSubagentToolError => {
 	switch (failure._tag) {
-		case "HerdrCommandFailed":
-			return new HerdrSubagentToolError({ message: commandFailureText(failure) });
+		case "HerdrConfigurationError":
+		case "HerdrInvalidInput":
+		case "HerdrTransportError":
+		case "HerdrRequestTimeout":
+		case "HerdrInvalidResponse":
+		case "HerdrUnsupportedProtocol":
+		case "HerdrUnsupportedResult":
+		case "HerdrServerError":
+			return new HerdrSubagentToolError({
+				message: truncateForModel(`[${failure._tag}] ${failure.message}`).text,
+			});
 		case "HerdrNotAvailable":
 		case "ActionRejected":
 		case "SubagentRecursionDenied":

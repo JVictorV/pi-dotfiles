@@ -2,7 +2,7 @@ import { extname, resolve } from "node:path";
 
 import { NodeFileSystem } from "@effect/platform-node";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect, FileSystem, Layer, ManagedRuntime, SynchronizedRef } from "effect";
+import { Deferred, Effect, FileSystem } from "effect";
 
 import { LspClient } from "./client";
 import { LspRuntimeError, lspErrorReason, lspRuntimeShuttingDown, type LspError } from "./errors";
@@ -16,7 +16,6 @@ import {
 	spawnServer,
 	type LspServerDefinition,
 } from "./server";
-import { LspRuntimeSession } from "./runtime-session";
 import { makeRuntimeState, type RuntimeState } from "./runtime-state";
 import type {
 	ClientResolution,
@@ -50,88 +49,39 @@ export class LspRuntime {
 	readonly autoAuthorize: boolean;
 
 	private readonly registry: ReadonlyMap<string, LspServerDefinition>;
-	private readonly state = SynchronizedRef.makeUnsafe(makeRuntimeState());
+	// This instance owns mutable state. Updates are synchronous; Deferreds coordinate async spawns.
+	private readonly state = makeRuntimeState();
 	private readonly onStatusChange?: () => void;
-	private readonly sessionRuntime: ManagedRuntime.ManagedRuntime<LspRuntimeSession, never>;
 
 	constructor(options: RuntimeOptions) {
 		this.cwd = options.cwd;
 		this.autoAuthorize = options.config.autoAuthorize ?? false;
 		this.registry = buildServerRegistry(options.config);
 		this.onStatusChange = options.onStatusChange;
-		this.sessionRuntime = ManagedRuntime.make(
-			Layer.succeed(
-				LspRuntimeSession,
-				LspRuntimeSession.of({
-					serverIds: this.serverIdsEffect(),
-					status: this.statusEffect(),
-					runningClients: (capability) => this.runningClientsEffect(capability),
-					diagnostics: (file) => this.diagnosticsEffect(file),
-					restart: (serverId) => this.restartEffect(serverId),
-					shutdown: this.shutdownEffect(),
-					clientsForFile: (filePath, capability, ctx, options) =>
-						this.clientsForFileEffect(filePath, capability, ctx, options).pipe(
-							Effect.provide(NodeFileSystem.layer),
-						),
-					touchRunningFile: (filePath) =>
-						this.touchRunningFileEffect(filePath).pipe(Effect.provide(NodeFileSystem.layer)),
-				}),
-			),
-		);
-	}
-
-	private currentState(): RuntimeState {
-		return SynchronizedRef.getUnsafe(this.state);
 	}
 
 	private get clients(): RuntimeState["clients"] {
-		return this.currentState().clients;
+		return this.state.clients;
 	}
 
 	private get clientDefinitions(): RuntimeState["clientDefinitions"] {
-		return this.currentState().clientDefinitions;
+		return this.state.clientDefinitions;
 	}
 
 	private get broken(): RuntimeState["broken"] {
-		return this.currentState().broken;
+		return this.state.broken;
 	}
 
 	private get spawning(): RuntimeState["spawning"] {
-		return this.currentState().spawning;
+		return this.state.spawning;
 	}
 
 	private get shuttingDown(): boolean {
-		return this.currentState().shuttingDown;
+		return this.state.shuttingDown;
 	}
 
 	private set shuttingDown(value: boolean) {
-		this.currentState().shuttingDown = value;
-	}
-
-	serverIds(): ReadonlyArray<string> {
-		if (this.currentState().disposed) return Effect.runSync(this.serverIdsEffect());
-		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.serverIds));
-	}
-
-	status(): ReadonlyArray<LspRuntimeStatus> {
-		if (this.currentState().disposed) return Effect.runSync(this.statusEffect());
-		return this.sessionRuntime.runSync(LspRuntimeSession.use((session) => session.status));
-	}
-
-	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
-		if (this.currentState().disposed) return Effect.runSync(this.runningClientsEffect(capability));
-		return this.sessionRuntime.runSync(
-			LspRuntimeSession.use((session) => session.runningClients(capability)),
-		);
-	}
-
-	diagnostics(
-		file?: string,
-	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
-		if (this.currentState().disposed) return Effect.runSync(this.diagnosticsEffect(file));
-		return this.sessionRuntime.runSync(
-			LspRuntimeSession.use((session) => session.diagnostics(file)),
-		);
+		this.state.shuttingDown = value;
 	}
 
 	restartProgram(serverId?: string): Effect.Effect<void, LspError> {
@@ -141,15 +91,7 @@ export class LspRuntime {
 	}
 
 	shutdownProgram(): Effect.Effect<void, LspError> {
-		if (this.shuttingDown) return Effect.succeed(undefined);
-		return this.shutdownEffect().pipe(
-			Effect.flatMap(() =>
-				Effect.sync(() => {
-					this.currentState().disposeRequested = true;
-				}),
-			),
-			Effect.flatMap(() => this.disposeIfIdleEffect()),
-		);
+		return this.shutdownEffect();
 	}
 
 	clientsForFileProgram(
@@ -173,91 +115,54 @@ export class LspRuntime {
 		effect: Effect.Effect<A, LspError, R>,
 	): Effect.Effect<A, LspError, R> {
 		return Effect.suspend((): Effect.Effect<A, LspError, R> => {
-			const state = this.currentState();
-			if (state.disposed) return Effect.fail(lspRuntimeShuttingDown());
-			state.activeOperations += 1;
-			return effect.pipe(
-				Effect.ensuring(
-					Effect.suspend(() => {
-						state.activeOperations -= 1;
-						return this.disposeIfIdleEffect().pipe(Effect.catch(() => Effect.succeed(undefined)));
-					}),
-				),
-			);
+			return this.shuttingDown ? Effect.fail(lspRuntimeShuttingDown()) : effect;
 		});
 	}
 
-	private disposeIfIdleEffect(): Effect.Effect<void, LspError> {
-		return Effect.suspend(() => {
-			const state = this.currentState();
-			if (!state.disposeRequested || state.disposed || state.activeOperations > 0) {
-				return Effect.succeed(undefined);
+	serverIds(): ReadonlyArray<string> {
+		return [...this.registry.keys()].sort();
+	}
+
+	status(): ReadonlyArray<LspRuntimeStatus> {
+		return [...this.clients.values()].map((client) => ({
+			...client.status,
+			displayRoot: displayRoot(client.root, this.cwd),
+		}));
+	}
+
+	runningClients(capability: LspCapability): ReadonlyArray<LocatedClient> {
+		const clients: LocatedClient[] = [];
+		for (const client of this.clients.values()) {
+			const key = clientKey(client.root, client.serverId);
+			const definition = this.clientDefinitions.get(key);
+			if (isBrokenClient(client)) {
+				this.broken.set(key, `${client.label} server is broken.`);
+				continue;
 			}
-			state.disposed = true;
-			return Effect.tryPromise({
-				try: () => this.sessionRuntime.dispose(),
-				catch: (error) =>
-					LspRuntimeError.make({
-						reason: lspErrorReason(error, "failed to dispose LSP runtime"),
-					}),
-			});
-		});
+			if (definition === undefined || !definition.capabilities[capability]) continue;
+			clients.push({ client, definition });
+		}
+		return clients;
 	}
 
-	private serverIdsEffect(): Effect.Effect<ReadonlyArray<string>> {
-		return Effect.sync(() => [...this.registry.keys()].sort());
-	}
-
-	private statusEffect(): Effect.Effect<ReadonlyArray<LspRuntimeStatus>> {
-		return Effect.sync(() =>
-			[...this.clients.values()].map((client) => ({
-				...client.status,
-				displayRoot: displayRoot(client.root, this.cwd),
-			})),
-		);
-	}
-
-	private runningClientsEffect(
-		capability: LspCapability,
-	): Effect.Effect<ReadonlyArray<LocatedClient>> {
-		return Effect.sync(() => {
-			const clients: LocatedClient[] = [];
-			for (const client of this.clients.values()) {
-				const key = clientKey(client.root, client.serverId);
-				const definition = this.clientDefinitions.get(key);
-				if (isBrokenClient(client)) {
-					this.broken.set(key, `${client.label} server is broken.`);
-					continue;
-				}
-				if (definition === undefined || !definition.capabilities[capability]) continue;
-				clients.push({ client, definition });
-			}
-			return clients;
-		});
-	}
-
-	private diagnosticsEffect(
+	diagnostics(
 		file?: string,
-	): Effect.Effect<
-		ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>>
-	> {
-		return Effect.sync(() => {
-			const result = new Map<
-				string,
-				ReadonlyArray<import("vscode-languageserver-types").Diagnostic>
-			>();
-			const resolvedFile =
-				file === undefined
-					? undefined
-					: resolve(this.cwd, file.startsWith("@") ? file.slice(1) : file);
-			for (const client of this.clients.values()) {
-				for (const [diagnosticFile, diagnostics] of client.diagnostics.entries()) {
-					if (resolvedFile !== undefined && diagnosticFile !== resolvedFile) continue;
-					result.set(diagnosticFile, [...(result.get(diagnosticFile) ?? []), ...diagnostics]);
-				}
+	): ReadonlyMap<string, ReadonlyArray<import("vscode-languageserver-types").Diagnostic>> {
+		const result = new Map<
+			string,
+			ReadonlyArray<import("vscode-languageserver-types").Diagnostic>
+		>();
+		const resolvedFile =
+			file === undefined
+				? undefined
+				: resolve(this.cwd, file.startsWith("@") ? file.slice(1) : file);
+		for (const client of this.clients.values()) {
+			for (const [diagnosticFile, diagnostics] of client.diagnostics.entries()) {
+				if (resolvedFile !== undefined && diagnosticFile !== resolvedFile) continue;
+				result.set(diagnosticFile, [...(result.get(diagnosticFile) ?? []), ...diagnostics]);
 			}
-			return result;
-		});
+		}
+		return result;
 	}
 
 	private restartEffect(serverId?: string): Effect.Effect<void, LspError> {

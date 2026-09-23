@@ -26,6 +26,7 @@ import {
   reloadRuntimeCommandName,
 } from './skill-invocation'
 import { startedMessageAction } from './message-lifecycle'
+import { ReloadRuntime } from './reload-runtime'
 
 const MAXIMUM_BOOTSTRAP_LINE_BYTES = 64 * 1024
 const MAXIMUM_RELAY_COMMAND_LINE_BYTES = 16 * 1024 * 1024
@@ -68,6 +69,7 @@ type RelayUserCommand =
 
 type RelayCommand =
   | RelayUserCommand
+  | { readonly command: 'ReloadRuntime'; readonly operationId: string; readonly paneId: string }
   | { readonly command: 'Abort'; readonly operationId: string; readonly paneId: string }
   | { readonly command: 'SetModel'; readonly model: { readonly id: string; readonly provider: string }; readonly operationId: string; readonly paneId: string }
   | { readonly command: 'SetThinkingLevel'; readonly operationId: string; readonly paneId: string; readonly thinkingLevel: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
@@ -407,6 +409,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
   let activeSessionPaths: ReadonlyArray<string> = []
   let lastAssistantUpdateAt = 0
   let localEventCount = 0
+  const toolInputs = new Map<string, ReturnType<typeof serializeToolInput>>()
   const writeInputs = new Map<string, {
     completionScheduled: boolean
     readonly generation: number
@@ -522,6 +525,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
         },
       }),
       pending: ctx.hasPendingMessages(),
+      reloadRuntime: true,
       ...(sessionName === undefined ? {} : { sessionName: boundedText(sessionName, 256, activeSessionPaths) }),
       skills,
       thinkingLevel: pi.getThinkingLevel(),
@@ -587,6 +591,19 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
       reportCommand(command, 'rejected', 'Pi is already handling a web command.')
       return
     }
+    if (command.command === 'ReloadRuntime') {
+      const result = reloadRuntime.request(ctx, compactionInFlight, () => {
+        commandInFlight = true
+        reportCommand(command, 'ok')
+      })
+      if (result !== 'requested') {
+        reportCommand(command, 'rejected', result === 'busy'
+          ? 'Pi must be idle with no compaction or queued messages before reload.'
+          : 'The Pi reload command is unavailable.')
+      }
+      // Dispatch can replace the runtime synchronously. Do not publish or mutate the old context.
+      return
+    }
     if (
       (command.command === 'Prompt' || command.command === 'Steer' || command.command === 'FollowUp') &&
       command.images !== undefined &&
@@ -607,7 +624,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     }
   }
 
-  async function executeCommand(command: RelayCommand, ctx: ExtensionContext): Promise<void> {
+  async function executeCommand(command: Exclude<RelayCommand, { readonly command: 'ReloadRuntime' }>, ctx: ExtensionContext): Promise<void> {
     if (command.command === 'RequestSnapshot') {
       publishSnapshot(ctx)
       return
@@ -624,6 +641,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
         throw new Error('Pi is idle.')
       }
       pi.sendUserMessage(await expandedUserMessageContent(command), {
+        expandPromptTemplates: isReloadInvocation(command),
         deliverAs: command.command === 'Steer' ? 'steer' : 'followUp',
       })
       return
@@ -632,7 +650,9 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
       throw new Error('Pi is busy.')
     }
     if (command.command === 'Prompt') {
-      pi.sendUserMessage(await expandedUserMessageContent(command))
+      pi.sendUserMessage(await expandedUserMessageContent(command), {
+        expandPromptTemplates: isReloadInvocation(command),
+      })
       return
     }
     if (command.command === 'SetModel') {
@@ -712,6 +732,14 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     })
   }
 
+  function isReloadInvocation(command: RelayUserCommand): boolean {
+    // Do not opt arbitrary browser text, skills, or uploaded content into command dispatch.
+    return command.content === `/${reloadRuntimeCommandName}` &&
+      command.files === undefined && command.images === undefined &&
+      pi.getCommands().some((candidate) =>
+        candidate.source === 'extension' && candidate.name === reloadRuntimeCommandName)
+  }
+
   async function expandedUserMessageContent(
     command: RelayUserCommand,
   ): Promise<string | Array<RelayImage | { readonly text: string; readonly type: 'text' }>> {
@@ -736,12 +764,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     return `<web-herdr-files>\nThe following user-uploaded files are available locally:\n${manifest}\n</web-herdr-files>${content.length === 0 ? '' : `\n\n${content}`}`
   }
 
-  pi.registerCommand(reloadRuntimeCommandName, {
-    description: 'Reload Pi extensions, skills, prompts, themes, and context files',
-    handler: async (_args, ctx) => {
-      await ctx.reload()
-    },
-  })
+  const reloadRuntime = new ReloadRuntime(pi)
 
   pi.on('session_start', async (_event, ctx) => {
     connectionGeneration += 1
@@ -749,6 +772,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     client?.stop({ releaseUploads: true })
     client = undefined
     activeSessionPaths = []
+    toolInputs.clear()
     writeInputs.clear()
     compactionInFlight = false
     if (bootstrapTimer !== undefined) {
@@ -891,6 +915,8 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     })
   })
   pi.on('tool_execution_end', (event) => {
+    const input = toolInputs.get(event.toolCallId)
+    toolInputs.delete(event.toolCallId)
     const result = asRecord(event.result)
     const detail = result?.content === undefined
       ? undefined
@@ -915,6 +941,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
         id: boundedText(event.toolCallId, 120),
         isError: event.isError,
         name: boundedText(event.toolName, 128),
+        ...(input === undefined ? {} : { input }),
         ...(readResult === undefined ? {} : { readResult }),
         ...(searchResult === undefined ? {} : { searchResult }),
         status: 'complete',
@@ -931,57 +958,14 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     }
   })
   pi.on('tool_result', (event) => {
-    const writeResult = extractWriteResult(
-      event.toolName,
-      event.input,
-      event.isError ? 'unavailable' : 'pending',
-      activeSessionPaths,
-    )
-    const input = event.toolName.toLocaleLowerCase('en-US') === 'write'
-      ? undefined
-      : serializeToolInput(event.input, activeSessionPaths)
-    let effectiveWriteResult = writeResult
+    // Later handlers can still patch the result. Capture inputs here, but finalize
+    // only from tool_execution_end, which receives the fully patched result.
+    const writeResult = extractWriteResult(event.toolName, event.input, 'pending', activeSessionPaths)
     if (writeResult !== undefined) {
       rememberWriteInput(event.toolCallId, writeResult.path, writeResult.size, event.input)
-      const writeToolId = relayToolId(event.toolCallId)
-      const writeInput = writeInputs.get(writeToolId)
-      if (writeInput !== undefined) {
-        if (event.isError) writeInput.state = 'unavailable'
-        else if (!writeInput.completionScheduled) writeInput.state = 'pending'
-        if (event.isError) client?.controlWriteOutput(writeToolId, 'discard')
-        effectiveWriteResult = {
-          path: writeInput.path,
-          size: writeInput.size,
-          state: writeInput.state,
-        }
-      }
     }
-    const detail = extractToolDetail(event.content, activeSessionPaths)
-    const editDiff = extractEditDiff(event.toolName, event.details, activeSessionPaths)
-    const readResult = extractReadResult(event.toolName, event.content, event.details, activeSessionPaths)
-    const searchResult = extractSearchResult(event.toolName, event.content, event.details, activeSessionPaths)
-    publish('tool', {
-      tool: {
-        detail: detail.text,
-        detailTruncated: detail.truncated,
-        ...(editDiff === undefined ? {} : { editDiff }),
-        id: boundedText(event.toolCallId, 120),
-        ...(input === undefined ? {} : { input }),
-        isError: event.isError,
-        name: boundedText(event.toolName, 128),
-        ...(readResult === undefined ? {} : { readResult }),
-        ...(searchResult === undefined ? {} : { searchResult }),
-        status: 'complete',
-        timestamp: Date.now(),
-        ...(effectiveWriteResult === undefined ? {} : { writeResult: effectiveWriteResult }),
-      },
-    })
-    if (!event.isError) {
-      scheduleWriteCompletion(
-        event.toolCallId,
-        event.toolName,
-        detail.text,
-      )
+    if (event.toolName.toLocaleLowerCase('en-US') !== 'write') {
+      toolInputs.set(event.toolCallId, serializeToolInput(event.input, activeSessionPaths))
     }
   })
   pi.on('session_shutdown', async () => {
@@ -993,6 +977,7 @@ export default function webHerdrRelay(pi: ExtensionAPI): void {
     client?.stop({ releaseUploads: true })
     client = undefined
     activeSessionPaths = []
+    toolInputs.clear()
     writeInputs.clear()
   })
 }
@@ -1083,7 +1068,7 @@ function parseCommand(value: unknown): RelayCommand | undefined {
       ...(images === undefined ? {} : { images }),
     }
   }
-  if (record.command === 'Abort' || record.command === 'RequestSnapshot') {
+  if (record.command === 'Abort' || record.command === 'RequestSnapshot' || record.command === 'ReloadRuntime') {
     return hasExactKeys(record, ['command', 'operationId', 'paneId'])
       ? { ...base, command: record.command }
       : undefined

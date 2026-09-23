@@ -15,7 +15,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const NotFoundError = Schema.Struct({ code: Schema.Literal("ENOENT") });
-const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeNotFoundError = Schema.decodeUnknownOption(NotFoundError);
 
 const isNotFoundPlatformError = (error: PlatformError): boolean =>

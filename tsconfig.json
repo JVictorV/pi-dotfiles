@@ -30,9 +30,5 @@
 	// tsconfigs and are typechecked through the root `typecheck` script. node_modules
 	// must be listed explicitly because specifying `exclude` overrides TypeScript's
 	// default excludes.
-	"exclude": [
-		"node_modules",
-		"agent/extensions/web-tools",
-		"agent/extensions/openai-server-compaction"
-	]
+	"exclude": ["node_modules", "agent/extensions/web-tools"]
 }

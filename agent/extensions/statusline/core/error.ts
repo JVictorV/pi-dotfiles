@@ -4,7 +4,7 @@ const ErrorMessage = Schema.Struct({ message: Schema.String });
 const decodeErrorMessageOption = Schema.decodeUnknownOption(ErrorMessage);
 
 /** Typed failure for status-line subprocess and boundary defects. */
-export class StatusLineError extends Schema.TaggedErrorClass<StatusLineError>()("StatusLineError", {
+export class StatusLineError extends Schema.TaggedError<StatusLineError>()("StatusLineError", {
 	source: Schema.String,
 	reason: Schema.String,
 }) {}

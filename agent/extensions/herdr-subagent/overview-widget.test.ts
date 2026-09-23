@@ -213,7 +213,6 @@ describe("herdr subagent overview widget poller", () => {
 
 	test("poke refreshes immediately instead of waiting out the idle poll", async () => {
 		const { agentDir } = await startHarness();
-		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const pi = makeFakePi();
 		activePi = pi;
@@ -240,7 +239,6 @@ describe("herdr subagent overview widget poller", () => {
 	test("renders active registry entries matched to fake herdr agents", async () => {
 		const { agentDir } = await startHarness();
 		await writeEntry(agentDir, { name: "worker-a", terminalId: "term-subagent" });
-		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const pi = makeFakePi();
 		activePi = pi;
@@ -337,7 +335,6 @@ describe("herdr subagent overview widget poller", () => {
 		await writeEntry(agentDir, { name: "review-a", terminalId: "term-subagent" });
 		const statusSequence = path.join(root, "status-sequence.txt");
 		await writeFile(statusSequence, "blocked\nblocked\nblocked\n", "utf8");
-		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "blocked");
 		setEnv("FAKE_HERDR_AGENT_STATUS_SEQUENCE_FILE", statusSequence);
 		const pi = makeFakePi();
@@ -378,7 +375,6 @@ describe("herdr subagent overview widget poller", () => {
 	test("clears and stops polling on session shutdown", async () => {
 		const { agentDir } = await startHarness();
 		await writeEntry(agentDir, { name: "worker-a", terminalId: "term-subagent" });
-		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const pi = makeFakePi();
 		activePi = pi;
@@ -398,7 +394,6 @@ describe("herdr subagent overview widget poller", () => {
 	test("keeps polling after transient herdr agent-list failures", async () => {
 		const { agentDir } = await startHarness();
 		await writeEntry(agentDir, { name: "worker-a", terminalId: "term-subagent" });
-		setEnv("FAKE_HERDR_AGENT_LIST_ENABLE", "1");
 		setEnv("FAKE_HERDR_AGENT_STATUS", "working");
 		const pi = makeFakePi();
 		activePi = pi;

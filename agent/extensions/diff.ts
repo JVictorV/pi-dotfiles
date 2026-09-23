@@ -14,7 +14,7 @@ import { Config, ConfigProvider, Effect, Option, Schema } from "effect";
 const HERDR_TIMEOUT_MS = 10_000;
 const MAX_DIAGNOSTIC_LENGTH = 1_000;
 
-class DiffCommandError extends Schema.TaggedErrorClass<DiffCommandError>()("DiffCommandError", {
+class DiffCommandError extends Schema.TaggedError<DiffCommandError>()("DiffCommandError", {
 	operation: Schema.String,
 	message: Schema.String,
 	cause: Schema.Defect(),

@@ -200,8 +200,17 @@ const builtinServers: ReadonlyArray<LspServerDefinition> = [
 		installHint: "Install with: npm install -D typescript typescript-language-server",
 		initializationOptions: ({ root, cwd }) =>
 			Effect.gen(function* () {
-				const tsserver = yield* resolveNodeModuleFile("typescript/lib/tsserver.js", root, cwd);
-				return tsserver ? { tsserver: { path: dirname(tsserver) } } : undefined;
+				// TypeScript 7 ships the native compiler, but not the JS tsserver required by this server.
+				// fallbackPath runs after the language server's workspace/ancestor/Yarn SDK discovery.
+				const agentRoot = dirname(getAgentDir());
+				const tsserver =
+					(yield* resolveNodeModuleFile("typescript-tsserver/lib/tsserver.js", root, cwd)) ??
+					(yield* resolveNodeModuleFile(
+						"typescript-tsserver/lib/tsserver.js",
+						agentRoot,
+						agentRoot,
+					));
+				return tsserver ? { tsserver: { fallbackPath: dirname(tsserver) } } : undefined;
 			}),
 	}),
 	commandServer({
